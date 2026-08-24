@@ -1,0 +1,120 @@
+# goswami-clement-swi — Goswami & Clement (2007) laboratory salt-wedge SWI.
+# A frehg2 (not SERGHEI) validation case for VARIABLE-DENSITY subsurface transport
+# (groundwater + transport + density coupling, no surface module). Where Henry
+# (1964) is the semi-analytical benchmark, Goswami & Clement is the standard
+# *laboratory* benchmark: a homogeneous glass-bead sand tank with a controlled
+# freshwater head landward and a saltwater head seaward, whose steady salt-wedge
+# toe position was measured with image analysis and is widely used to validate
+# density-dependent codes (SEAWAT, SUTRA, FEFLOW, ...).
+#
+# Geometry (frehg2 vertical-slice convention): the 0.53 m (y, landward -> seaward)
+# x 0.26 m (z) flow chamber, nx=1, ny=53, nz=26 (dy=dz=0.01 m). Homogeneous,
+# fully saturated (confined: both reservoir heads sit above the tank top).
+#
+# Goswami & Clement -> frehg2 parameter mapping:
+#   - Ks = 1.09e-2 m/s, porosity theta_s = 0.385 (their glass beads, d50~1.1 mm).
+#   - Saltwater density ratio drho/rho ~ 0.026 (NaCl, rho_s ~ 1026 kg/m3). frehg2's
+#     baroclinic law r_rho = 1 + beta_rho*s with beta_rho hardwired at 7.44e-4
+#     gives the matching seawater surrogate s_sea = 0.026/7.44e-4 = 35 (used below).
+#   - Boundaries are constant-head reservoirs: seaward (y+) saltwater head, inland
+#     (y-) freshwater head slightly higher, driving net fresh outflow while density
+#     drives the wedge. Seawater enters at y+ because the transport module wires a
+#     prescribed scalar ghost only on the y+ side (SubsurfaceTransport.cpp
+#     sideCodeYp); freshwater enters inland at s = 0 (= initial), so the missing
+#     y- injection path is harmless.
+#
+# Reference:
+#   Goswami, R. R. & Clement, T. P. (2007), Laboratory-scale investigation of
+#   saltwater intrusion dynamics, Water Resour. Res., 43(4), W04418,
+#   doi:10.1029/2006WR005151. The measured metric is the steady 0.5-isochlor toe
+#   length from the saltwater boundary (their SS runs, ~0.24-0.26 m order).
+#
+# CAVEATS (same as henry-saltwater-intrusion): (1) beta_rho and the viscosity ratio
+# are compile-time constants, so the density contrast is set purely through s_sea.
+# (2) The dispersion term acts on volumetric face fluxes (face-area factor not
+# divided out), so this case validates that frehg2 forms the Goswami-Clement steady
+# wedge with the right character and toe order, not a to-the-mm isochlor.
+simulation:
+  id: goswami-clement-swi
+  title: Goswami-Clement (2007) laboratory saltwater-intrusion wedge
+
+domain:
+  nx: 1
+  ny: 53
+  nz: 26
+  dx: 1.0
+  dy: 0.01
+  dz: 0.01
+  dz_stretch: 1.0
+  bottom_elevation: {constant: 0.0}
+  follow_terrain: false
+
+time:
+  dt: 2.0
+  t_end: 16000
+  output_interval: 1000
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.2
+    dt_min: 0.05
+    dt_max: 2.0
+    courant_max: 2.0
+  specific_storage: 1.0e-05
+  density_coupling: {enabled: true}
+
+soil:
+  types:
+    - name: glass-beads
+      ksx: 1.09e-02
+      ksy: 1.09e-02
+      ksz: 1.09e-02
+      theta_s: 0.385
+      theta_r: 0.0
+      vg_alpha: 5.0
+      vg_n: 2.0
+      aev: 0.0
+  map: {constant: glass-beads}
+
+initial_conditions:
+  groundwater:
+    head: {constant: 0.28}         # above tank top -> confined, fully saturated, fresh
+  transport:
+    groundwater: {constant: 0.0}
+
+boundary_conditions:
+  - name: seaward-head
+    # y+ (seaward): saltwater reservoir head. GW-only run, configured eta applies.
+    region: {polygon: [[-1.0, 0.525], [1.0, 0.525], [1.0, 1.0], [-1.0, 1.0]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 0.27}}
+  - name: seaward-salinity
+    region: {polygon: [[-1.0, 0.525], [1.0, 0.525], [1.0, 1.0], [-1.0, 1.0]]}
+    target: groundwater_side
+    kind: scalar_value
+    value: {constant: 35.0}        # s_sea for drho/rho ~ 0.026
+  - name: inland-head
+    # y- (landward): freshwater reservoir head, slightly higher -> net fresh outflow.
+    region: {polygon: [[-1.0, -1.0], [1.0, -1.0], [1.0, 0.005], [-1.0, 0.005]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 0.2835}}
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 1.0e-06}
+  bounds: {min: 0.0, max: 35.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]
+    transport: [concentration]

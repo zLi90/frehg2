@@ -1,0 +1,36 @@
+# Doxyfile — Frehg2 API documentation (plan §12).
+# WARN_AS_ERROR + WARN_IF_UNDOCUMENTED: undocumented public API fails CI
+# (plan §11.2). Run from the repository root: doxygen docs/Doxyfile
+
+PROJECT_NAME           = "Frehg2"
+PROJECT_BRIEF          = "Coupled surface-water / groundwater / transport model"
+OUTPUT_DIRECTORY       = docs/api
+INPUT                  = src
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.cpp
+
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+HIDE_UNDOC_MEMBERS     = NO
+
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_AS_ERROR          = FAIL_ON_WARNINGS
+QUIET                  = YES
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HAVE_DOT               = NO
+
+JAVADOC_AUTOBRIEF      = NO
+MARKDOWN_SUPPORT       = YES
+BUILTIN_STL_SUPPORT    = YES
+
+# Compile-time provenance macros injected by CMake.
+PREDEFINED             = FREHG_VERSION="\"0.1.0\"" \
+                         FREHG_GIT_SHA="\"doc\"" \
+                         KOKKOS_LAMBDA=[=]
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES

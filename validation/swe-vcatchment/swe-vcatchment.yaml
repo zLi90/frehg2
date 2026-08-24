@@ -1,0 +1,79 @@
+# swe-vcatchment — surface-only V-catchment overland flow (Di Giammarco
+# analytical). Frozen v2 schema, authored from the SERGHEI inputs
+# (Hydrology/Analytical/vcatchment/input). NOTE this is the SURFACE-ONLY
+# overland-flow benchmark, distinct from the coupled tilted-V case
+# b5-vcatchment.
+# Notes:
+#   - 162x100 grid, dx = dy = 10 m (1620 m x 1000 m). Two side planes drain into
+#     a central channel that slopes to a single outlet at the south edge
+#     (lowest bed ~0.096 m at x~805 m, j=0 after row-reversal).
+#   - Genuine 2D relief: the SERGHEI DEM and roughness rasters are north-up, so
+#     their data rows were REVERSED when copied (frehg2 first data row = j=0).
+#     The roughness rows happen to be y-invariant, but were reversed anyway for
+#     consistency. Raster YLLCORNER (-0.2 m) is inert; grid origin is (0,0).
+#   - Spatially-variable Manning n: SERGHEI roughness "file" (0.015 on the
+#     planes, 0.15 in the central channel) -> friction coefficient file.
+#   - Rain: 10.80 mm/h for 0-5400 s then dry, converted to m/s (3.0e-6) as a
+#     series (input/rain.dat); the 1-second step down mirrors the SERGHEI pulse.
+#   - Infiltration "none" in SERGHEI -> no subsurface loss (SWE-only run).
+#   - Outer BCtype REFLECTIVE (closed) except the outlet: SERGHEI bctype 5 free
+#     outflow -> kind outflow polygon spanning the outlet slot at the south edge
+#     (x 794-824, the 3 channel cells; y set to capture the j=0 row).
+#   - Dry start: SERGHEI initialMode "dry" -> eta far below the bed everywhere.
+#   - SERGHEI dryDepth = 0 is below the schema minimum; min_depth = 1e-6 used.
+#   - dt = 2.0 s: overland velocities are small (~0.3 m/s) over dx = 10 m, so
+#     the advective CFL is far from binding; free surface semi-implicit.
+# Caveat: frehg2's surface solver is SEMI-IMPLICIT vs SERGHEI's explicit
+# scheme; for this subcritical overland-flow case the difference is minor.
+simulation:
+  id: swe-vcatchment
+  title: Surface-only V-catchment overland flow
+
+domain:
+  nx: 162
+  ny: 100
+  nz: 1
+  dx: 10.0
+  dy: 10.0
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 2.0
+  t_end: 35000
+  output_interval: 120
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {file: input/roughness.dat}   # SERGHEI roughness file
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-06                    # SERGHEI dryDepth 0 -> schema minimum
+  wetting_face_depth: 1.0e-06
+  rainfall:
+    series: {file: input/rain.dat}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: -10.0}             # dry start
+
+boundary_conditions:
+  - name: outlet
+    region: {polygon: [[794.0, -1.0], [794.0, 6.0], [824.0, 6.0], [824.0, -1.0]]}
+    target: surface
+    kind: outflow                      # SERGHEI bctype 5 free outflow, south
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: outlet, i: 80, j: 0, variables: [depth, uu, vv]}

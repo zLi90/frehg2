@@ -1,0 +1,102 @@
+# re-road-embankment — Chavez-Negrete et al. (2018) GFDM-referenced
+# infiltration into a road embankment.
+# Frozen v2 schema, converted from the SERGHEI-RE reference deck
+#   testcases/serghei-re-tests/case5-2d-infiltration-into-a-road-embankment/input/
+#   (parameters/subsurface/vg/gwbc/soilID/wt/headbot/polygon*.input; dem.input).
+# Notes:
+#   - 90 x 1 x 50 vertical x-z slice, dx=dy=0.1 m (dem.input cellsize),
+#     dz = 0.1 m, 5 m tall (subsurface.input height 5, dz_base 0.1, ndepth 50);
+#     domain is 9.0 m wide.
+#   - homogeneous soil (vg.input); aev 0; specific_storage 0.
+#   - GEOMETRY CAVEAT: the SERGHEI deck uses a sloped / terrain-following
+#     embankment mesh (dem.input surface drops 0.0 -> -3.0 m from x=3 m
+#     onward). frehg2's rectilinear grid approximates it as a flat box
+#     (follow_terrain false); bottom_elevation -5.0 places the box at
+#     z in [-5, 0] with the flat-approach surface at z = 0.
+#   - initial condition: initialMode 4 (water-table file). wt.input is a
+#     uniform -5.0 m water-table elevation -> water_table constant -5.0
+#     (a flat table at the box bottom; the column starts unsaturated above it).
+#   - top BC: gwbc dir 6, bctype 2 (Dirichlet head), bcvals 1e-5 m (thin
+#     water layer) over the infiltrating strip polygontop x in [1.99, 9.01] m
+#     on groundwater_top.
+#   - bottom BC: gwbc dir 5, bctype 2 (Dirichlet head) on groundwater_bottom.
+#     headbot.input is hydrostatic from the original water table: over the
+#     sloped bottom it reads 0 -> 3 m, and headbot(i) = -5.0 - z_bottom(i)
+#     recovers a single water-table elevation eta = -5.0 m. In the flat box
+#     the bottom face sits at absolute z = -5.0, so that water table gives a
+#     uniform pressure head of 0 at the bottom face -> constant head 0.
+#     frehg2 forbids hydrostatic on groundwater_bottom (side-only) and offers
+#     no per-column value form, so the x-variation of headbot (a pure terrain
+#     effect) is approximated away here (see geometry caveat).
+#   - gw_scheme 2 (Picard) in the source deck -> pca (frehg2's sole scheme).
+#   - DURATION: t_end 129600 s = 1.5 d (parameters.input). surface time.dt is
+#     the outer loop step; the adaptive dtg controller spans [0.01, 10] s.
+simulation:
+  id: re-road-embankment
+  title: Chavez-Negrete et al. (2018) infiltration into a road embankment
+
+domain:
+  nx: 90
+  ny: 1
+  nz: 50
+  dx: 0.1
+  dy: 0.1
+  dz: 0.1
+  dz_stretch: 1.0
+  bottom_elevation: {constant: -5.0}
+  follow_terrain: false
+
+time:
+  dt: 10.0
+  t_end: 129600
+  output_interval: 8640
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: false
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.01
+    dt_min: 0.01
+    dt_max: 10.0
+    courant_max: 2.0
+  specific_storage: 0.0
+  reallocation_surplus: redistribute
+
+soil:
+  types:
+    - name: embankment
+      ksx: 2.89e-06
+      ksy: 2.89e-06
+      ksz: 2.89e-06
+      theta_s: 0.37
+      theta_r: 0.04
+      vg_alpha: 0.873
+      vg_n: 1.57
+      aev: 0.0
+  map: {constant: embankment}
+
+initial_conditions:
+  groundwater:
+    water_table: {constant: -5.0}
+
+boundary_conditions:
+  - name: infiltration-strip
+    region: {polygon: [[1.99, -0.01], [9.01, -0.01], [9.01, 0.11], [1.99, 0.11]]}
+    target: groundwater_top
+    kind: head
+    value: {constant: 1.0e-05}
+  - name: water-table-bottom
+    region: {polygon: [[-0.01, -0.01], [9.01, -0.01], [9.01, 0.11], [-0.01, 0.11]]}
+    target: groundwater_bottom
+    kind: head
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]

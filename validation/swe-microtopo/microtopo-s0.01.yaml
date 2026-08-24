@@ -1,0 +1,74 @@
+# swe-microtopo / S0.01 (WL1.7357, A0.01) — rainfall runoff over synthetic
+# microtopography, slope 1%. Frozen v2 schema, authored from the SERGHEI inputs
+# (Hydrology/Analytical/microtopo/S0.01_WL1.7357_A0.01/input). Shares README
+# with the S0.02 and S0.05 variants.
+# Notes:
+#   - 92x35 grid, dx = dy = 0.086957 m (8.0 m x 3.04 m). Bed carries sinusoidal
+#     microtopography on a mild 1% slope draining to the east outlet.
+#   - Genuine 2D relief: SERGHEI DEM is north-up, so its data rows were REVERSED
+#     when copied to input/dem_s0.01.dat (frehg2 first data row = j=0).
+#   - Manning friction n = 0.055 (uniform).
+#   - Rain: 7.5 mm/h for 0-1800 s then dry, converted to m/s (2.0833e-6) as a
+#     series (input/rain_s0.01.dat); 1-second step down. (The SERGHEI S0.01 file
+#     lists only two points relying on its stepwise hold; the constant-pulse
+#     idiom is used here since frehg2 series are piecewise-linear.)
+#   - Infiltration "none" -> SWE-only run.
+#   - Outer BCtype REFLECTIVE (closed) except the east outlet: SERGHEI bctype 5
+#     free outflow -> kind outflow polygon spanning the full east edge.
+#   - Dry start: SERGHEI initialMode "dry" -> eta far below the bed.
+#   - dt = 0.1 s: shallow runoff, small cells (dx ~ 0.087 m); free surface
+#     semi-implicit, advection explicit.
+# Caveat: frehg2's surface solver is SEMI-IMPLICIT vs SERGHEI's explicit
+# scheme; for this subcritical rainfall-runoff case the difference is minor.
+simulation:
+  id: swe-microtopo-s0.01
+  title: Rainfall runoff over microtopography (slope 1%)
+
+domain:
+  nx: 92
+  ny: 35
+  nz: 1
+  dx: 0.086957
+  dy: 0.086957
+  dz: 1.0
+  bottom_elevation: {file: input/dem_s0.01.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.1
+  t_end: 8000
+  output_interval: 60
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.055}     # SERGHEI roughness
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-03                    # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-03
+  rainfall:
+    series: {file: input/rain_s0.01.dat}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: -10.0}             # dry start
+
+boundary_conditions:
+  - name: outlet
+    region: {polygon: [[7.95, -0.1], [7.95, 3.1], [8.05, 3.1], [8.05, -0.1]]}
+    target: surface
+    kind: outflow                      # SERGHEI bctype 5 free outflow, east
+
+output:
+  filename: out/s0.01.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: outlet, i: 91, j: 17, variables: [depth, uu]}

@@ -1,0 +1,21 @@
+# b1-sw regression tolerances (plan §9 b1).
+#
+# Rationale: identical algorithm to legacy — deviations come only from
+# PETSc CG+ICC vs LASPack CG+SSOR at rtol 1e-8 accumulated over 3600 steps,
+# plus the golden sampling quirk: legacy's output trigger
+# (|t - last - dt_out| <= dt, solve.c:121) fires one step early, so a golden
+# labeled <t> holds the state at t - dt. Both effects together measure
+# ~2e-4 m against the gate's 5e-4 m floor (achieved errors are printed by
+# compare_h5.py on every run).
+variables:
+  eta:   {abs_floor: 5.0e-4, rel: 0.01}
+  depth: {abs_floor: 5.0e-4, rel: 0.01}
+  uu:    {abs_floor: 1.0e-3, rel: 0.02}
+  vv:    {abs_floor: 1.0e-3, rel: 0.02}
+allowed_exceedance_fraction: 0.0
+
+# Cumulative mass-balance error <= 0.1 % of the total rainfall volume,
+# evaluated from the /monitor/mass_audit table:
+#   |dV + outflow - rain + evaporation - bc_inflow| / rain_total
+mass_balance:
+  max_error_fraction_of_rain: 1.0e-3

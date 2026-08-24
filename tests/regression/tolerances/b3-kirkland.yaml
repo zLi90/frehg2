@@ -1,0 +1,14 @@
+# b3-kirkland gate tolerances (plan §9): the reference is the digitized
+# h = 0 / h = -400 pressure-head contour points (2 soils, Kirkland et al.
+# 1992 via the SERGHEI-style reference inputs; parsed from the legacy
+# makeplot.py — goldens are never committed). Digitization itself carries
+# ~1-cell error, and the reference scheme is an iterated Picard solver, so
+# the gate is metric-based rather than element-wise.
+# Measured on 2026-07-26: h=0 max 0.160 m rms 0.073 m; h=-400 max 0.170 m
+# rms 0.088 m; mass-balance error 0.3 % of the injected volume.
+contours:
+  levels: [0.0, -400.0]
+  max_distance_m: 0.2      # every digitized point within 2 cell widths
+  max_rms_m: 0.1           # RMS over all points within 1 cell width
+mass_balance:
+  max_error_fraction_of_inflow: 0.005   # internal mass balance <= 0.5 %

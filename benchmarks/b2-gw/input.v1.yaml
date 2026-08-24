@@ -1,0 +1,71 @@
+# b2-gw, v1/experimental YAML dialect (archival; P17).
+# Pre-frozen schema upgraded by tools/migrate_yaml_v1_to_v2 to the frozen v2 form
+# (see benchmarks/b2-gw/b2-gw.yaml). Exercises grid.* -> domain.*, time.* renames,
+# io.dir -> output.filename, and soil.uniform -> frozen soil.types[].
+simulation:
+  id: b2-gw
+  title: Converted from legacy input (warri)
+  mode: groundwater
+
+grid:
+  nx: 1
+  ny: 1
+  nz: 100
+  dx: 1.0
+  dy: 1.0
+  dz: 0.01
+  dz_incre: 1.0
+  bot_z: -1.0
+  follow_terrain: false
+
+time:
+  dt: 0.0001
+  Tend: 46800
+  max_step: 100
+  dt_out: 11700
+
+modules:
+  surface_water: false
+  groundwater: true
+  solute: false
+
+groundwater:
+  solver: pca
+  full_3d: false
+  adaptive_dt: true
+  use_corrector: true
+  post_allocate: false
+  use_vg: true
+  use_mvg: false
+  air_entry_value: -0.02
+  dt_max: 20.0
+  dt_min: 0.01
+  co_max: 2
+  specific_storage: 1.0e-05
+  bc_type_gw:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 1
+
+soil:
+  uniform: true
+  theta_s: 0.33
+  theta_r: 0.0
+  alpha: 1.43
+  n: 1.56
+  ksat: 2.89e-6
+
+initial_conditions:
+  groundwater:
+    wc: 0.1
+
+io:
+  dir: out
+
+output:
+  format: hdf5
+  variables:
+  - water_content

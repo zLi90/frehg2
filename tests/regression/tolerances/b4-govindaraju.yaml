@@ -1,0 +1,23 @@
+# b4-govindaraju regression gates (plan §9 b4).
+#
+# The reference is a kinematic-wave solution (ReferenceData/outflow.txt);
+# field comparison is not meaningful, so the gate is metric-based on the
+# outlet hydrograph. The model hydrograph is the mass-consistent outflow
+# rate d(cum_outflow)/dt from /monitor/mass_audit: the stored face
+# velocities carry the preserved legacy double drag factor
+# (update_velocity, shallowwater.c:745-746) and systematically understate
+# the conserved face fluxes, so uu*depth at the outlet column is NOT the
+# discharge the model actually passes (docs/theory/surface-water.md).
+#
+# time_to_peak uses the first crossing of 99 % of the peak: the b4 rain
+# series has two identical pulses, so the hydrograph has twin peaks that
+# differ at the 0.1 % level (the reference's own twin peaks differ by
+# 0.1 %) and argmax is degenerate.
+hydrograph:
+  rel_l2_max: 0.15
+  peak_rel_tol: 0.10
+  time_to_peak_rel_tol: 0.10
+  time_to_peak_fraction: 0.99
+  smoothing_halfwidth_seconds: 1.0
+  volume_vs_rain_tol: 0.05
+  volume_vs_reference_tol: 0.03

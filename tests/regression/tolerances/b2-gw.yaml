@@ -1,0 +1,25 @@
+# b2-gw gate tolerances (plan §9): same algorithm as legacy (PCA at the
+# committed benchmark settings), so deviations come only from PETSc CG+ICC vs
+# LASPack CG+SSOR at rtol 1e-8 over the adaptive-dtg trajectory, plus the
+# output-time labeling (states land within one dtg <= 2 s of the label).
+# Measured on 2026-07-26: worst achieved/allowed head ratio 0.40, worst
+# |dtheta| 1.8e-4 of the 5e-3 allowance.
+group: groundwater
+variables:
+  hydraulic_head:
+    abs_floor: 1.0e-3   # |dh| <= max(1e-3 m, 1 %)
+    rel: 0.01
+  water_content:
+    abs_floor: 0.005    # |dtheta| <= 0.005 absolute
+    rel: 0.0
+allowed_exceedance_fraction: 0.0
+
+# Wetting-front gate vs the Warrick (1971) analytical profile: the depth of
+# the theta = (theta_s + theta_r)/2 = 0.165 crossing at each reference time
+# must sit within 5 % of Warrick and within 1.2x the legacy golden's own
+# error (plan §9 b2). Measured: model and golden fronts agree to 1e-4 m
+# (both ~2 % from Warrick at 11700 s).
+wetting_front:
+  threshold: 0.165
+  max_rel_error_vs_warrick: 0.05
+  max_ratio_vs_legacy_error: 1.2

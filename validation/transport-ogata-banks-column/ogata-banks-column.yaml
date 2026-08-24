@@ -1,0 +1,112 @@
+# ogata-banks-column — 1-D advection–dispersion in a saturated column.
+# A frehg2 (not SERGHEI) validation case for the SUBSURFACE scalar-transport
+# path (groundwater + transport, no surface flow, no density). It reproduces the
+# canonical Ogata & Banks (1961) breakthrough problem: continuous injection of a
+# conservative tracer into a semi-infinite saturated column with steady uniform
+# seepage, giving the closed-form complementary-error-function solution.
+#
+# Setup: a 1.0 m column resolved along y (nx=1, ny=100, nz=1, dy=0.01 m), fully
+# saturated sand. A pressure-head drop of 1.0 m across the column
+# (y- inflow ph=1.0, y+ outflow ph=0.0) drives a steady Darcy flux
+# q = ks*dH/L = 1e-4 m/s; with theta_s=0.35 the pore velocity is v=2.86e-4 m/s,
+# so the mean tracer arrival time at the outlet is t50 = L/v ~ 3500 s. At t=0 the
+# inflow-side ghost concentration steps to 1; the outlet breakthrough curve is
+# compared against the Ogata-Banks erfc solution.
+#
+# Reference:
+#   Ogata, A. & Banks, R. B. (1961), A solution of the differential equation of
+#   longitudinal dispersion in porous media, USGS Professional Paper 411-A.
+#   c(x,t)/c0 = 1/2 erfc[(x - v t)/(2 sqrt(D t))]
+#              + 1/2 exp(v x/D) erfc[(x + v t)/(2 sqrt(D t))].
+#
+# CAVEAT (frehg2 dispersion quirk): the dispersion term acts on *volumetric* face
+# fluxes, not Darcy velocities (the face-area factor is not divided out;
+# docs/theory transport notes). So the configured dispersivity is NOT the
+# physical alpha_L — it is calibrated to the face-flux scale. The quantitatively
+# exact check here is the *advective* mean arrival time t50 = L/v (independent of
+# the dispersion scaling); the dispersivity is tuned so the breakthrough has a
+# realistic erfc spread for a visual shape comparison.
+simulation:
+  id: ogata-banks-column
+  title: Ogata-Banks 1D advection-dispersion breakthrough (saturated column)
+
+domain:
+  nx: 1
+  ny: 100
+  nz: 1
+  dx: 1.0
+  dy: 0.01
+  dz: 0.1
+  dz_stretch: 1.0
+  bottom_elevation: {constant: 0.0}
+  follow_terrain: false
+
+time:
+  dt: 10.0
+  t_end: 7000
+  output_interval: 250
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.1
+    dt_min: 0.1
+    dt_max: 10.0
+    courant_max: 2.0
+  specific_storage: 1.0e-05
+
+soil:
+  types:
+    - name: sand
+      ksx: 1.0e-04
+      ksy: 1.0e-04
+      ksz: 1.0e-04
+      theta_s: 0.35
+      theta_r: 0.05
+      vg_alpha: 3.6
+      vg_n: 1.56
+      aev: 0.0
+  map: {constant: sand}
+
+initial_conditions:
+  groundwater:
+    head: {constant: 0.3}          # positive pressure head -> fully saturated
+  transport:
+    groundwater: {constant: 0.0}   # clean column at t = 0
+
+boundary_conditions:
+  - name: inflow-head
+    # Inflow is placed on the y+ (north) side: this is the only lateral side the
+    # scalar-transport module wires a prescribed ghost concentration to
+    # (SubsurfaceTransport.cpp sideCodeYp / legacy s_yp). Flow runs north -> south.
+    region: {polygon: [[-1.0, 0.995], [2.0, 0.995], [2.0, 2.0], [-1.0, 2.0]]}
+    target: groundwater_side
+    kind: head
+    value: {constant: 1.0}         # y+ pressure head 1.0 m (upstream)
+  - name: inflow-tracer
+    region: {polygon: [[-1.0, 0.995], [2.0, 0.995], [2.0, 2.0], [-1.0, 2.0]]}
+    target: groundwater_side
+    kind: scalar_value
+    value: {constant: 1.0}         # ghost concentration feeding the inflow (c0 = 1)
+  - name: outflow-head
+    region: {polygon: [[-1.0, -1.0], [2.0, -1.0], [2.0, 0.005], [-1.0, 0.005]]}
+    target: groundwater_side
+    kind: head
+    value: {constant: 0.0}         # y- pressure head 0.0 m (downstream outlet)
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.1, transverse: 0.0, molecular: 1.0e-09}
+  bounds: {min: 0.0, max: 1.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]
+    transport: [concentration]

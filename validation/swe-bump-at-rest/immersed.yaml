@@ -1,0 +1,57 @@
+# swe-bump-at-rest / immersed — well-balancing (C-property) test: still water
+# fully covering a parabolic bump. Frozen v2 schema, authored from the SERGHEI
+# inputs (ShallowWater/SWASHES/steady_state/bumps/rest/immersed).
+# Notes:
+#   - Lake at rest: eta = bed + h = 0.500 m everywhere (verified constant);
+#     the bump (bed up to 0.2 m) is fully submerged, so eta = 0.5 constant.
+#   - frictionless: SERGHEI "none" -> Manning coefficient 0.0.
+#   - REFLECTIVE outer boundary -> no boundary_conditions entries.
+#   - no forcing; the test is machine-zero velocity (C-property).
+#   - 1000x4 strip, DEM identical to the emerged case (same bump), copied
+#     verbatim (rows identical, no row-reversal needed).
+#   - dt = 0.1 s (semi-implicit free surface; advective CFL non-binding at rest).
+simulation:
+  id: swe-bump-at-rest-immersed
+  title: Still water over an immersed bump (C-property)
+
+domain:
+  nx: 1000
+  ny: 4
+  nz: 1
+  dx: 0.025
+  dy: 0.025
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.1
+  t_end: 1000
+  output_interval: 100
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.0}      # SERGHEI friction: none
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-03                   # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-03
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.5}               # flat lake surface, bump submerged
+
+output:
+  filename: out/immersed.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: midchannel, i: 500, j: 1, variables: [eta, uu, vv]}

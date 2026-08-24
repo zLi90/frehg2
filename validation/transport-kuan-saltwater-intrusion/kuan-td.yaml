@@ -1,0 +1,140 @@
+# b6-kuan (td) — Tidal saltwater intrusion, Kuan et al. lab sandbox; the
+# tidally forced variant. Frozen v2 schema, authored from the legacy input
+# (kuann) and ex3_kuan_input data per plan Appendix A.
+# Notes:
+#   - coupling.mode: sync — the committed legacy input says async, but the
+#     goldens are the out-*-syncV4 sync runs; the plan pins sync (§9, risk
+#     register) and this discrepancy is recorded in README.md here.
+#   - the legacy Newton scheme (iter_solve=1) used for the golden is
+#     dropped; PCA runs with the b6 gate's relaxed tolerances (plan §3.2).
+#   - boundary map from legacy bctype_GW = [x+ 0, x- 0, y+ 1, y- 2,
+#     bottom 0, top 2-under-coupling]: seaward (y+) hydrostatic head at mean
+#     sea level, inland (y-) freshwater inflow 2.77e-5 m/s (legacy qym was
+#     -2.77e-5 under the outward-positive ym sign; frehg2 side fluxes are
+#     positive into the domain — parameters.md, P2); salinities
+#     s_yp = 35, s_ym = 0, s_tide = 35.
+#   - initial state: eta 0.15 (init_eta), water table 0.15 (init_wt_abs),
+#     surface salinity 35, subsurface fresh (init_s_surf/init_s_subs).
+# Gate: plan §9 b6 (syncV4 goldens loose + Kuan experiment primary;
+# blocking for P4; both ss and td variants must pass).
+simulation:
+  id: b6-kuan-td
+  title: Kuan et al. tidal saltwater intrusion (tidal variant)
+
+domain:
+  nx: 1
+  ny: 68
+  nz: 18
+  dx: 1.0
+  dy: 0.05
+  dz: 0.04
+  dz_stretch: 1.0
+  bottom_elevation: {file: ../../benchmarks/b6-kuan/input/bathymetry.dat}
+  follow_terrain: true
+
+time:
+  dt: 0.05
+  t_end: 36000
+  output_interval: 600
+
+modules:
+  surface_water: true
+  groundwater: true
+  transport: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.04}
+    thin_layer_depth: 0.1
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-05
+  wetting_face_depth: 5.0e-04
+  evaporation: {constant: 0.0}
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.05
+    dt_min: 0.05
+    dt_max: 0.5
+    courant_max: 2.0
+  specific_storage: 1.0e-05
+  density_coupling: {enabled: true}
+
+soil:
+  types:
+    - name: kuan-sand
+      ksx: 5.26e-03
+      ksy: 5.26e-03
+      ksz: 5.26e-03
+      theta_s: 0.46
+      theta_r: 0.04
+      vg_alpha: 5.9
+      vg_n: 2.68
+      aev: -0.02
+  map: {constant: kuan-sand}
+
+coupling: {mode: sync}   # goldens are syncV4 runs; see README.md
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.15}
+  groundwater:
+    water_table: {constant: 0.15}
+  transport:
+    surface: {constant: 35.0}
+    groundwater: {constant: 0.0}
+
+boundary_conditions:
+  - name: tide
+    region: {polygon: [[-0.5, 3.35], [1.5, 3.35], [1.5, 3.45], [-0.5, 3.45]]}
+    target: surface
+    kind: eta
+    value: {series: {file: ../../benchmarks/b6-kuan/input/tide.dat}}
+  - name: sea-surface-salinity
+    # The flooding water is the ocean reservoir at 35 psu: the golden td run
+    # held every wet surface cell at 35 (the legacy wet-cell salinity
+    # override, scalar.c:258-262 "Kuan 2019" — see README.md), expressed
+    # here as a whole-tank wet-cell Dirichlet.
+    region: {polygon: [[-0.5, -0.5], [1.5, -0.5], [1.5, 3.45], [-0.5, 3.45]]}
+    target: surface
+    kind: scalar_value
+    value: {constant: 35.0}
+  - name: seaward-head
+    region: {polygon: [[-0.5, 3.35], [1.5, 3.35], [1.5, 3.45], [-0.5, 3.45]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 0.15}}
+  - name: seaward-salinity
+    region: {polygon: [[-0.5, 3.35], [1.5, 3.35], [1.5, 3.45], [-0.5, 3.45]]}
+    target: groundwater_side
+    kind: scalar_value
+    value: {constant: 35.0}
+  - name: inland-inflow
+    region: {polygon: [[-0.5, -0.5], [1.5, -0.5], [1.5, 0.06], [-0.5, 0.06]]}
+    target: groundwater_side
+    kind: flux
+    value: {constant: 2.77e-05}   # positive = into the domain (P2 side-flux convention)
+  - name: inland-salinity
+    region: {polygon: [[-0.5, -0.5], [1.5, -0.5], [1.5, 0.06], [-0.5, 0.06]]}
+    target: groundwater_side
+    kind: scalar_value
+    value: {constant: 0.0}
+
+transport:
+  scheme: {advection: superbee}
+  surface_diffusivity: {x: 0.0, y: 1.0e-10}
+  dispersion: {longitudinal: 0.002, transverse: 4.0e-04, molecular: 1.0e-10}
+
+output:
+  filename: out-td/output.h5
+  variables:
+    surface: [eta, depth, uu, vv, seepage]
+    groundwater: [hydraulic_head, water_content]
+    transport: [concentration, concentration_surface]
+  monitors:
+    - {name: probe_60, i: 0, j: 60, variables: [depth, vv]}
+    - {name: probe_65, i: 0, j: 65, variables: [depth, vv]}

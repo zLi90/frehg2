@@ -1,0 +1,40 @@
+# b5-vcatchment gate tolerances (plan §9 b5, adjudicated at the P3 gate).
+#
+# The reference is the PF/CATHY/HGS/Cast3M model envelope of the Kollet et
+# al. (2017) tilted-V intercomparison (digitized CSVs under the legacy
+# benchmarks tree; Cast3M carries no rain-scenario discharge curve). The
+# published inter-model spread is itself 10-20 %, so the gate is
+# envelope-based, not element-wise:
+#   - at every digitized reference time inside the window all reference
+#     models cover, the model value must sit within
+#     [envelope_min - margin, envelope_max + margin] with
+#     margin = envelope_margin_of_peak * (envelope-mean peak);
+#   - the model peak must lie within peak_rel_tol of the envelope-mean peak;
+#   - the model integral over the common window must lie within
+#     volume_rel_tol of the envelope-mean integral (the plan's
+#     recession-volume rule, applied over the whole covered window).
+# The same rules apply to the outlet discharge and the ponding storage,
+# for the rain and no-rain scenarios, in both coupling modes.
+#
+# Model series come from the mass-audit table (the P1 finding: stored
+# velocities under-read discharge ~20 %; the audit is the mass-consistent
+# source), doubled for the symmetric half-domain, and smoothed over a
+# +-900 s window (the references resolve hours).
+#
+# budget_rel_tol bounds both audit residuals over the full horizon: the
+# subsurface identity closes to rounding; the surface residual carries the
+# legacy unaudited clamps (the b1 gate's own mass bound is 1e-3 of rain).
+envelope:
+  envelope_margin_of_peak: 0.10   # plan §9: +-0.1 Q_peak beyond the envelope
+  peak_rel_tol: 0.15              # plan §9: peak within +-15 % of envelope mean
+  volume_rel_tol: 0.10            # plan §9: volumes within 10 %
+  budget_rel_tol: 1.0e-3
+  # Margin floors [same units as the curves]: the digitized no-rain ponding
+  # values sit at the digitization noise floor (hundredths of m^3 over an
+  # 11,110 m^2 domain — micrometres of depth), and the no-rain discharge at
+  # a few m^3/h; a pure fraction-of-peak band there would gate digitization
+  # noise, not physics. 5 m^3 is ~1 mm over the channel; 2 m^3/h is the
+  # smallest digitized reference value.
+  min_margin:
+    discharge: 2.0
+    ponding: 5.0

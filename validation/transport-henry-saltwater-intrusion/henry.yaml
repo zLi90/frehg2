@@ -1,0 +1,122 @@
+# henry-saltwater-intrusion — the classic Henry (1964) seawater-intrusion problem.
+# A frehg2 (not SERGHEI) validation case for VARIABLE-DENSITY subsurface transport
+# (groundwater + transport + density coupling, no surface module). It is the
+# canonical benchmark every density-dependent groundwater code is tested against:
+# a confined aquifer with freshwater recharge landward and a hydrostatic seawater
+# boundary seaward, giving a steady salt wedge (isochlors) that has a
+# semi-analytical reference solution.
+#
+# Geometry (frehg2 vertical-slice convention, as in b6-kuan): a 2 m (y, landward
+# -> seaward) x 1 m (z, vertical) box, nx=1, ny=40, nz=20 (dy=dz=0.05 m). Confined
+# (no-flow top and bottom), fully saturated.
+#
+# Henry -> frehg2 parameter mapping:
+#   - Ks = 1e-2 m/s, porosity theta_s = 0.35 (standard Henry values).
+#   - Freshwater recharge Q = 6.6e-5 m^2/s per unit width -> inland (y-) side flux
+#     6.6e-5 m/s into the domain (flux = Q / (depth 1 m x thickness 1 m)).
+#   - Seawater boundary: seaward (y+) hydrostatic head at sea level 1.0 m. This is
+#     the y+ side because the transport module only injects a prescribed scalar
+#     ghost on the y+ boundary (SubsurfaceTransport.cpp sideCodeYp); seawater must
+#     enter there. Freshwater enters inland at s = 0 (= initial), so the missing
+#     y- injection path is harmless.
+#   - Density: Henry's density ratio drho/rho = 0.025. frehg2's baroclinic law is
+#     r_rho = 1 + beta_rho*s with beta_rho hardwired at 7.44e-4, so the seawater
+#     salinity that reproduces 0.025 is s_sea = 0.025/7.44e-4 = 33.6 (used below).
+#   - Diffusion: Henry uses a single constant coefficient D = 6.6e-6 m^2/s, mapped
+#     to transport.dispersion.molecular; no velocity-dependent dispersivity.
+#
+# Reference:
+#   Henry, H. R. (1964), Effects of dispersion on salt encroachment in coastal
+#   aquifers, USGS Water-Supply Paper 1613-C, pp. C71-C84.
+#
+# CAVEATS: (1) beta_rho and the viscosity ratio are compile-time constants, so the
+# density contrast is set purely through s_sea. (2) The dispersion term acts on
+# volumetric face fluxes (the face-area factor is not divided out), so quantitative
+# isochlor positions are approximate; this case validates that frehg2 forms the
+# steady Henry salt wedge (toe intrusion, upper freshwater outflow) with the right
+# character, not to-the-millimetre isochlors.
+simulation:
+  id: henry-saltwater-intrusion
+  title: Henry (1964) seawater-intrusion problem (steady salt wedge)
+
+domain:
+  nx: 1
+  ny: 40
+  nz: 20
+  dx: 1.0
+  dy: 0.05
+  dz: 0.05
+  dz_stretch: 1.0
+  bottom_elevation: {constant: 0.0}
+  follow_terrain: false
+
+time:
+  dt: 5.0
+  t_end: 15000
+  output_interval: 1000
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.5
+    dt_min: 0.1
+    dt_max: 5.0
+    courant_max: 2.0
+  specific_storage: 1.0e-05
+  density_coupling: {enabled: true}
+
+soil:
+  types:
+    - name: henry-sand
+      ksx: 1.0e-02
+      ksy: 1.0e-02
+      ksz: 1.0e-02
+      theta_s: 0.35
+      theta_r: 0.0
+      vg_alpha: 5.0
+      vg_n: 2.0
+      aev: 0.0
+  map: {constant: henry-sand}
+
+initial_conditions:
+  groundwater:
+    head: {constant: 1.0}          # fully saturated, fresh
+  transport:
+    groundwater: {constant: 0.0}
+
+boundary_conditions:
+  - name: seaward-head
+    # y+ (seaward): hydrostatic seawater head at sea level 1.0 m. GW-only run, so
+    # the configured eta applies directly (parameters.md).
+    region: {polygon: [[-1.0, 1.95], [2.0, 1.95], [2.0, 3.0], [-1.0, 3.0]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 1.0}}
+  - name: seaward-salinity
+    region: {polygon: [[-1.0, 1.95], [2.0, 1.95], [2.0, 3.0], [-1.0, 3.0]]}
+    target: groundwater_side
+    kind: scalar_value
+    value: {constant: 33.6}        # s_sea for drho/rho = 0.025
+  - name: inland-inflow
+    # y- (landward): freshwater recharge flux into the domain, s = 0.
+    region: {polygon: [[-1.0, -1.0], [2.0, -1.0], [2.0, 0.05], [-1.0, 0.05]]}
+    target: groundwater_side
+    kind: flux
+    value: {constant: 6.6e-05}     # Q 6.6e-5 m2/s / (1 m depth x 1 m width)
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 6.6e-06}
+  bounds: {min: 0.0, max: 33.6}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]
+    transport: [concentration]

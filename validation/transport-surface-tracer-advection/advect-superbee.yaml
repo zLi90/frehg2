@@ -1,0 +1,92 @@
+# surface-tracer-advection / superbee — passive tracer advected by a steady
+# uniform open-channel flow; SECOND-ORDER SUPERBEE (TVD) advection scheme.
+# This is a frehg2 (not SERGHEI) validation case: it exercises the SURFACE
+# scalar-transport path (SWE + transport, no groundwater, no density).
+#
+# Setup: a 1000 m x 1 m channel (nx=200, dx=5 m) on a mild 0.1% slope. Manning
+# n = 0.03 gives a normal depth h = 0.5 m and uniform velocity u = 0.664 m/s
+# (q = 0.332 m^2/s). The initial stage is the bed + 0.5 m everywhere, matched to
+# the inflow discharge, so the flow is uniform from t = 0. At t = 0 the inflow
+# concentration steps from 0 to 1; a sharp front should then advect downstream
+# at u with NO physical diffusion (surface_diffusivity ~ 0).
+#
+# Reference: the exact solution is a step front at x = u*t (pure advection); with
+# a small dispersion it is the Ogata & Banks (1961) erfc profile. Comparing this
+# SUPERBEE run against advect-upwind.yaml isolates *numerical* diffusion: upwind
+# smears the front over many cells, superbee keeps it sharp. Front position (mass
+# celerity) should agree with u*t for both schemes.
+#   Ogata, A. & Banks, R.B. (1961), USGS Professional Paper 411-A.
+simulation:
+  id: surface-tracer-advection-superbee
+  title: Passive tracer in uniform open-channel flow (first-order superbee)
+
+domain:
+  nx: 200
+  ny: 1
+  nz: 1
+  dx: 5.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {file: input/dem_channel.dat}
+  follow_terrain: false
+
+time:
+  dt: 1.0
+  t_end: 1000
+  output_interval: 100
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-05
+  wetting_face_depth: 5.0e-04
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {file: input/eta_channel.dat}    # bed + uniform 0.5 m normal depth
+  transport:
+    surface: {constant: 0.0}              # clean channel at t = 0
+
+boundary_conditions:
+  - name: inflow
+    region: {polygon: [[-1.0, -1.0], [-1.0, 2.0], [4.0, 2.0], [4.0, -1.0]]}
+    target: surface
+    kind: discharge
+    value: {constant: 0.33202}            # Q = q(0.332 m2/s) * width(1 m), west
+  - name: inflow-tracer
+    # scalar_value on the discharge inflow injects that inflow's concentration
+    # (parameters.md: discharge-covered members inject s_inflow). Step 0->1 at t=0.
+    region: {polygon: [[-1.0, -1.0], [-1.0, 2.0], [4.0, 2.0], [4.0, -1.0]]}
+    target: surface
+    kind: scalar_value
+    value: {constant: 1.0}
+  - name: outflow
+    region: {polygon: [[996.0, -1.0], [996.0, 2.0], [1001.0, 2.0], [1001.0, -1.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.5025}             # downstream stage = bed(east) 0.0025 + h 0.5
+
+transport:
+  scheme: {advection: superbee}
+  surface_diffusivity: {x: 1.0e-10, y: 1.0e-10}   # ~0: isolate numerical diffusion
+  bounds: {min: 0.0, max: 1.0}
+
+output:
+  filename: out-superbee/output.h5
+  variables:
+    surface: [eta, depth, uu]
+    transport: [concentration_surface]
+  monitors:
+    - {name: mid,    i: 99,  j: 0, variables: [depth, uu]}
+    - {name: outlet, i: 199, j: 0, variables: [depth, uu]}

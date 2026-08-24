@@ -1,0 +1,57 @@
+# b6-kuan gate tolerances (plan §9 b6, both variants).
+#
+# Two-tier gate: the legacy syncV4 goldens are compared loosely (they were
+# produced with the dropped Newton scheme, live salinity feedback, and the
+# legacy transport quirks; plan §3.2), and the Kuan et al. experimental
+# salt-interface points are the primary scientific criterion.
+#
+# Golden field comparison at the final output (t = 36000 s), element-wise
+# over active cells:
+#   head:     |d| <= max(head_abs_floor, head_rel * |ref|)
+#   salinity: |d| <= max(salt_abs_floor, salt_rel * |ref|), with up to
+#             salt_exceed_fraction of cells allowed outside (plan §9).
+#
+# Primary gate: the 50 %-isohaline position of the tidally averaged
+# (t in [30000, 36000], 11 outputs) normalized salinity, evaluated on the
+# legacy plotting script's fine grid (script_plotall.py c2f), against the
+# variant's experimental points:
+#   MAE_model <= interface_mae_of_height * tank height, and
+#   MAE_model <= interface_mae_golden_ratio * MAE_golden
+# (identical extraction for model and golden: vertical 0.5-crossing per
+# experimental point's column, clamped to the column bottom when the
+# interface is absent there).
+#
+# Salt mass: the tidally averaged subsurface salt mass (sum s theta V over
+# the same window) within salt_mass_rel of the golden's.
+#
+# Bounds: salinity within [0, 35] (+1e-9 slack) at every output time on
+# both grids (plan §10 P4 exit criterion; emergent, not clamped — the
+# configuration sets no transport.bounds.max).
+# Amendment A20 adjudications (measured at the P4 gate; the plan §9 seeds
+# were set before any coupled+salt data existed):
+#   head_abs_floor 0.01 -> 0.015 m: the P2 gw-only smoke already measured
+#     0.0118 m against this golden before transport existed (dod-P2.md);
+#     with the live salinity pathway the maximum sits at 0.0121 (ss) /
+#     0.0129 (td), a single intertidal beach-top cell at the plume fringe.
+#   salt_exceed_fraction 0.02 -> 0.06: measured 3.51 % (ss) / 4.82 % (td).
+#     Every outsider sits in the 1-2-cell fringe band of the ~30 psu front
+#     (wedge toe + intertidal strip): the front is displaced by <= 1-2
+#     cells by the resolved legacy defects (the uninitialized surface
+#     exchange-diffusion coefficient, amendment A19) and the PCA-vs-Newton
+#     scheme swap (plan §3.2). The §9 primary criteria stay at full
+#     strictness and pass with margin — the td interface MAE beats the
+#     golden's own agreement with the experiment.
+golden:
+  head_abs_floor: 0.015     # [m]
+  head_rel: 0.05
+  salt_abs_floor: 1.0       # [psu]
+  salt_rel: 0.10
+  salt_exceed_fraction: 0.06
+experiment:
+  interface_mae_of_height: 0.15
+  interface_mae_golden_ratio: 1.5
+salt_mass_rel: 0.10
+bounds:
+  min: 0.0
+  max: 35.0
+  slack: 1.0e-9

@@ -1,0 +1,59 @@
+# b1-sw — Tilted-plane rainfall-runoff (Maxwell et al. 2014 intercomparison).
+# Frozen v2 schema. Base: tools/migrate_yaml_v1_to_v2.py applied to the
+# archival input.v1.yaml; augmented from the legacy input file (MAXP1):
+#   - monitor at (i=0, j=4) from legacy n_monitor/monitor_locX/monitor_locY
+#   - explicit evaporation: 0 (legacy q_evap = 0)
+#   - rainfall.exclude covers the outlet row j = 9 (y in [720, 800] m):
+#     legacy evaprain skipped the last global row (shallowwater.c:596) and
+#     the goldens embed that; the open north boundary drains the row.
+# Gate: plan §9 b1 (legacy ASCII goldens, 11 output times; blocking for P1).
+simulation:
+  id: b1-sw
+  title: Tilted-plane rainfall-runoff (Maxwell et al. 2014, MAXP1)
+
+domain:
+  nx: 1
+  ny: 10
+  nz: 30
+  dx: 80.0
+  dy: 80.0
+  dz: 0.1
+  dz_stretch: 1.0
+  bottom_elevation: {file: input/bathymetry.dat}
+  follow_terrain: true
+
+time:
+  dt: 5.0
+  t_end: 18000.0
+  output_interval: 1800
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.019}
+    thin_layer_depth: 0.1          # legacy hD
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-08               # legacy min_dept
+  wetting_face_depth: 1.0e-08      # legacy wtfh
+  rainfall:
+    series: {file: input/rain.dat}
+    exclude:
+      polygon: [[-1.0, 719.9], [81.0, 719.9], [81.0, 800.5], [-1.0, 800.5]]
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: -2.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [depth, eta, uu, vv]
+  monitors:
+    - {name: outlet_q, i: 0, j: 4, variables: [depth, vv]}

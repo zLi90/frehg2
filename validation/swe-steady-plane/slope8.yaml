@@ -1,0 +1,77 @@
+# swe-steady-plane / slope8 — steady flow toward Manning normal depth on a
+# tilted plane. Frozen v2 schema, authored from the SERGHEI inputs
+# (ShallowWater/Analytical/steadyPlane/slope8/input).
+# Notes:
+#   - 100x1 plane, dx = dy = 10 m. Bed slopes from 79.6 m (west) down to 0.4 m
+#     (east): flow runs west -> east. The imposed discharge and Manning n give a
+#     normal depth of ~0.01 m (q = (1/n) h^(5/3) S^(1/2) with n=0.033, S=0.08).
+#   - Inflow (west): SERGHEI bctype 7, bcvals "0.01 0.003973 0.0"
+#     = [normal h, inflow q, -] -> kind discharge q = 0.003973 m^2/s.
+#   - Outflow (east): SERGHEI bctype 5 = free (transmissive) outflow
+#     -> kind outflow (no value); the stage is extrapolated down the continued
+#     bed slope at the east faces.
+#   - Manning friction n = 0.033 (SERGHEI friction "manning").
+#   - Outer BCtype REFLECTIVE -> only the inflow and outflow polygons are added;
+#     the remaining edges are closed.
+#   - IC: SERGHEI initialMode "h" = uniform depth 0.02 m, so eta = bed + 0.02
+#     (input/eta_slope8.dat). Single-row strip, no DEM row-reversal needed.
+#   - dt = 1.0 s: u = q/h ~ 0.4 m/s over dx = 10 m; advective CFL far from
+#     binding; free surface semi-implicit.
+# Caveat: frehg2's surface solver is SEMI-IMPLICIT vs SERGHEI's explicit
+# scheme; for this subcritical steady case the difference is minor.
+simulation:
+  id: swe-steady-plane-slope8
+  title: Steady flow toward Manning normal depth on a tilted plane (slope 8)
+
+domain:
+  nx: 100
+  ny: 1
+  nz: 1
+  dx: 10.0
+  dy: 10.0
+  dz: 1.0
+  bottom_elevation: {file: input/dem_slope8.dat}
+  follow_terrain: false
+
+time:
+  dt: 1.0
+  t_end: 3000
+  output_interval: 300
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.033}     # SERGHEI roughness
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-03                    # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-03
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {file: input/eta_slope8.dat}   # bed + uniform 0.02 m depth
+
+boundary_conditions:
+  - name: inflow
+    region: {polygon: [[-1.0, -1.0], [-1.0, 11.0], [6.0, 11.0], [6.0, -1.0]]}
+    target: surface
+    kind: discharge
+    value: {constant: 0.03973}          # unit q 0.003973 m^2/s * width 10 m [m^3/s], west
+  - name: outflow
+    region: {polygon: [[994.0, -1.0], [994.0, 11.0], [1005.0, 11.0], [1005.0, -1.0]]}
+    target: surface
+    kind: outflow                       # SERGHEI bctype 5 free outflow, east
+
+output:
+  filename: out/slope8.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: outlet, i: 99, j: 0, variables: [depth, uu]}

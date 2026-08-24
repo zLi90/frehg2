@@ -1,0 +1,78 @@
+# swe-macdonald-subcritical — MacDonald/SWASHES varying-geometry subcritical
+# flume (SWASHES long-channel, subcritical). Frozen v2 schema, authored from
+# the SERGHEI inputs
+# (ShallowWater/SWASHES/steady_state/flumes/long-channel/subcritical/input).
+# Notes:
+#   - 1000x4 strip, dx = dy = 1 m (1000 m x 4 m). The bed profile varies along x
+#     (MacDonald analytic geometry) from 6.95 m (west) down to ~0.006 m (east);
+#     flow runs west -> east. The rows are identical, DEM copied verbatim.
+#   - Inflow (west): SERGHEI bctype 7, bcvals "0.748378 2.0 0.0"
+#     = [downstream h, inflow q, -] -> kind discharge q = 2.0 m^2/s.
+#   - Outflow (east): SERGHEI bctype 6 imposes downstream depth h = 0.748378 m.
+#     The east bed is 0.00572192 m, so the stage is eta = bed + h = 0.75409992 m
+#     (kind eta; SERGHEI prescribes a depth, frehg2 an elevation).
+#   - Manning friction n = 0.033.
+#   - Outer BCtype TRANSMISSIVE; represented by the inflow/outflow polygons.
+#   - IC: SERGHEI initialMode "file" ships a depth field via hini; eta =
+#     bed + h is written to input/eta.dat (the MacDonald steady profile).
+#   - dt = 0.2 s ~ advective CFL: u = q/h ~ 2.7 m/s over dx = 1 m gives
+#     0.5*dx/u ~ 0.19 s; advection is explicit in the semi-implicit scheme.
+# Caveat: frehg2's surface solver is SEMI-IMPLICIT vs SERGHEI's explicit
+# scheme; for this subcritical steady case the difference is minor.
+simulation:
+  id: swe-macdonald-subcritical
+  title: MacDonald/SWASHES subcritical flume
+
+domain:
+  nx: 1000
+  ny: 4
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.2
+  t_end: 2000
+  output_interval: 100
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.033}     # SERGHEI roughness
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-03                    # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-03
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {file: input/eta.dat}          # bed + hini (MacDonald steady profile)
+
+boundary_conditions:
+  - name: inflow
+    region: {polygon: [[-0.5, -1.0], [-0.5, 5.0], [0.6, 5.0], [0.6, -1.0]]}
+    target: surface
+    kind: discharge
+    value: {constant: 8.0}              # unit q 2.0 m^2/s * width 4.0 m [m^3/s], west
+  - name: outflow
+    region: {polygon: [[999.4, -1.0], [999.4, 5.0], [1000.5, 5.0], [1000.5, -1.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.75409992}       # downstream stage = bed + h 0.748378
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: outlet, i: 999, j: 1, variables: [depth, uu]}

@@ -1,0 +1,78 @@
+# Frehg2 documentation site (plan §12): user guide, theory reference, and
+# developer guide, built with mkdocs-material. Build with:
+#   python3 -m mkdocs build --strict
+# The API reference is separate (Doxygen: `doxygen docs/Doxyfile`, output in
+# docs/api/, git-ignored and excluded below).
+site_name: Frehg2
+site_description: >-
+  Coupled semi-implicit 2D shallow-water / 3D mixed-form Richards /
+  solute-transport model (C++20, Kokkos, MPI, PETSc, HDF5)
+site_author: Zhi Li
+repo_url: https://github.com/zLi90/frehg
+edit_uri: ""
+
+theme:
+  name: material
+  palette:
+    primary: blue grey
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+exclude_docs: |
+  api/
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - User guide:
+      - Installation: user-guide/installation.md
+      - Configuration: user-guide/configuration.md
+      - Parameter reference: user-guide/parameters.md
+      - Input data files: user-guide/input-data.md
+      - Running a simulation: user-guide/running.md
+      - Output reference: user-guide/output.md
+      - Checkpoint and restart: user-guide/restart.md
+      - Benchmark walkthroughs: user-guide/benchmarks.md
+      - Worked example: user-guide/worked-example.md
+      - Migrating from legacy Frehg: user-guide/migration.md
+      - Troubleshooting: user-guide/troubleshooting.md
+  - Theory:
+      - Surface water: theory/surface-water.md
+      - Groundwater: theory/groundwater.md
+      - Exchange flux: theory/exchange-flux.md
+      - Transport: theory/transport.md
+      - Removed features: theory/removed-features.md
+  - AI assistant guides:
+      - Build guide: agents/build.md
+      - Case setup: agents/case-setup.md
+      - Post-processing: agents/postprocessing.md
+  - Developer guide:
+      - Completion report (v1.0.0): developer-guide/completion-report.md
+      - Architecture: developer-guide/architecture.md
+      - Grid and indexing: developer-guide/grid-indexing.md
+      - Halo exchange: developer-guide/halo-exchange.md
+      - Adding a BC kind: developer-guide/adding-a-bc-kind.md
+      - Adding an output variable: developer-guide/adding-an-output-variable.md
+      - Testing and CI: developer-guide/testing.md
+      - Performance: developer-guide/performance.md
+      - Upgrade plan (binding spec): developer-guide/FREHG2_UPGRADE_PLAN.md
+      - Phase records:
+          - P0 DoD: developer-guide/dod-P0.md
+          - P0 report: developer-guide/report-P0.md
+          - P1 DoD: developer-guide/dod-P1.md
+          - P1 report: developer-guide/report-P1.md
+          - P2 DoD: developer-guide/dod-P2.md
+          - P2 report: developer-guide/report-P2.md
+          - P3 DoD: developer-guide/dod-P3.md
+          - P3 report: developer-guide/report-P3.md
+          - P4 DoD: developer-guide/dod-P4.md
+          - P4 report: developer-guide/report-P4.md
+          - P5 DoD: developer-guide/dod-P5.md
+          - P5 report: developer-guide/report-P5.md

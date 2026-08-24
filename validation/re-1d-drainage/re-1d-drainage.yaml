@@ -1,0 +1,87 @@
+# re-1d-drainage — Abeele (1984) crushed-tuff gravity drainage of a
+# saturated column.
+# Frozen v2 schema, converted from the SERGHEI-RE reference deck
+#   testcases/serghei-re-tests/case2-1d-drainage/input/
+#   (parameters/subsurface/vg/gwbc/soilID/polygonbot/dem .input).
+# Notes:
+#   - 1 x 1 x 100 column, dz = 0.06 m, 6.0 m tall (subsurface.input:
+#     height 6.0, dz_base 0.06, ndepth 100; dem.input cellsize 1.0 -> dx=dy).
+#   - homogeneous soil (vg.input, same VG params as case1); aev 0.
+#   - initial condition: initialMode 1 (fully saturated) -> moisture constant
+#     theta_s (0.33), which seeds a hydrostatic head from the bed.
+#   - bottom BC: gwbc dir 5 (bottom), bctype 2 (Dirichlet head), bcvals
+#     -1e-5 m (~ 0, an open free-outflow datum) on groundwater_bottom; top
+#     is left no-flux (default; the deck sets no top BC).
+#   - specific_storage 0: the deck carries no storage term.
+#   - reallocation_surplus redistribute: mass-conserving surplus handling as
+#     the column desaturates.
+#   - gw_scheme 2 (Picard) in the source deck -> pca (frehg2's sole scheme).
+#   - DURATION: the shipped deck runs simLength 8640000 s = 100 days (the
+#     Abeele paper's drainage horizon), NOT the 1-day value assumed in the
+#     conversion spec; the deck is ground truth so t_end = 8640000 s here.
+#   - surface time.dt is the outer loop step; the adaptive dtg controller
+#     spans [1e-4, 1200] s (subsurface.input dt_init/dt_max).
+simulation:
+  id: re-1d-drainage
+  title: Abeele (1984) 1D gravity drainage of a saturated column
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 100
+  dx: 1.0
+  dy: 1.0
+  dz: 0.06
+  dz_stretch: 1.0
+  bottom_elevation: {constant: 0.0}
+  follow_terrain: false
+
+time:
+  dt: 1200.0
+  t_end: 8640000
+  output_interval: 86400
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: false
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.0001
+    dt_min: 0.0001
+    dt_max: 1200.0
+    courant_max: 2.0
+  specific_storage: 0.0
+  reallocation_surplus: redistribute
+
+soil:
+  types:
+    - name: crushed-tuff
+      ksx: 2.89e-06
+      ksy: 2.89e-06
+      ksz: 2.89e-06
+      theta_s: 0.33
+      theta_r: 0.0
+      vg_alpha: 1.43
+      vg_n: 1.56
+      aev: 0.0
+  map: {constant: crushed-tuff}
+
+initial_conditions:
+  groundwater:
+    moisture: {constant: 0.33}
+
+boundary_conditions:
+  - name: open-bottom
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_bottom
+    kind: head
+    value: {constant: -1.0e-05}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]

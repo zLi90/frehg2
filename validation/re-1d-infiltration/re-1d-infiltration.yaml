@@ -1,0 +1,84 @@
+# re-1d-infiltration — Warrick et al. (1985) 1D infiltration into a dry column.
+# Frozen v2 schema, converted from the SERGHEI-RE reference deck
+#   testcases/serghei-re-tests/case1-1d-infiltration/input/
+#   (parameters/subsurface/vg/gwbc/soilID/theta/polygontop/dem .input).
+# Notes:
+#   - 1 x 1 x 100 column, dz = 0.01 m, 1.0 m tall (subsurface.input:
+#     height 1.0, dz_base 0.01, ndepth 100; dem.input cellsize 1.0 -> dx=dy).
+#   - homogeneous soil (vg.input); aev 0.
+#   - initial condition: initialMode 3 (theta file); theta.input is uniform
+#     0.03 -> expressed as a moisture constant (dry start).
+#   - top BC: gwbc dir 6 (top), bctype 2 (Dirichlet head), bcvals 1e-5 m
+#     (a thin ponding layer ~ 0) on groundwater_top; bottom is left no-flux
+#     (default, matching the deck which sets no bottom BC).
+#   - specific_storage 0: the deck carries no storage term (aev 0, an
+#     unsaturated problem), matching b3-kirkland's choice.
+#   - reallocation_surplus redistribute: mass-conserving surplus handling so
+#     the infiltrated volume is preserved for the analytical comparison.
+#   - gw_scheme 1 (PCA) -> pca.
+#   - surface time.dt is the outer loop step; the adaptive dtg controller
+#     spans [1e-4, 0.4] s (subsurface.input dt_init/dt_max).
+simulation:
+  id: re-1d-infiltration
+  title: Warrick et al. (1985) 1D infiltration into a dry column
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 100
+  dx: 1.0
+  dy: 1.0
+  dz: 0.01
+  dz_stretch: 1.0
+  bottom_elevation: {constant: 0.0}
+  follow_terrain: false
+
+time:
+  dt: 0.4
+  t_end: 46800
+  output_interval: 11700
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: false
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.0001
+    dt_min: 0.0001
+    dt_max: 0.4
+    courant_max: 2.0
+  specific_storage: 0.0
+  reallocation_surplus: redistribute
+
+soil:
+  types:
+    - name: warrick
+      ksx: 2.89e-06
+      ksy: 2.89e-06
+      ksz: 2.89e-06
+      theta_s: 0.33
+      theta_r: 0.0
+      vg_alpha: 1.43
+      vg_n: 1.56
+      aev: 0.0
+  map: {constant: warrick}
+
+initial_conditions:
+  groundwater:
+    moisture: {constant: 0.03}
+
+boundary_conditions:
+  - name: ponded-top
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: head
+    value: {constant: 1.0e-05}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]

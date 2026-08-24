@@ -1,0 +1,91 @@
+# b3-kirkland — 2D layered-soil infiltration (Kirkland et al. 1992).
+# Frozen v2 schema, authored from the legacy SERGHEI-style inputs
+# (parameters/subsurface/vg/gwbc/polygontop/soilID/head .input files).
+# Notes:
+#   - soils: id 0 = Berino loamy fine sand, id 1 = Glendale clay loam
+#     (vg.input order); the layered map is input/soil_id.dat (3D ids,
+#     converted from soilID.input rows = z-levels).
+#   - initial head: head.input is uniformly -500, expressed as a constant.
+#   - the fixed-flux strip (gwbc bctype 3, -5.787e-6 m/s over x in
+#     [0.99, 4.01]) becomes a polygon flux BC on groundwater_top.
+#   - specific_storage is 0: the SERGHEI-style reference inputs carry no
+#     storage term (Kirkland is an unsaturated problem), and a nonzero Ss
+#     feeds the PCA compressibility/consistency-restore feedback on the very
+#     dry, flat-retention Glendale flank (P2 finding; docs/theory/
+#     groundwater.md "adaptive-step and storage notes").
+#   - surface dt is the outer loop step for this groundwater-only run; the
+#     adaptive dtg controller spans [0.01, 10] s (subsurface.input).
+# Gate: plan §9 b3 (digitized h=0 / h=-400 contours; blocking for P2).
+simulation:
+  id: b3-kirkland
+  title: Kirkland et al. (1992) layered-soil infiltration
+
+domain:
+  nx: 50
+  ny: 1
+  nz: 30
+  dx: 0.1
+  dy: 0.1
+  dz: 0.1
+  dz_stretch: 1.0
+  bottom_elevation: {constant: 0.0}
+  follow_terrain: false
+
+time:
+  dt: 10.0
+  t_end: 86400
+  output_interval: 7200
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: false
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.01
+    dt_min: 0.01
+    dt_max: 10.0
+    courant_max: 2.0
+  specific_storage: 0.0
+  reallocation_surplus: redistribute   # conservation at the perched mound (amendment A7)
+
+soil:
+  types:
+    - name: berino
+      ksx: 6.26e-05
+      ksy: 6.26e-05
+      ksz: 6.26e-05
+      theta_s: 0.3658
+      theta_r: 0.029
+      vg_alpha: 2.8
+      vg_n: 2.239
+      aev: 0.0
+    - name: glendale
+      ksx: 1.52e-06
+      ksy: 1.52e-06
+      ksz: 1.52e-06
+      theta_s: 0.4686
+      theta_r: 0.106
+      vg_alpha: 1.04
+      vg_n: 1.395
+      aev: 0.0
+  map: {file: input/soil_id.dat}
+
+initial_conditions:
+  groundwater:
+    head: {constant: -500.0}
+
+boundary_conditions:
+  - name: fixedflux
+    region: {polygon: [[0.99, -0.01], [0.99, 0.11], [4.01, 0.11], [4.01, -0.01]]}
+    target: groundwater_top
+    kind: flux
+    value: {constant: -5.787e-06}
+
+output:
+  filename: out/output.h5      # pinned by b3-kirkland/makeplot.py (plan §2.3)
+  variables:
+    groundwater: [hydraulic_head, water_content]

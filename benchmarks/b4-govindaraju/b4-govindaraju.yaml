@@ -1,0 +1,72 @@
+# b4-govindaraju — Overland-flow hydrograph on a plane (kinematic-wave
+# reference). Frozen v2 schema, authored from the legacy SERGHEI inputs
+# (parameters/sw/extbc/polygon/rainfall .input files).
+# Notes:
+#   - Chezy friction C = 1.767 (sw.input); the Chezy law is the plan §5.8
+#     additive extension — legacy Frehg was Manning-only.
+#   - rainfall converted from mm/h to m/s (input/rain.dat).
+#   - outlet: SERGHEI bctype 9 free outflow at the last column. The P1 gate
+#     adjudicated the provisional stage-sink mapping (plan §5.6 amendment):
+#     it is expressed as kind outflow — transmissive free outflow that
+#     extrapolates the stage down the continued bed slope at the east
+#     boundary faces. A stage sink held below the bed keeps the outlet
+#     column dry and blocks the metric's uu*depth measurement; a plain open
+#     boundary retains ~half the rain (the closed-edge fold removes the
+#     gravity forcing at the boundary face).
+#   - dry start: eta far below the bed everywhere.
+#   - dt: fixed-step equivalent of the reference run's CFL-driven stepping;
+#     subject to the P1 gate.
+# Gate: plan §9 b4 (hydrograph rel-L2 / peak / volume metrics; blocking P1).
+simulation:
+  id: b4-govindaraju
+  title: Govindaraju overland-flow plane (Chezy friction)
+
+domain:
+  nx: 200
+  ny: 10
+  nz: 1
+  dx: 0.109725
+  dy: 0.109725
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.1
+  t_end: 4800
+  output_interval: 120
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: chezy
+    coefficient: {constant: 1.767}
+    thin_layer_depth: 0.1
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-06               # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-06
+  rainfall:
+    series: {file: input/rain.dat}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: -10.0}
+
+boundary_conditions:
+  - name: outlet
+    region: {polygon: [[21.845, -0.01], [21.945, -0.01], [21.945, 2.0], [21.845, 2.0]]}
+    target: surface
+    kind: outflow
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: outlet_q, i: 199, j: 4, variables: [depth, uu]}

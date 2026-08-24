@@ -1,0 +1,64 @@
+# swe-bump-at-rest / emerged — well-balancing (C-property) test: still water
+# over a parabolic bump whose crest emerges above the free surface.
+# Frozen v2 schema, authored from the SERGHEI inputs
+# (ShallowWater/SWASHES/steady_state/bumps/rest/emerged: parameters/sw/dem/hini).
+# Notes:
+#   - Lake at rest: SERGHEI ships depth h via hini.input over the bumped bed;
+#     eta = bed + h = 0.100 m wherever wet (verified constant), so the initial
+#     condition is a flat free surface at eta = 0.1 m. The crest (bed up to
+#     0.2 m) pokes above it and stays dry (eta < bed is clamped to the bed).
+#   - frictionless: SERGHEI friction "none" -> Manning law with coefficient 0.0
+#     (frehg2 has no "none"; n = 0 is the equivalent).
+#   - REFLECTIVE outer boundary -> no boundary_conditions entries (closed box).
+#   - no forcing (no rain/evap/wind). The test is that velocities stay at
+#     machine zero (C-property).
+#   - 1000x4 strip (25 m x 0.1 m); the bump varies only in x, so the DEM rows
+#     are identical and the SERGHEI north-up raster is copied verbatim.
+#   - dt: the free surface is solved semi-implicitly (gravity is not dt-limited)
+#     and the advective CFL is non-binding at rest, so dt = 0.1 s is used well
+#     above the explicit acoustic limit (~0.013 s).
+simulation:
+  id: swe-bump-at-rest-emerged
+  title: Still water over an emerged bump (C-property)
+
+domain:
+  nx: 1000
+  ny: 4
+  nz: 1
+  dx: 0.025
+  dy: 0.025
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.1
+  t_end: 10000
+  output_interval: 1000
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.0}      # SERGHEI friction: none
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-03                   # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-03
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.1}               # flat lake surface; crest emerges dry
+
+output:
+  filename: out/emerged.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: midchannel, i: 500, j: 1, variables: [eta, uu, vv]}

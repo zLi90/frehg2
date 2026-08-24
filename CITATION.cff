@@ -1,0 +1,89 @@
+cff-version: 1.2.0
+message: >-
+  If you use Frehg2 in your research, please cite the software release and
+  the model papers below.
+type: software
+title: "Frehg2: coupled surface-water / groundwater / transport model"
+abstract: >-
+  Frehg2 couples a semi-implicit 2D shallow-water solver with a 3D
+  mass-conservative mixed-form Richards solver and explicit finite-volume
+  solute transport (with baroclinic density feedback), in C++20 with
+  Kokkos, MPI, PETSc, and parallel HDF5. It is a production-grade rewrite
+  of the validated Frehg 1.0 research code; each of its six benchmark
+  problems is a blocking, quantitative validation gate.
+authors:
+  - family-names: Li
+    given-names: Zhi
+version: 1.0.0
+date-released: "2026-08-21"
+license: BSD-3-Clause
+repository-code: "https://github.com/zLi90/frehg"
+keywords:
+  - hydrology
+  - shallow water equations
+  - Richards equation
+  - surface-subsurface coupling
+  - solute transport
+  - Kokkos
+  - MPI
+references:
+  - type: article
+    title: >-
+      Model instability and channel connectivity for 2D coastal marsh
+      simulations
+    authors:
+      - family-names: Li
+        given-names: Zhi
+      - family-names: Hodges
+        given-names: Ben R.
+    journal: Environmental Fluid Mechanics
+    volume: 19
+    year: 2019
+    start: 1309
+    end: 1338
+    doi: 10.1007/s10652-018-9623-7
+  - type: article
+    title: >-
+      Modeling subgrid-scale topographic effects on shallow marsh
+      hydrodynamics and salinity transport
+    authors:
+      - family-names: Li
+        given-names: Zhi
+      - family-names: Hodges
+        given-names: Ben R.
+    journal: Advances in Water Resources
+    volume: 129
+    year: 2019
+    start: 1
+    end: 15
+    doi: 10.1016/j.advwatres.2019.05.004
+  - type: article
+    title: >-
+      A mass-conservative predictor-corrector solution to the 1D Richards
+      equation with adaptive time control
+    authors:
+      - family-names: Li
+        given-names: Zhi
+      - family-names: "Özgen-Xian"
+        given-names: Ilhan
+      - family-names: Maina
+        given-names: Fadji Zaouna
+    journal: Journal of Hydrology
+    volume: 592
+    year: 2021
+    doi: 10.1016/j.jhydrol.2020.125809
+  - type: article
+    title: >-
+      Modeling hypersalinity caused by evaporation and surface-subsurface
+      exchange in a coastal marsh
+    authors:
+      - family-names: Li
+        given-names: Zhi
+      - family-names: Hodges
+        given-names: Ben R.
+      - family-names: Shen
+        given-names: Xiaofeng
+    journal: Journal of Hydrology
+    volume: 618
+    year: 2023
+    doi: 10.1016/j.jhydrol.2023.129268

@@ -1,0 +1,92 @@
+# swe-subcritical-bump — SWASHES steady subcritical flow over a bump
+# (SWASHES section 3.1, subcritical case). Frozen v2 schema, authored from the
+# SERGHEI inputs (ShallowWater/SWASHES/steady_state/bumps/subcritical/input).
+# Notes:
+#   - Steady state: unit discharge q = 4.42 m^2/s imposed at the west inflow;
+#     downstream water depth h = 2.0 m imposed at the east outflow. The bed is
+#     0 at both ends (bump 0.2 m in the middle), so the imposed depth maps to a
+#     free-surface elevation eta = 2.0 m at the east edge.
+#     SERGHEI extbc bcvals = "2.0 4.42 0.0" = [downstream h, inflow q, -];
+#     bctype 7 (inflow) -> kind discharge; bctype 6 (outflow) -> kind eta
+#     = downstream_bed + h = 0 + 2.0.
+#   - UNIT CONVERSION: frehg2's `kind: discharge` value is a TOTAL volumetric
+#     discharge [m^3/s] spread over the inflow polygon width, whereas SERGHEI's
+#     q = 4.42 is a UNIT discharge [m^2/s]. Domain width = ny*dy = 4*0.025 =
+#     0.1 m, so the frehg2 value is 4.42 * 0.1 = 0.442 m^3/s. (Confirmed by
+#     mass balance: outlet u = Q/(h*W) recovers q/h = 2.21 m/s.)
+#   - IC is the still-water field the SERGHEI hini encodes: eta = bed + h = 2.0
+#     constant (relaxes to the steady profile under the BCs).
+#   - frictionless: SERGHEI "none" -> Manning coefficient 0.0.
+#   - Outer BCtype TRANSMISSIVE; the two open faces are represented by the
+#     inflow (discharge) and outflow (eta) polygons taken from inflow.input /
+#     outflow.input. The lateral faces carry no flux at rest.
+#   - 1000x4 strip (25 m x 0.1 m); bump varies only in x, DEM copied verbatim.
+#   - SERGHEI dryDepth = 0 is below the schema minimum; min_depth = 1e-6 used.
+#   - dt = 0.001 s: the semi-implicit free-surface solve diverges for this
+#     frictionless started-from-rest transient at the deck's nominal 0.01 s
+#     (CFL blows up ~t=0.5 s); 0.001 s is stable. u = q/h ~ 2.2 m/s, dx = 0.025
+#     m -> advective CFL ~ 0.09 at dt=0.001 (advection is explicit here).
+#   - t_end = 200 s: this is a STEADY-STATE test; the profile is established by
+#     ~100 s (SERGHEI's nominal 1000 s is far past convergence). 200 s keeps the
+#     run local (~2-3 min) instead of ~11 min for the full 1000 s.
+# Caveat: frehg2's surface solver is SEMI-IMPLICIT vs SERGHEI's explicit Roe
+# shock-capturing scheme; for this subcritical steady case the difference is
+# minor.
+simulation:
+  id: swe-subcritical-bump
+  title: SWASHES steady subcritical flow over a bump
+
+domain:
+  nx: 1000
+  ny: 4
+  nz: 1
+  dx: 0.025
+  dy: 0.025
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.001
+  t_end: 200
+  output_interval: 50
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.0}      # SERGHEI friction: none
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-06                   # SERGHEI dryDepth 0 -> schema minimum
+  wetting_face_depth: 1.0e-06
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 2.0}               # still water at the downstream level
+
+boundary_conditions:
+  - name: inflow
+    region: {polygon: [[-0.1, 0.0], [-0.1, 0.2], [0.03, 0.2], [0.03, 0.0]]}
+    target: surface
+    kind: discharge
+    value: {constant: 0.442}           # unit q 4.42 m^2/s * width 0.1 m [m^3/s], west
+  - name: outflow
+    region: {polygon: [[24.97, 0.0], [24.97, 0.2], [25.03, 0.2], [25.03, 0.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 2.0}             # downstream stage (bed 0 + h 2.0), east
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: outlet, i: 999, j: 1, variables: [depth, uu]}
+    - {name: crest, i: 500, j: 1, variables: [eta, depth, uu]}

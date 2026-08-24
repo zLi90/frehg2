@@ -1,0 +1,63 @@
+# swe-lake-at-rest — 2D well-balancing (C-property) over irregular bathymetry.
+# Frozen v2 schema, authored from the SERGHEI inputs
+# (ShallowWater/Analytical/LakeAtRest1: parameters/sw/dem/hini).
+# Notes:
+#   - Still water: eta = bed + h = 3.0 m wherever wet (verified constant); the
+#     highest peaks (bed up to 4.0 m) emerge dry. Initial condition is a flat
+#     surface at eta = 3.0 m.
+#   - frictionless for the C-property test: SERGHEI sets friction "none"
+#     (its roughness 0.035 is inert with friction off) -> Manning coefficient 0.
+#   - REFLECTIVE outer boundary -> no boundary_conditions entries.
+#   - no forcing; the test is machine-zero velocity in 2D.
+#   - 200x200 genuine 2D bathymetry: the SERGHEI raster is north-up, so the DEM
+#     data rows were REVERSED when copied to input/dem.dat (frehg2 treats the
+#     first data row as j=0). The raster XLLCORNER/YLLCORNER (150,150) is inert
+#     — frehg2 places the grid at origin (0,0).
+#   - A sibling variant LakeAtRest2 exists in the SERGHEI suite (same grid,
+#     different bathymetry); only LakeAtRest1 is converted here.
+#   - dt = 0.5 s (semi-implicit free surface; advective CFL non-binding at rest).
+simulation:
+  id: swe-lake-at-rest
+  title: 2D lake at rest over irregular bathymetry (C-property)
+
+domain:
+  nx: 200
+  ny: 200
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.5
+  t_end: 100
+  output_interval: 20
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.0}      # SERGHEI friction: none
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-03                   # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-03
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 3.0}               # flat lake surface; peaks emerge dry
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: interior, i: 100, j: 100, variables: [eta, uu, vv]}

@@ -1,0 +1,65 @@
+# b1-sw, v1/experimental YAML dialect (archival; P17).
+# This is the PRE-frozen schema. tools/migrate_yaml_v1_to_v2 upgrades it to the frozen v2
+# schema (see benchmarks/b1-sw/b1-sw.yaml for the production v2 form). It intentionally uses
+# every legacy/experimental key that the migration renames:
+#   grid.* -> domain.*, time.{Tend,max_step,dt_out} -> time.{t_end,max_steps,output_interval},
+#   io.dir -> output.filename, bc type: discharge -> bc_discharge, soil.uniform -> soil.types[].
+simulation:
+  id: b1-sw
+  title: Converted from legacy input (MAXP1)
+  mode: surface_water
+
+grid:
+  nx: 1
+  ny: 10
+  nz: 30
+  dx: 80.0
+  dy: 80.0
+  dz: 0.1
+  dz_incre: 1.0
+  bot_z: -3.0
+  follow_terrain: true
+  bathymetry:
+    from_file: true
+
+time:
+  dt: 5.0
+  Tend: 18000.0
+  max_step: 100
+  dt_out: 1800
+
+modules:
+  surface_water: true
+  groundwater: false
+  solute: false
+
+surface_water:
+  gravity: 9.81
+  manning: 0.019
+  min_depth: 1.0e-08
+  viscosity:
+    x: 1.0e-06
+    y: 1.0e-06
+  waterfall_depth: 1.0e-08
+  h_diffusion_ref: 0.1
+
+initial_conditions:
+  surface_water:
+    eta: -2.0
+
+sources:
+  surface:
+    rainfall:
+      from_file: true
+      rate: 0.0
+
+io:
+  dir: out
+
+output:
+  format: hdf5
+  variables:
+  - water_depth
+  - eta
+  - uu
+  - vv

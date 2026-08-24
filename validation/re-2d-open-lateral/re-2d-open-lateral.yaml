@@ -1,0 +1,111 @@
+# re-2d-open-lateral — Hydrus-2D-referenced 2D infiltration with open lateral
+# boundaries and a fluctuating water table.
+# Frozen v2 schema, converted from the SERGHEI-RE reference deck
+#   testcases/serghei-re-tests/case4-2d-infiltration-with-open-lateral-boundaries/
+#     input-uniform-dz/
+#   (parameters/subsurface/vg/gwbc/soilID/head/headleft/headright/atmosphere/
+#    polygon*.input; dem.input).
+# Notes:
+#   - 40 x 1 x 60 vertical x-z slice, dx=dy=100 m (dem.input cellsize),
+#     dz = 0.25 m, 15 m tall (subsurface.input height 15, dz_base 0.25,
+#     ndepth 60).
+#   - homogeneous soil (vg.input); aev 0; specific_storage 0.
+#   - GEOMETRY CAVEAT: the SERGHEI deck uses an inclined / terrain-following
+#     mesh (dem.input surface drops 3.9 -> 0.0 m across the slice). frehg2's
+#     rectilinear grid approximates it here as a flat box (follow_terrain
+#     false, bottom_elevation 0); the box spans z in [0, 15] m.
+#   - initial condition: initialMode 2 (head file). head.input is the exact
+#     3D pressure-head field (hydrostatic below a water table that slopes from
+#     eta ~ 7.0 m on the west to ~ 0.9 m on the east, capped at -1.25 m
+#     suction above). Reproduced exactly as a 3D flat field, input/head.dat
+#     ((j*nx+i)*nz+k, k=0=bottom; source z-rows reversed).
+#   - top BC: gwbc dir 6, bctype 6 (atmospheric time-varying flux) on
+#     groundwater_top, from atmosphere.input -> input/atmosphere.dat
+#     (t[s], flux[m/s]; already SI, negative = infiltration).
+#   - west BC (gwbc dir 2) and east BC (gwbc dir 1): bctype 2 Dirichlet head
+#     on groundwater_side. headleft.input / headright.input are fixed vertical
+#     head profiles that are hydrostatic below the water table (constant
+#     -1.25 m suction above it). Represented as hydrostatic head from the
+#     water-table elevation (eta 7.005 m west, 0.905 m east); this reproduces
+#     the saturated-zone head exactly and only approximates the -1.25 m cap in
+#     the (near-inert) unsaturated zone. frehg2 head BCs offer no fixed
+#     vertical-profile form, so hydrostatic is the faithful choice here.
+#   - gw_scheme 1 (PCA) -> pca.
+#   - DURATION: t_end 157680000 s (5 yr, from parameters.input). dt_max is the
+#     deck's 300 s (subsurface.input), NOT the 3600 s assumed in the spec;
+#     the deck is ground truth. surface time.dt is the outer loop step; the
+#     adaptive dtg controller spans [0.01, 300] s.
+simulation:
+  id: re-2d-open-lateral
+  title: 2D infiltration with open lateral boundaries (Hydrus-2D reference)
+
+domain:
+  nx: 40
+  ny: 1
+  nz: 60
+  dx: 100.0
+  dy: 100.0
+  dz: 0.25
+  dz_stretch: 1.0
+  bottom_elevation: {constant: 0.0}
+  follow_terrain: false
+
+time:
+  dt: 300.0
+  t_end: 157680000
+  output_interval: 2592000
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: false
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.01
+    dt_min: 0.01
+    dt_max: 300.0
+    courant_max: 2.0
+  specific_storage: 0.0
+  reallocation_surplus: redistribute
+
+soil:
+  types:
+    - name: aquifer
+      ksx: 5.78e-04
+      ksy: 5.78e-04
+      ksz: 5.78e-04
+      theta_s: 0.45
+      theta_r: 0.1
+      vg_alpha: 1.65
+      vg_n: 2.0
+      aev: 0.0
+  map: {constant: aquifer}
+
+initial_conditions:
+  groundwater:
+    head: {file: input/head.dat}
+
+boundary_conditions:
+  - name: atmosphere-top
+    region: {polygon: [[-1.0, -1.0], [4001.0, -1.0], [4001.0, 101.0], [-1.0, 101.0]]}
+    target: groundwater_top
+    kind: flux
+    value: {series: {file: input/atmosphere.dat}}
+  - name: west-head
+    region: {polygon: [[-1.0, -1.0], [99.0, -1.0], [99.0, 101.0], [-1.0, 101.0]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 7.005}}
+  - name: east-head
+    region: {polygon: [[3901.0, -1.0], [4001.0, -1.0], [4001.0, 101.0], [3901.0, 101.0]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 0.905}}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]

@@ -1,0 +1,118 @@
+# elder-free-convection — the Elder (1967) / Voss-Souza (1987) free-convection problem.
+# A frehg2 (not SERGHEI) validation case for DENSITY-DRIVEN free convection
+# (groundwater + transport + density coupling, no surface module, NO through-flow).
+# This is the hardest and most notorious of the variable-density benchmarks: dense
+# fluid sitting over lighter fluid drives buoyant fingering plumes with no imposed
+# flow at all. It is famously mesh- and code-sensitive (the number of plumes and
+# whether the central plume rises or sinks bifurcates), so it validates the
+# buoyancy/Darcy coupling itself rather than a single "correct" number.
+#
+# ================= IMPORTANT STRUCTURAL LIMITATION (read this) =================
+# The canonical Elder problem imposes a SUSTAINED fixed-concentration (Dirichlet)
+# on the TOP boundary over the central half of the domain. frehg2's subsurface
+# transport module wires a prescribed scalar ghost ONLY on the y+ lateral side
+# (SubsurfaceTransport.cpp sideCodeYp) -- there is NO top-face (z) scalar-injection
+# path. So the sustained top source CANNOT be reproduced here. This case therefore
+# seeds the salt as an INITIAL CONDITION in the top-centre row (input/salt_ic.dat)
+# and lets it convect -- a *decaying-source* free-convection demonstration, NOT the
+# steady sustained-source Elder. Treat it as a qualitative check that frehg2's
+# baroclinic coupling produces gravitationally-driven fingering, not as a
+# quantitative match to the Elder isochlors. See README.md.
+# ==============================================================================
+#
+# Geometry: full Elder box 600 m (y) x 150 m (z), nx=1, ny=60 (dy=10 m), nz=30
+# (dz=5 m). Impermeable sides and base; the top is a no-flow lid here (no source).
+#
+# Elder -> frehg2 parameter mapping (Voss & Souza 1987 values):
+#   - permeability k = 4.845e-13 m^2, porosity 0.1, fluid props giving the classic
+#     Rayleigh number Ra = 400. Expressed as Ks = k*rho*g/mu ~ 4.75e-6 m/s.
+#   - Density ratio drho/rho = 0.2 (a very strong contrast). frehg2's baroclinic
+#     law r_rho = 1 + beta_rho*s with beta_rho hardwired 7.44e-4 gives the salt
+#     surrogate s_max = 0.2/7.44e-4 = 269 (used in input/salt_ic.dat).
+#   - Diffusion D = 3.565e-6 m^2/s -> transport.dispersion.molecular.
+#
+# Reference:
+#   Elder, J. W. (1967), Transient convection in a porous medium, J. Fluid Mech.
+#   27(3):609-623. Voss, C. I. & Souza, W. R. (1987), Variable density flow and
+#   solute transport simulation..., Water Resour. Res. 23(10):1851-1866.
+#
+# CAVEATS (beyond the top-source limitation): (1) beta_rho AND the viscosity ratio
+# are compile-time constants, so the 0.2 contrast is set only through s_max and the
+# viscosity may not match Elder's constant-viscosity assumption. (2) The dispersion
+# quirk (term on volumetric face fluxes) applies. (3) Elder is bifurcating: the
+# plume pattern depends on mesh and scheme, so there is no unique reference field.
+simulation:
+  id: elder-free-convection
+  title: Elder (1967) free-convection problem (decaying-source variant)
+
+domain:
+  nx: 1
+  ny: 60
+  nz: 30
+  dx: 1.0
+  dy: 10.0
+  dz: 5.0
+  dz_stretch: 1.0
+  bottom_elevation: {constant: 0.0}
+  follow_terrain: false
+
+time:
+  dt: 43200.0            # 0.5 day outer step
+  t_end: 315360000.0     # ~10 years
+  output_interval: 15768000.0  # ~0.5 year
+
+modules:
+  surface_water: false
+  groundwater: true
+  transport: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 3600.0
+    dt_min: 600.0
+    dt_max: 43200.0
+    courant_max: 2.0
+  specific_storage: 1.0e-06
+  density_coupling: {enabled: true}
+
+soil:
+  types:
+    - name: elder-medium
+      ksx: 4.75e-06
+      ksy: 4.75e-06
+      ksz: 4.75e-06
+      theta_s: 0.1
+      theta_r: 0.0
+      vg_alpha: 5.0
+      vg_n: 2.0
+      aev: 0.0
+  map: {constant: elder-medium}
+
+initial_conditions:
+  groundwater:
+    head: {constant: 150.0}          # fully saturated box (head above the top)
+  transport:
+    groundwater: {file: input/salt_ic.dat}   # salt slug in the top-centre row
+
+boundary_conditions:
+  # No lateral flow BCs: Elder is pure free convection (closed box). A single
+  # reference head is pinned on the y+ side to anchor the pressure datum; it is at
+  # s = 0 so it injects no salt and, being hydrostatic, drives no net through-flow.
+  - name: datum-head
+    region: {polygon: [[-1.0, 595.0], [1.0, 595.0], [1.0, 1000.0], [-1.0, 1000.0]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 150.0}}
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 3.565e-06}
+  bounds: {min: 0.0, max: 269.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]
+    transport: [concentration]

@@ -1,0 +1,159 @@
+# b5-vcatchment — Tilted-V catchment, coupled surface-subsurface
+# (Kollet et al. 2017 intercomparison), rain scenario. Frozen v2 schema,
+# authored from the legacy SERGHEI-style inputs (parameters/sw/subsurface/
+# vg/extbc/gwbc/soilID/wt/roughness/rainfall .input files); this is also
+# the plan §6 representative example.
+# Notes:
+#   - raster row convention: frehg2 reads the first data row as j = 0
+#     (GridDataReader contract) while SERGHEI reads rasters north-up, so the
+#     SERGHEI polygon/monitor coordinates flip as y -> 55 - y. The channel
+#     occupies rows j = 0..4 (bed 0 at the outlet corner), the hillslope
+#     rises northward at 5 % and eastward at 2 %.
+#   - subsurface mesh: terrain-following with uniform layers (amendment
+#     A12) — every column carries 25 x 0.2 m below its own bed, the
+#     terrain-parallel 5 m slab of the reference (SERGHEI subsurface.input
+#     height: 5.0; GwInit.h:109-117). The legacy scaled-terrain wedge would
+#     leave the outlet columns 0.5 m deep and the no-rain scenario without
+#     a water table there.
+#   - soils: id 0 = loam (Ks 2.78e-3), id 1 = zero-conductivity outlet wall
+#     (vg.input Ks list "2.78e-3;0.0"); map input/soil_id.dat (legacy 2D
+#     slab replicated over nz).
+#   - initial condition: water table from input/water_table.dat (2 m below
+#     the local surface; legacy initialMode 4, wt.input).
+#   - rainfall: 100 mm/h for 20 h then dry, converted to m/s, over every
+#     cell (the reference rains uniformly).
+#   - the gwbc "surface" entry (bctype 8, whole footprint) marked the
+#     coupled top boundary in the legacy run; Frehg2's coupler owns that
+#     exchange, so it maps to no explicit BC here (plan §5.7).
+#   - outlet: stage reservoir at the channel-end bed (kind eta, 0.0 —
+#     free outfall over the domain edge). The P3 gate adjudicated the P0
+#     provisional -10 m sink and the amendment-A2 outflow kind: the sink
+#     differs from the bed-level stage only in the (irrelevant) held value,
+#     and the transmissive kind deadlocks on the flat channel end (ghost
+#     stage = cell stage gives no gradient; the ghost velocity copy carries
+#     nothing once a pool forms — measured: a 3 m lake filled the domain).
+#     Neighbors discharge into the held cells across the full head and the
+#     mass-audit eta-BC accounting measures it exactly (the P1 finding that
+#     stored velocities under-read discharge).
+#   - wetting_face_depth 1e-3: sub-mm rain films must infiltrate (min_depth
+#     1e-6 keeps them wet) but must not advect momentum across hairline
+#     faces (SERGHEI's dryDepth 1e-6 is the min_depth analogue; b6's legacy
+#     wtfh was 5e-4).
+#   - groundwater.timestep: courant_max 10 and dq 0.05/0.1 (legacy defaults
+#     2 and 0.01/0.02). The legacy controller pins dtg near 0.4 s for the
+#     entire 20 h rain window: front cells passing near saturation carry
+#     dK/dtheta ~ 1 m/s and any capacity-limited pond drains at ~Ks. The
+#     relaxed knobs hold dtg near 2 s; the envelope gate and the volume
+#     audits adjudicate the accuracy (gw budget closes to 1e-10 either way).
+#   - coupling.mode: sync committed; the P3 gate also runs the subcycled
+#     variant (plan §9). In sync mode the run marches on the common
+#     adaptive step starting from time.dt (amendment A10).
+# Gate: plan §9 b5 (PF/CATHY/HGS/Cast3M discharge + ponding envelopes,
+# rain and no-rain scenarios; blocking for P3).
+simulation:
+  id: b5-vcatchment
+  title: Tilted-V catchment (Kollet 2017), rain scenario
+
+domain:
+  nx: 101
+  ny: 55
+  nz: 25
+  dx: 1.0
+  dy: 1.0
+  dz: 0.2
+  dz_stretch: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: true
+  terrain_layers: uniform
+  decomposition: {mpi_nx: auto, mpi_ny: auto}
+
+time:
+  # Sync mode adapts from this initial step (settles near 1.8 s under the
+  # controller knobs below) — the value the gated rain/sync run used.
+  # KNOWN LIMITATION (amendment A17): subcycled mode marches the surface
+  # at this dt FIXED, and at 5.0 s the rain-window surface sees CFL ~10
+  # excursions while the below-bed clamp creation grows 5x (8 % of rain
+  # vs 1.6 % in sync), measured to push the discharge peak to +16.3 %
+  # (tolerance 15 %). A subcycled rain run needs dt ~2.0 s (the sync
+  # mode's settled step); that configuration is diagnosed but not gated —
+  # the owner concluded the b5 battery early (reference uncertainty,
+  # runtime). The no-rain scenario has its own dt (quasi-static surface).
+  dt: 5.0
+  t_end: 432000.0
+  output_interval: 36000
+
+modules:
+  surface_water: true
+  groundwater: true
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {file: input/roughness.dat}
+    thin_layer_depth: 0.01
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-06
+  wetting_face_depth: 1.0e-03
+  rainfall:
+    series: {file: input/rain.dat}
+  evaporation: {constant: 0.0}
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.001
+    dt_min: 0.001
+    dt_max: 10.0
+    courant_max: 10.0
+    dq_grow: 0.05
+    dq_shrink: 0.1
+  specific_storage: 1.0e-05
+
+soil:
+  types:
+    - name: loam
+      ksx: 2.78e-03
+      ksy: 2.78e-03
+      ksz: 2.78e-03
+      theta_s: 0.4
+      theta_r: 0.08
+      vg_alpha: 6.0
+      vg_n: 2.0
+      aev: 0.0
+    - name: outlet-wall
+      ksx: 0.0
+      ksy: 0.0
+      ksz: 0.0
+      theta_s: 0.4
+      theta_r: 0.08
+      vg_alpha: 6.0
+      vg_n: 2.0
+      aev: 0.0
+  map: {file: input/soil_id.dat}
+
+coupling: {mode: sync}
+
+initial_conditions:
+  surface:
+    eta: {constant: -10.0}     # dry start (SERGHEI initialMode dry)
+  groundwater:
+    water_table: {file: input/water_table.dat}
+
+boundary_conditions:
+  - name: outlet
+    region: {polygon: [[-0.1, -0.1], [0.9, -0.1], [0.9, 4.9], [-0.1, 4.9]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.0}    # free outfall: reservoir at the channel-end bed
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv, seepage]
+    groundwater: [hydraulic_head, water_content]
+  monitors:
+    - {name: outlet_q, i: 1, j: 2, variables: [depth, uu, vv]}
+  checkpoint: {interval: 36000}

@@ -1,0 +1,88 @@
+# swe-steady-plane / slope2 — steady flow toward normal depth on a tilted
+# frictionless plane. Frozen v2 schema, authored from the SERGHEI inputs
+# (ShallowWater/Analytical/steadyPlane/slope2/input).
+# Notes:
+#   - 100x1 plane, dx = dy = 10 m (1000 m x 10 m). Bed slopes from 19.9 m at the
+#     west (x=0) down to 0.1 m at the east (x=1000): flow runs west -> east.
+#   - Inflow (west): SERGHEI bctype 7 imposes unit discharge; bcvals
+#     "0.01 0.00196306 0.0" = [downstream h, inflow q, -] -> kind discharge
+#     q = 0.00196306 m^2/s.
+#   - Outflow (east): SERGHEI bctype 6 imposes downstream depth h = 0.01 m. The
+#     east bed is 0.1 m, so the stage is eta = bed + h = 0.11 m (kind eta). Note
+#     SERGHEI bctype 6 prescribes a DEPTH; frehg2 kind eta prescribes a
+#     free-surface ELEVATION, so the downstream bed is added.
+#   - Outer BCtype TRANSMISSIVE; represented by the inflow/outflow polygons.
+#   - FRICTION: SERGHEI's slope2 deck sets `friction: none` but leaves
+#     `roughness: 0.033`, and its extbc comments the inflow as the "normal
+#     specific discharge" with the "steady water depth" downstream — i.e. q =
+#     0.00196306 and h = 0.01 are the Manning normal-flow values for n = 0.033
+#     at S0 = 0.02 (q = h^{5/3} S0^{1/2}/n). With friction genuinely off that
+#     pairing is degenerate: the plane has no normal depth and simply drains
+#     dry. We therefore use n = 0.033 (the roughness the discharge was derived
+#     from, and the value SERGHEI's slope8 deck applies), giving the intended
+#     uniform normal depth h = 0.01. This is a deliberate deviation from the
+#     slope2 deck's `friction: none` flag, treated as a deck inconsistency.
+#   - IC: SERGHEI initialMode "h" = uniform depth 0.02 m over the sloping bed,
+#     so eta = bed + 0.02 (input/eta_slope2.dat). Single-row strip, so no DEM
+#     row-reversal was needed.
+#   - dt = 1.0 s: u = q/h ~ 0.1 m/s over dx = 10 m leaves the advective CFL far
+#     from binding; the free surface is semi-implicit.
+# Caveat: frehg2's surface solver is SEMI-IMPLICIT vs SERGHEI's explicit
+# scheme; for this subcritical steady case the difference is minor.
+simulation:
+  id: swe-steady-plane-slope2
+  title: Steady flow on a frictionless tilted plane (slope 2)
+
+domain:
+  nx: 100
+  ny: 1
+  nz: 1
+  dx: 10.0
+  dy: 10.0
+  dz: 1.0
+  bottom_elevation: {file: input/dem_slope2.dat}
+  follow_terrain: false
+
+time:
+  dt: 1.0
+  t_end: 20000
+  output_interval: 1000
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.033}    # SERGHEI roughness (see header note on friction)
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-03                   # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-03
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {file: input/eta_slope2.dat}  # bed + uniform 0.02 m depth
+
+boundary_conditions:
+  - name: inflow
+    region: {polygon: [[-1.0, -1.0], [-1.0, 11.0], [6.0, 11.0], [6.0, -1.0]]}
+    target: surface
+    kind: discharge
+    value: {constant: 0.0196306}       # unit q 0.00196306 m^2/s * width 10 m [m^3/s], west
+  - name: outflow
+    region: {polygon: [[994.0, -1.0], [994.0, 11.0], [1005.0, 11.0], [1005.0, -1.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.11}            # downstream stage = bed 0.1 + h 0.01
+
+output:
+  filename: out/slope2.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+  monitors:
+    - {name: outlet, i: 99, j: 0, variables: [depth, uu]}
