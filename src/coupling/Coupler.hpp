@@ -111,12 +111,16 @@ class Coupler {
   /// nonzero when the dry-cell hold rule is active).
   const Field2<real_t>& seepAccum() const { return seepAccum_; }
 
- private:
-  // Exchange.cpp kernels.
+  // NOTE: the Exchange.cpp kernels below are implementation detail, kept
+  // public only because nvcc forbids extended __host__ __device__ lambdas
+  // (KOKKOS_LAMBDA) inside private member functions (CUDA C++ programming
+  // guide, "Extended Lambda Restrictions"). Treat as private.
+ public:
   void beginWindow();
   void applySeepage(real_t dt);
   void reduceAudit();
 
+ private:
   const Grid& grid_;
   swe::SurfaceSolver& surface_;
   gw::RichardsSolver& gw_;

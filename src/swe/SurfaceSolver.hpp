@@ -178,7 +178,11 @@ class SurfaceSolver {
   /// it; the driver reduces and warns).
   real_t maxCfl() const;
 
- private:
+  // NOTE: the step-phase helpers below are implementation detail, kept
+  // public only because nvcc forbids extended __host__ __device__ lambdas
+  // (KOKKOS_LAMBDA) inside private member functions (CUDA C++ programming
+  // guide, "Extended Lambda Restrictions"). Treat as private.
+ public:
   // Initialization helpers (SurfaceSolver.cpp).
   void readBathymetry(const FrehgConfig& config);
   void buildRainMask(const FrehgConfig& config);
@@ -232,6 +236,7 @@ class SurfaceSolver {
   // Sources (SurfaceSources.cpp).
   void evapRain();
 
+ private:
   const Grid& grid_;
   HaloExchanger& halo_;
 

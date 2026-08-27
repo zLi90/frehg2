@@ -80,6 +80,33 @@ void assign3(const Grid& grid, const Field3<real_t>& field, const FileOrConstant
       KOKKOS_LAMBDA(const int j, const int i, const int k) { f(j, i, k) = value; });
 }
 
+/// Per-column top layer from the (static) active mask, including halo
+/// columns — the stencil helpers evaluate at interface cells too. A free
+/// function rather than constructor code: nvcc requires an extended
+/// __host__ __device__ lambda's enclosing function to have a takeable
+/// address, which a constructor never has.
+void computeTopLayer(const Grid& grid, const Field2<int>& kTop) {
+  const int nyl = grid.nyLocal();
+  const int nxl = grid.nxLocal();
+  const int nzc = grid.nz();
+  Field2<int> f = kTop;
+  Field3<PetscInt> gid = grid.gid3();
+  Kokkos::parallel_for(
+      "transport_ktop",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {0, 0}, {nyl + 2, nxl + 2}),
+      KOKKOS_LAMBDA(const int j, const int i) {
+        int top = -1;
+        for (int k = 0; k < nzc; ++k) {
+          if (gid(j, i, k) >= 0) {
+            top = k;
+            break;
+          }
+        }
+        f(j, i) = top;
+      });
+}
+
 }  // namespace
 
 ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
@@ -170,27 +197,7 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
   applyInitialConditions(config);
 
   if (subs_.active) {
-    // Per-column top layer from the (static) active mask, including halo
-    // columns — the stencil helpers evaluate at interface cells too.
-    const int nyl = grid_.nyLocal();
-    const int nxl = grid_.nxLocal();
-    const int nzc = grid_.nz();
-    Field2<int> kTop = kTop_;
-    Field3<PetscInt> gid = grid_.gid3();
-    Kokkos::parallel_for(
-        "transport_ktop",
-        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
-            {0, 0}, {nyl + 2, nxl + 2}),
-        KOKKOS_LAMBDA(const int j, const int i) {
-          int top = -1;
-          for (int k = 0; k < nzc; ++k) {
-            if (gid(j, i, k) >= 0) {
-              top = k;
-              break;
-            }
-          }
-          kTop(j, i) = top;
-        });
+    computeTopLayer(grid_, kTop_);
   }
 
   // Initial ghost/derived state: side ghosts at t_start, the exported

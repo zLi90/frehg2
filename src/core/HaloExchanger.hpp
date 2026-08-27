@@ -74,7 +74,11 @@ class HaloExchanger {
   /// \return true when messages are passed to MPI from device memory.
   bool gpuAware() const { return gpuAware_; }
 
- private:
+  // NOTE: everything down to the data members is implementation detail, kept
+  // public only because nvcc forbids extended __host__ __device__ lambdas
+  // (KOKKOS_LAMBDA) inside private member functions (CUDA C++ programming
+  // guide, "Extended Lambda Restrictions"). Treat as private.
+ public:
   struct Entry {
     std::string name;
     bool is3d = false;
@@ -97,6 +101,7 @@ class HaloExchanger {
                         bool wideRows);
   std::vector<std::size_t> resolveNames(const std::vector<std::string>& names) const;
 
+ private:
   const Grid& grid_;
   bool gpuAware_ = false;
   std::vector<Entry> entries_;

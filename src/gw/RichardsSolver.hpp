@@ -258,7 +258,11 @@ class RichardsSolver {
   /// (legacy get_mass, solve.c:372-376).
   real_t ownedVolume() const;
 
- private:
+  // NOTE: the step-phase helpers below are implementation detail, kept
+  // public only because nvcc forbids extended __host__ __device__ lambdas
+  // (KOKKOS_LAMBDA) inside private member functions (CUDA C++ programming
+  // guide, "Extended Lambda Restrictions"). Treat as private.
+ public:
   // Initialization (RichardsSolver.cpp).
   void stageSoil(const FrehgConfig& config);
   void applyInitialConditions(const FrehgConfig& config);
@@ -291,6 +295,7 @@ class RichardsSolver {
   // Adaptive stepping (AdaptiveStep.cpp).
   void adaptTimeStep(real_t dtg);
 
+ private:
   const Grid& grid_;
   const TerrainMetric& mesh_;
   HaloExchanger& halo_;

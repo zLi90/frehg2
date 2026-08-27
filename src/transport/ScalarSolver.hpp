@@ -193,6 +193,11 @@ class ScalarSolver {
     long dischargeCells = 0;  ///< paired condition's global member count
   };
 
+  // NOTE: the step-phase helpers below are implementation detail, kept
+  // public only because nvcc forbids extended __host__ __device__ lambdas
+  // (KOKKOS_LAMBDA) inside private member functions (CUDA C++ programming
+  // guide, "Extended Lambda Restrictions"). Treat as private.
+ public:
   // ScalarSolver.cpp
   void buildBoundaryLists(const BoundarySet& boundaries);
   void applyInitialConditions(const FrehgConfig& config);
@@ -215,6 +220,7 @@ class ScalarSolver {
   void stageSurfaceFarNeighbors();
   void stageSubsurfaceFarNeighbors();
 
+ private:
   const Grid& grid_;
   HaloExchanger& halo_;
 
