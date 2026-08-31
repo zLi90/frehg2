@@ -39,11 +39,16 @@ KOKKOS_INLINE_FUNCTION VgSoil soilAt(const V3& vga, const V3& vgn, const V3& wcs
 }
 
 /// Ghost-head rule for one domain-edge cell (enforce_head_bc:757-788).
-/// Hydrostatic edges in coupled runs follow the live local surface exactly
-/// as legacy does (:773-788): the ghost is the density-scaled hydrostatic
-/// column of the edge cell's own bed plus its current surface depth — the
-/// configured reference stage applies only without a surface module (the
-/// P0 constant-reference form, r-scaled once density coupling is active).
+/// A hydrostatic edge is classified by its configured stage `value` (the
+/// water-table elevation) relative to the edge bed. A stage ABOVE the bed is a
+/// ponded/tidal boundary: in coupled runs the ghost follows the live local
+/// surface exactly as legacy does (:773-788) — the density-scaled hydrostatic
+/// column of the edge cell's own bed plus its current surface depth — so a
+/// seaward stage tracks the tide. A stage at or below the bed is a subsurface
+/// water table (a lateral hillslope edge, or any uncoupled run): the ghost is
+/// hydrostatic about the configured stage, (value - zc)*rFace (the P0 form,
+/// r-scaled once density coupling is active). Without this split a coupled dry
+/// edge would be pinned to the ground surface and flood.
 /// Legacy scales the y+ depth term by the face density ratio but leaves the
 /// y- depth term unscaled (:777 vs :787) — preserved, with the x edges
 /// mirroring the y rules (legacy had no x head conditions; P2
@@ -57,7 +62,14 @@ KOKKOS_INLINE_FUNCTION real_t ghostHead(int code, real_t value, real_t interior,
     return value;
   }
   if (code == static_cast<int>(GwBcCode::HeadHydrostatic)) {
-    if (coupled) {
+    // A configured stage ABOVE the edge bed is a ponded/tidal boundary: in a
+    // coupled run its ghost follows the live local surface (bed + depth) so a
+    // seaward stage tracks the tide. A stage at or below the bed is a
+    // subsurface water table (a lateral hillslope edge, or any uncoupled run):
+    // the ghost is hydrostatic about the configured stage, the same fixed form
+    // the uncoupled path uses. Without this split a coupled dry edge would be
+    // pinned to the ground surface and flood, ignoring the configured stage.
+    if (coupled && value > bed) {
       const real_t hydro = (bed - zc) * rFace;
       return plusSide ? hydro + depth * rFace : hydro + depth;
     }
