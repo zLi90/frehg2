@@ -38,6 +38,18 @@ target_compile_definitions(frehg_unit_tests PRIVATE
 add_test(NAME unit.all COMMAND frehg_unit_tests)
 set_tests_properties(unit.all PROPERTIES LABELS "unit" PROCESSORS 1)
 
+# p5 negative test (v2 plan §2B.3): the backend-consistency invariant in
+# LinearSystem.hpp must REJECT a device MemSpace paired with a PETSc that
+# lacks Kokkos. The target is excluded from the normal build; the test
+# builds it on demand and passes only when compilation FAILS.
+add_executable(frehg_compile_fail_backend EXCLUDE_FROM_ALL unit/compile_fail_backend.cpp)
+target_link_libraries(frehg_compile_fail_backend PRIVATE frehg::core frehg::compiler_flags)
+add_test(NAME unit.p5.backend_invariant_fires
+         COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}"
+                 --target frehg_compile_fail_backend)
+set_tests_properties(unit.p5.backend_invariant_fires PROPERTIES
+  LABELS "unit" PROCESSORS 1 WILL_FAIL TRUE)
+
 # The tests compare doubles bitwise (0-ULP round-trip contracts); disable FP
 # contraction so "expected" values computed at different inlined call sites
 # cannot differ by a fused multiply-add.
@@ -79,6 +91,19 @@ set_tests_properties(unit.migrate_yaml PROPERTIES LABELS "unit")
 add_test(NAME unit.parameter_docs
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/check_parameter_docs.py)
 set_tests_properties(unit.parameter_docs PROPERTIES LABELS "unit")
+
+# Run-record checker sensitivity (v2 plan §2A gate r1, §6.3 negative tests):
+# a synthetic valid record passes; every structural corruption fails.
+add_test(NAME unit.run_record_checker
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/test_run_record_checker.py
+          --checker ${CMAKE_SOURCE_DIR}/tools/check_run_record.py)
+set_tests_properties(unit.run_record_checker PROPERTIES LABELS "unit")
+
+# p2/p3 gate-logic negative battery (v2 plan §6.3): each p-gate assertion is
+# provably able to fail on synthetic result sets.
+add_test(NAME unit.p_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_p_gates.py)
+set_tests_properties(unit.p_gates.negative PROPERTIES LABELS "unit")
 
 # ---------------------------------------------------------------------------
 # Benchmark configuration validation (part of the P0 exit criteria)
@@ -230,6 +255,191 @@ endforeach()
 # sanitizer lane configures with a multiplier instead of maintaining a
 # second set of numbers (plan §10 P5, scripts/run_sanitizers.sh).
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# v2 Q1 gates (v2 plan §2.3, §7): g1 solver invariance, g2 iteration
+# flatness, the s-gate scalability matrix, and the per-module perf
+# baseline. Gate-first (v2 plan §6.1): these entries land red and are
+# turned green by the Q1 solver work.
+# ---------------------------------------------------------------------------
+set(_scaling ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/run_scaling.py
+    --frehg $<TARGET_FILE:frehg> --mpiexec ${MPIEXEC_EXECUTABLE}
+    --repo ${CMAKE_SOURCE_DIR})
+set(_scaling_env "FI_PROVIDER=tcp;OMP_PROC_BIND=false")
+
+# g1 per-PR lanes: the fast gates (b1-b4) under each new preconditioner, and
+# the default-mode rank-invariance lanes under amg. b5/b6 amg lanes are
+# nightly-class like their parents.
+foreach(pc amg gamg)
+  foreach(gate b1 b2 b3 b4)
+    add_test(NAME regression.g1.${gate}.${pc}
+      COMMAND ${_regress} ${gate} --solver ${pc} ${_regress_args}
+              --work ${CMAKE_BINARY_DIR}/regression/g1-${gate}-${pc})
+    set_tests_properties(regression.g1.${gate}.${pc} PROPERTIES
+      LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+  endforeach()
+endforeach()
+
+foreach(variant "rank-invariance;b1" "rank-invariance-b2;b2")
+  list(GET variant 0 subcommand)
+  list(GET variant 1 short)
+  add_test(NAME regression.g1.${short}_rank_invariance.default.amg
+    COMMAND ${_regress} ${subcommand} --mode default --solver amg ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/g1-rank-${short}-amg)
+  set_tests_properties(regression.g1.${short}_rank_invariance.default.amg PROPERTIES
+    LABELS "regression;mpi" ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 1800)
+endforeach()
+
+add_test(NAME regression.g1.b5_rank_invariance.default.amg
+  COMMAND ${_regress} rank-invariance-b5 --mode default --solver amg ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/g1-rank-b5-amg)
+set_tests_properties(regression.g1.b5_rank_invariance.default.amg PROPERTIES
+  LABELS "regression_nightly" ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 3600)
+
+foreach(scenario rain)
+  # The parent gate's approved record is the A15/A17 shortened 24 h horizon
+  # (the release pipeline gates b5 with --t-end 86400); g1 holds the amg
+  # lane to the parent's record, not to the never-adjudicated full horizon
+  # (amendment V2-A4).
+  add_test(NAME regression.g1.b5.${scenario}.sync.amg
+    COMMAND ${_regress} b5 --scenario ${scenario} --coupling sync --solver amg
+            --t-end 86400 ${_regress_args} --ranks 4
+            --work ${CMAKE_BINARY_DIR}/regression/g1-b5-${scenario}-amg)
+  set_tests_properties(regression.g1.b5.${scenario}.sync.amg PROPERTIES
+    LABELS "regression_nightly" ENVIRONMENT "${_regress_env}" PROCESSORS 4
+    TIMEOUT 43200)
+endforeach()
+
+foreach(variant ss td)
+  add_test(NAME regression.g1.b6.${variant}.amg
+    COMMAND ${_regress} b6 --variant ${variant} --solver amg ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/g1-b6-${variant}-amg)
+  set_tests_properties(regression.g1.b6.${variant}.amg PROPERTIES
+    LABELS "regression_nightly" ENVIRONMENT "${_regress_env}" TIMEOUT 43200)
+endforeach()
+
+# g2 (per-PR, v2 plan §2.3): iteration flatness at {1,2,4,8} ranks on the
+# A23 synthetic case under amg; block-Jacobi's growth is recorded nightly
+# alongside (the documented motivation, not a gate).
+add_test(NAME scaling.g2.iters.amg
+  COMMAND ${_scaling} --gate iters --solver amg --ranks 1 2 4 8
+          --tolerances ${CMAKE_SOURCE_DIR}/tests/regression/tolerances/g2.yaml
+          --json ${CMAKE_BINARY_DIR}/scaling/g2-amg.json
+          --work ${CMAKE_BINARY_DIR}/scaling/g2-amg)
+set_tests_properties(scaling.g2.iters.amg PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_scaling_env};OMP_NUM_THREADS=1"
+  PROCESSORS 8 TIMEOUT 3600)
+
+add_test(NAME scaling.g2.record.bjacobi
+  COMMAND ${_scaling} --gate none --solver bjacobi-icc --ranks 1 2 4 8
+          --json ${CMAKE_BINARY_DIR}/scaling/g2-bjacobi.json
+          --work ${CMAKE_BINARY_DIR}/scaling/g2-bjacobi)
+set_tests_properties(scaling.g2.record.bjacobi PROPERTIES
+  LABELS "scaling_nightly" ENVIRONMENT "${_scaling_env};OMP_NUM_THREADS=1"
+  PROCESSORS 8 TIMEOUT 3600)
+
+# s-gates (nightly, v2 plan §7.2): strong, weak, threads, hybrid.
+add_test(NAME scaling.s1.strong
+  COMMAND ${_scaling} --gate strong --ranks 1 2 4 --repeats 3
+          --json ${CMAKE_BINARY_DIR}/scaling/s1.json
+          --work ${CMAKE_BINARY_DIR}/scaling/s1)
+set_tests_properties(scaling.s1.strong PROPERTIES
+  LABELS "scaling_nightly" ENVIRONMENT "${_scaling_env};OMP_NUM_THREADS=1"
+  PROCESSORS 4 TIMEOUT 7200)
+
+add_test(NAME scaling.s2.weak.amg
+  COMMAND ${_scaling} --gate weak --solver amg --ranks 1 2 4 --repeats 3
+          --json ${CMAKE_BINARY_DIR}/scaling/s2.json
+          --work ${CMAKE_BINARY_DIR}/scaling/s2)
+set_tests_properties(scaling.s2.weak.amg PROPERTIES
+  LABELS "scaling_nightly" ENVIRONMENT "${_scaling_env};OMP_NUM_THREADS=1"
+  PROCESSORS 4 TIMEOUT 7200)
+
+add_test(NAME scaling.s3.threads
+  COMMAND ${_scaling} --gate threads --threads 1 2 4 --repeats 3
+          --json ${CMAKE_BINARY_DIR}/scaling/s3.json
+          --work ${CMAKE_BINARY_DIR}/scaling/s3)
+set_tests_properties(scaling.s3.threads PROPERTIES
+  LABELS "scaling_nightly" ENVIRONMENT "${_scaling_env}" PROCESSORS 4 TIMEOUT 7200)
+
+add_test(NAME scaling.s4.hybrid
+  COMMAND ${_scaling} --gate hybrid --repeats 3
+          --json ${CMAKE_BINARY_DIR}/scaling/s4.json
+          --work ${CMAKE_BINARY_DIR}/scaling/s4)
+set_tests_properties(scaling.s4.hybrid PROPERTIES
+  LABELS "scaling_nightly" ENVIRONMENT "${_scaling_env}" PROCESSORS 4 TIMEOUT 7200)
+
+# Per-module perf regression vs the tracked baseline (v2 plan §7.1.2).
+add_test(NAME regression.perf_baseline
+  COMMAND ${_scaling} --gate perf-baseline --repeats 3
+          --baseline ${CMAKE_SOURCE_DIR}/docs/developer-guide/perf-baseline.json
+          --work ${CMAKE_BINARY_DIR}/scaling/perf-baseline)
+set_tests_properties(regression.perf_baseline PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_scaling_env};OMP_NUM_THREADS=1" TIMEOUT 1800)
+
+# r2 — timer coverage and record overhead (v2 plan §2A.3): direct children of
+# the time loop cover >= 90 % at 1 rank; halo/io sections nonzero at 4 ranks;
+# writing the run record costs <= 1 % of the loop. Reads the run record, not
+# stdout. (r1 has no entry of its own: every regression gate's run_case now
+# checks the record in-line.)
+add_test(NAME regression.r2_timer_coverage
+  COMMAND ${_scaling} --gate timer-coverage --repeats 1
+          --work ${CMAKE_BINARY_DIR}/scaling/timer-coverage)
+set_tests_properties(regression.r2_timer_coverage PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_scaling_env};OMP_NUM_THREADS=1"
+  PROCESSORS 4 TIMEOUT 1800)
+
+# ---------------------------------------------------------------------------
+# v2 Q3 p-gates (v2 plan §2B.3): performance portability. Gate-first (§6.1).
+# p4 (device compile+link) lives in .github/workflows/cuda-compile.yml; the
+# p5 negative test is unit.p5.backend_invariant_fires above; p6 is the
+# owner-executed bundle (scripts/gpu_acceptance.sh).
+# ---------------------------------------------------------------------------
+
+# p1 — backend invariance (per-PR): b1 and b4 under {OpenMP-4 + aij} and
+# {OpenMP-4 + aijkokkos} must pass the unchanged gate criteria (the existing
+# regression.b1/b4 entries are the {1-thread + aij} corner). This is the CPU
+# rehearsal of the exact linear-algebra path a GPU build takes.
+foreach(mt aij aijkokkos)
+  foreach(gate b1 b4)
+    add_test(NAME regression.p1.${gate}.omp4.${mt}
+      COMMAND ${_regress} ${gate} --mat-type ${mt} ${_regress_args}
+              --work ${CMAKE_BINARY_DIR}/regression/p1-${gate}-${mt})
+    set_tests_properties(regression.p1.${gate}.omp4.${mt} PROPERTIES
+      LABELS "regression" ENVIRONMENT "FI_PROVIDER=tcp;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
+      PROCESSORS 4 TIMEOUT 3600)
+  endforeach()
+endforeach()
+
+# p1 nightly extension: b6 (coupled + transport + density, the full physics)
+# under aijkokkos at 4 threads.
+add_test(NAME regression.p1.b6.ss.omp4.aijkokkos
+  COMMAND ${_regress} b6 --variant ss --mat-type aijkokkos ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/p1-b6-ss-aijkokkos)
+set_tests_properties(regression.p1.b6.ss.omp4.aijkokkos PROPERTIES
+  LABELS "regression_nightly" ENVIRONMENT "FI_PROVIDER=tcp;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
+  PROCESSORS 4 TIMEOUT 43200)
+
+# p2 — OpenMP solver thread scaling (nightly): on the aijkokkos + amg path
+# the gw solve must actually thread (4-thread solve < 1-thread solve) with
+# thread-invariant algebra (iteration drift <= 2 %, volumes to 1e-8).
+add_test(NAME scaling.p2.solver_threads
+  COMMAND ${_scaling} --gate p2-solver-threads --threads 1 2 4 --repeats 3
+          --json ${CMAKE_BINARY_DIR}/scaling/p2.json
+          --work ${CMAKE_BINARY_DIR}/scaling/p2)
+set_tests_properties(scaling.p2.solver_threads PROPERTIES
+  LABELS "scaling_nightly" ENVIRONMENT "${_scaling_env}" PROCESSORS 4 TIMEOUT 7200)
+
+# p3 — hybrid MPI+OpenMP placements (nightly): 4 PEs as 4x1 / 2x2 / 1x4 on
+# aijkokkos + amg; volumes to 1e-8, iteration drift <= 10 % vs all-MPI,
+# fastest placement recorded.
+add_test(NAME scaling.p3.hybrid
+  COMMAND ${_scaling} --gate p3-hybrid --ranks 4 --repeats 3
+          --json ${CMAKE_BINARY_DIR}/scaling/p3.json
+          --work ${CMAKE_BINARY_DIR}/scaling/p3)
+set_tests_properties(scaling.p3.hybrid PROPERTIES
+  LABELS "scaling_nightly" ENVIRONMENT "${_scaling_env}" PROCESSORS 4 TIMEOUT 7200)
+
 set(FREHG_TEST_TIMEOUT_SCALE "1" CACHE STRING
     "Multiplier applied to every test TIMEOUT (sanitizer builds set 5)")
 if(NOT FREHG_TEST_TIMEOUT_SCALE EQUAL 1)

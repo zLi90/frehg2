@@ -183,7 +183,21 @@ At least one of `surface_water`/`groundwater` must be true.
 
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `solver.petsc_options_file` | string | no | "" | PETSc options file (overrides the `fs_`/`gw_` defaults, plan §5.1) |
+| `solver.surface.preconditioner` | `bjacobi-icc` \| `amg` \| `gamg` | no | bjacobi-icc | free-surface (`fs_`) preconditioner: the v1 block-Jacobi/ICC(0) default, hypre BoomerAMG (`amg`, needs a hypre-enabled PETSc), or PETSc GAMG (v2 plan §2.2) |
+| `solver.surface.mat_type` | `aij` \| `aijkokkos` | no | aij | `fs_` PETSc matrix/vector backend: host `aij`, or `aijkokkos` running the solve through Kokkos Kernels on the build's execution space (the threaded-CPU/GPU lane; needs a Kokkos-enabled PETSc). Device builds force `aijkokkos` (v2 plan §2B.2) |
+| `solver.surface.rtol` | real > 0 | no | 1e-8 | `fs_` relative tolerance |
+| `solver.surface.atol` | real >= 0 | no | 1e-14 | `fs_` absolute tolerance |
+| `solver.surface.max_iterations` | integer >= 1 | no | 500 | `fs_` iteration cap |
+| `solver.surface.reuse_max_solves` | integer >= 0 | no | 50 | amg/gamg hierarchy reuse cadence: rebuild at least every this many solves (0 = every solve); ignored for bjacobi-icc |
+| `solver.surface.reuse_iteration_factor` | real >= 1 | no | 1.5 | early rebuild when a solve exceeds this factor times the post-rebuild iteration count |
+| `solver.groundwater.preconditioner` | `bjacobi-icc` \| `amg` \| `gamg` | no | bjacobi-icc | Richards (`gw_`) preconditioner (same choices; the amg defaults use the 3D anisotropy parameters, v2 plan §2.2.3) |
+| `solver.groundwater.mat_type` | `aij` \| `aijkokkos` | no | aij | as `solver.surface.mat_type`, for `gw_` |
+| `solver.groundwater.rtol` | real > 0 | no | 1e-8 | `gw_` relative tolerance |
+| `solver.groundwater.atol` | real >= 0 | no | 1e-14 | `gw_` absolute tolerance |
+| `solver.groundwater.max_iterations` | integer >= 1 | no | 1000 | `gw_` iteration cap |
+| `solver.groundwater.reuse_max_solves` | integer >= 0 | no | 50 | as `solver.surface.reuse_max_solves`, for `gw_` |
+| `solver.groundwater.reuse_iteration_factor` | real >= 1 | no | 1.5 | as `solver.surface.reuse_iteration_factor`, for `gw_` |
+| `solver.petsc_options_file` | string | no | "" | PETSc options file (overrides every `fs_`/`gw_` default above, plan §5.1) |
 
 ## runtime
 

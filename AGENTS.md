@@ -36,13 +36,17 @@ top-level `README.md`.
   AI-generated configs.
 - **Small grids run fastest single-threaded**: prefix runs with
   `OMP_NUM_THREADS=1` for anything under ~1M cells (kernel-launch
-  latency dominates otherwise). Parallel runs: `mpirun -np N ...`;
-  results are rank-invariant to round-off.
+  latency dominates otherwise). On large per-rank subdomains threads pay
+  off, and with a Kokkos-aware PETSc the linear *solve* threads too
+  (v2 Q3; `solver.<sys>.mat_type: aijkokkos`). Parallel runs:
+  `mpirun -np N ...`; results are rank-invariant to round-off.
 - If a run **hangs at exit** with ~100 % CPU under MPICH/libfabric, set
   `FI_PROVIDER=tcp` (known platform issue; results are unaffected).
-- **GPU status**: all kernels are Kokkos and the CUDA backend is
-  compile-gated in CI, but the model is **GPU-ready, GPU-unvalidated** —
-  never promise validated GPU results.
+- **GPU status**: all kernels are Kokkos with no backend `#ifdef`s and
+  the CUDA lane compiles+links in CI, but the GPU path ships
+  **experimental** — CPU-physics-verified, device execution unverified
+  pending the owner GPU-acceptance bundle. Never promise validated GPU
+  results.
 - Ready-made worked examples live in `benchmarks/` (the six validation
   gates) and `validation/` (19 extended cases); every case directory is
   runnable and its README states the expected result. Start new work by

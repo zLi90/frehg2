@@ -1,0 +1,53 @@
+# Per-commit gate (plan §11.2): strict zero-warning build on gcc and clang,
+# unit + mpi test labels, fast regressions (P1+), forbidden-pattern scan,
+# schema/docs lockstep, and Doxygen with warnings as errors.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      DEPS_PREFIX: /home/runner/.frehg-deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mpich libmpich-dev libhdf5-mpich-dev \
+            libyaml-cpp-dev doxygen python3-yaml clang
+          pip3 install --user mkdocs mkdocs-material
+
+      - name: Cache built dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_PREFIX }}
+          key: frehg-deps-${{ runner.os }}-${{ matrix.compiler }}-kokkos5.1.1-petsc3.25.1-kokkoskernels-v3
+
+      - name: Build Kokkos and PETSc
+        run: |
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            export CC=clang CXX=clang++
+          else
+            export CC=gcc CXX=g++
+          fi
+          scripts/ci_install_deps.sh "$DEPS_PREFIX"
+
+      - name: Configure, build, and run the gate
+        run: |
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            export CC=clang CXX=clang++
+          else
+            export CC=gcc CXX=g++
+          fi
+          export CMAKE_PREFIX_PATH="$DEPS_PREFIX"
+          scripts/ci_build_and_test.sh build-ci

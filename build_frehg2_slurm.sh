@@ -13,8 +13,10 @@
 #   1. Finds and loads usable module files for CMake, a C++20 compiler,
 #      MPI, and (when available) parallel HDF5.
 #   2. Builds missing user-space dependencies in $HOME/frehg-deps:
-#      yaml-cpp 0.8.0, Kokkos 5.1.1, parallel HDF5 1.14.6 if necessary,
-#      and PETSc 3.25.1. No sudo or administrator privileges are needed.
+#      yaml-cpp 0.8.0, Kokkos 5.1.1 (shared, Serial+OpenMP), parallel
+#      HDF5 1.14.6 if necessary, and PETSc 3.25.1 built Kokkos-aware
+#      (--with-kokkos-dir --download-kokkos-kernels --with-openmp) plus
+#      hypre BoomerAMG. No sudo or administrator privileges are needed.
 #   3. Configures and compiles Frehg2 in build/ and confirms that
 #      build/src/frehg exists and is executable.
 #   4. Runs a schema validation and a short SLURM benchmark verification.
@@ -57,8 +59,11 @@
 #   FREHG_ENABLE_TESTS=1                    also configure network-fetched tests
 #   FREHG_WERROR=OFF                        only if a new compiler gives warnings
 #
-# This is a CPU/OpenMP build. Frehg2 CUDA execution remains experimental and
-# GPU-unvalidated; use a separate, site- and GPU-specific CUDA workflow.
+# This is a CPU build with Kokkos Serial+OpenMP host backends and a
+# Kokkos-aware PETSc, so both the physics kernels and the linear solve
+# thread under OMP_NUM_THREADS (mat_type aijkokkos). Frehg2's CUDA/HIP
+# path ships experimental and GPU-unverified; use a separate, site- and
+# GPU-specific device workflow for that.
 
 set -Eeuo pipefail
 shopt -s nullglob
@@ -200,9 +205,16 @@ fi
 KOKKOS_SRC="$SRC_CACHE/kokkos-5.1.1"
 fetch_tarball "https://github.com/kokkos/kokkos/archive/refs/tags/5.1.1.tar.gz" "$SRC_CACHE/kokkos-5.1.1.tar.gz" "$KOKKOS_SRC"
 if [[ ! -f "$PREFIX/lib/cmake/Kokkos/KokkosConfig.cmake" && ! -f "$PREFIX/lib64/cmake/Kokkos/KokkosConfig.cmake" ]]; then
+  # BUILD_SHARED_LIBS=ON is load-bearing: frehg links Kokkos and so does
+  # PETSc's downloaded kokkos-kernels. A static Kokkos core is absorbed
+  # into BOTH the frehg executable and libkokkoskernels, giving two copies
+  # of Kokkos's runtime singleton in one process -- it initializes twice
+  # ("Kokkos::OpenMP::initialize" prints twice) and the first VecKokkos
+  # access segfaults. One shared libkokkoscore keeps a single runtime.
   cmake_build_install "$KOKKOS_SRC" "$SRC_CACHE/build-kokkos-5.1.1" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_C_COMPILER="$REAL_CC" -DCMAKE_CXX_COMPILER="$REAL_CXX" \
+    -DBUILD_SHARED_LIBS=ON \
     -DCMAKE_CXX_STANDARD=20 -DKokkos_ENABLE_SERIAL=ON -DKokkos_ENABLE_OPENMP=ON \
     -DKokkos_ENABLE_TESTS=OFF
 else
@@ -234,14 +246,33 @@ if [[ ! -f "$PREFIX/lib/petsc/conf/petscvariables" && ! -f "$PREFIX/lib64/petsc/
   pushd "$PETSC_SRC" >/dev/null
   # PETSc correctly uses MPI wrappers for ITS dependency build. This is not
   # the Frehg2 CMake compiler setting, which remains the real compiler.
+  # --with-kokkos-dir + --download-kokkos-kernels reuse the shared Kokkos
+  # built above so the free-surface/groundwater solves run on the Kokkos
+  # backend and thread under OMP_NUM_THREADS (mat_type aijkokkos, v2 Q3);
+  # --with-openmp also threads the downloaded hypre BoomerAMG (solver amg).
   ./configure --prefix="$PREFIX" --with-cc="$(command -v mpicc)" --with-cxx="$(command -v mpicxx)" \
-    --with-fc=0 --with-debugging=0 --download-f2cblaslapack
+    --with-fc=0 --with-debugging=0 --download-f2cblaslapack --download-hypre \
+    --with-kokkos-dir="$PREFIX" --download-kokkos-kernels --with-openmp=1
   make -j "$JOBS" all
   make install
   popd >/dev/null
 else
   echo "PETSc already installed in $PREFIX; reusing it."
 fi
+grep -q "PETSC_HAVE_HYPRE" "$PREFIX/include/petscconf.h" 2>/dev/null \
+  || grep -q "PETSC_HAVE_HYPRE" "$PREFIX"/lib*/petsc/conf/petscvariables 2>/dev/null \
+  || die "PETSc was installed without hypre (solver 'amg' needs it). Delete '$PREFIX/lib/petsc' and '$PREFIX/src-cache/petsc-3.25.1', then rerun."
+grep -q "PETSC_HAVE_KOKKOS_KERNELS" "$PREFIX/include/petscconf.h" 2>/dev/null \
+  || die "PETSc was installed without Kokkos Kernels (mat_type aijkokkos needs it). Delete '$PREFIX/lib/petsc' and '$PREFIX/src-cache/petsc-3.25.1', then rerun to rebuild PETSc against the shared Kokkos."
+# A reused PETSc must still have its Kokkos Kernels runtime present:
+# petscconf.h advertises KOKKOS_KERNELS even after the library is gone.
+# This catches "Kokkos rebuilt but PETSc reused" -- the old libkokkoskernels
+# is removed with the old Kokkos, libpetsc dangles, and the failure is
+# otherwise a cryptic loader abort at first run instead of an actionable
+# message here.
+[[ -f "$PREFIX/lib/libkokkoskernels.so" || -f "$PREFIX/lib64/libkokkoskernels.so" \
+   || -f "$PREFIX/lib/libkokkoskernels.dylib" || -f "$PREFIX/lib64/libkokkoskernels.dylib" ]] \
+  || die "PETSc's Kokkos Kernels runtime is missing from $PREFIX (Kokkos was likely rebuilt without PETSc). Delete '$PREFIX/lib/petsc' and '$PREFIX/src-cache/petsc-3.25.1', then rerun to rebuild PETSc against the current Kokkos."
 
 say "7 of 8: Configure and compile Frehg2"
 export CMAKE_PREFIX_PATH="$PREFIX${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"

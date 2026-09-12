@@ -5,8 +5,11 @@ Frehg2 is a production-grade rewrite of Frehg 1.0 — a coupled semi-implicit
 C++20 with Kokkos (CPU/GPU-portable), MPI, PETSc, yaml-cpp configuration,
 and single-file parallel HDF5 output. The core physics is preserved exactly
 from the validated legacy code; each of the six benchmarks is a blocking,
-quantitative validation gate. The binding specification is
-[`docs/developer-guide/FREHG2_UPGRADE_PLAN.md`](docs/developer-guide/FREHG2_UPGRADE_PLAN.md).
+quantitative validation gate. The binding specifications are
+[`docs/developer-guide/FREHG2_UPGRADE_PLAN.md`](docs/developer-guide/FREHG2_UPGRADE_PLAN.md)
+(v1, the six-benchmark model) and
+[`docs/developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md`](docs/developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md)
+(v2, the post-1.0 capability and performance roadmap).
 
 **What Frehg2 simulates**
 
@@ -28,10 +31,13 @@ quantitative validation gate. The binding specification is
 
 Every mode has HDF5 field output, mass-audit tables (including the scalar
 budget), point monitors, and checkpoint/restart (restart reproduces the
-uninterrupted run bitwise). Frehg2 is **GPU-ready but GPU-unvalidated**:
-all kernels are Kokkos with no backend `#ifdef`s and the CUDA backend is
-compile-gated in CI, but the released version has been validated on CPU
-backends only.
+uninterrupted run bitwise). The linear solve is **performance-portable**:
+all kernels are Kokkos with no backend `#ifdef`s, and a Kokkos-aware PETSc
+lets the free-surface and groundwater solves run backend-consistently and
+thread under OpenMP (`solver.<sys>.mat_type: aijkokkos`; v2 Q3). The GPU
+(CUDA/HIP) path ships **experimental** — compile/link- and
+invariant-verified with the CPU-physics equivalent validated, but device
+*execution* is unverified pending an owner-run GPU-acceptance bundle.
 
 ## Getting started — two paths
 
@@ -179,7 +185,16 @@ running and gating each one.
 **v1.0.0** — all six benchmark gates green; phases P0 (foundation),
 P1 (surface water), P2 (groundwater), P3 (coupling), P4 (transport +
 density coupling), and P5 (hardening, performance, documentation, release)
-complete. The per-phase Definitions of Done and handoff reports are under
+complete.
+
+**v2 (in progress)** — the post-1.0 roadmap
+([`FREHG2_V2_DEVELOPMENT_PLAN.md`](docs/developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md)):
+Q1 (BoomerAMG solver option, gate g2), Q2 (run-record provenance +
+resolved-config round-trip, gates r1–r2), and Q3 (performance-portable
+parallelization — Kokkos linear-algebra backend, threaded solve,
+`experimental` GPU lane, gates p1–p6) complete; Q4 (evaporation),
+Q5 (temperature), Q6 (wind), and Q7 (release) planned. The per-phase
+Definitions of Done and handoff reports are under
 [`docs/developer-guide/`](docs/developer-guide/).
 
 ## License and citation

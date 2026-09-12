@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <type_traits>
 
 namespace frehg::driver {
 
@@ -85,10 +86,22 @@ bool resolveGpuAware(const RuntimeConfig& runtime) {
 
 }  // namespace
 
-Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config)
+Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
+                       const std::string& inputPath)
     : config_(config), grid_(comm, config.domain) {
   if (!config_.modules.surfaceWater && !config_.modules.groundwater) {
     log::fatal("no module enabled: set modules.surface_water or modules.groundwater");
+  }
+  // GPU release status (v2 plan §2B.4): device execution is 'experimental'
+  // until the owner-run p6 acceptance bundle passes on real hardware —
+  // compile/link-verified and CPU-physics-verified, but CI never executed
+  // this backend. The notice is part of the release contract, not a warning
+  // about a known defect.
+  if constexpr (!std::is_same_v<MemSpace, Kokkos::HostSpace>) {
+    log::info(log::msg() << "device build (" << Kokkos::DefaultExecutionSpace::name()
+                         << "): GPU execution is EXPERIMENTAL pending the p6 "
+                            "acceptance bundle (docs/developer-guide/"
+                            "gpu-acceptance.md, v2 plan §2B.4)");
   }
   const bool coupled = config_.modules.surfaceWater && config_.modules.groundwater;
 
@@ -144,6 +157,12 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config)
   }
 
   output_ = std::make_unique<io::Hdf5Output>(grid_, config_.output.filename, config_.rawText);
+  // Run provenance record (v2 plan §2A): static sections captured now,
+  // rewritten at every output flush and finalized after run().
+  runRecord_ = std::make_unique<io::RunRecord>(
+      grid_.comm(), config_,
+      inputPath.empty() ? std::string("<in-memory>") : inputPath, *boundaries_,
+      grid_.px(), grid_.py());
   {
     HostField2<real_t> bottomInterior("driver_bottom",
                                       static_cast<std::size_t>(grid_.nyLocal()),
@@ -375,6 +394,7 @@ real_t Simulation::restoreFromCheckpoint() {
 }
 
 void Simulation::writeOutputs(real_t t) {
+  Timer::Scoped timer("io/output");
   for (const std::string& var : config_.output.surfaceVariables) {
     if (!surface_) {
       break;
@@ -543,6 +563,7 @@ void Simulation::recordTransportAudit(real_t t) {
 }
 
 void Simulation::writeCheckpoint(real_t t, long step, real_t labelTime) {
+  Timer::Scoped timer("io/checkpoint");
   io::Checkpoint::Scalars scalars;
   if (gw_) {
     scalars["dtg"] = coupler_ ? coupler_->currentDtg() : dtg_;
@@ -557,19 +578,26 @@ void Simulation::writeCheckpoint(real_t t, long step, real_t labelTime) {
 void Simulation::run() {
   Timer::Scoped total("simulation");
   real_t t0 = config_.time.tStart;
-  if (config_.restart.enabled) {
-    t0 = restoreFromCheckpoint();
-  } else {
-    writeOutputs(t0);
-    recordMonitors(t0);
-    if (surface_) {
-      recordMassAudit(t0);
-    }
-    if (gw_) {
-      recordGwMassAudit(t0);
-    }
-    if (transport_) {
-      recordTransportAudit(t0);
+  {
+    // Everything before the time loop proper: restart restore or the
+    // initial output/monitor writes (v2 plan §2A: the 'init' section; the
+    // module/grid construction time is outside "simulation" and appears in
+    // provenance.wall_seconds minus the loop).
+    Timer::Scoped init("init");
+    if (config_.restart.enabled) {
+      t0 = restoreFromCheckpoint();
+    } else {
+      writeOutputs(t0);
+      recordMonitors(t0);
+      if (surface_) {
+        recordMassAudit(t0);
+      }
+      if (gw_) {
+        recordGwMassAudit(t0);
+      }
+      if (transport_) {
+        recordTransportAudit(t0);
+      }
     }
   }
   if (coupler_) {
@@ -579,6 +607,92 @@ void Simulation::run() {
   } else {
     runGroundwaterLoop(t0);
   }
+
+  // End-of-run per-system solver telemetry (v2 plan §2.2.6): one line per
+  // system on rank 0, parsed by the g2/s-gate harness — and the same values
+  // feed the run record's solver section (v2 plan §2A), so the two cannot
+  // disagree.
+  std::ostringstream solverYaml;
+  const auto logSolverSummary = [this, &solverYaml](const char* name,
+                                                    const SolverTelemetry& t,
+                                                    const std::string& preconditioner,
+                                                    const std::string& matType,
+                                                    const std::string& amgCoarsen,
+                                                    const std::string& amgRelax) {
+    // Iteration counts are KSP-collective and identical on every rank; the
+    // setup/solve times are reduced to their max so the summary reports the
+    // critical path.
+    double local[2] = {t.setupSeconds, t.solveSeconds};
+    double reduced[2] = {0.0, 0.0};
+    MPI_Allreduce(local, reduced, 2, MPI_DOUBLE, MPI_MAX, grid_.comm());
+    if (t.solves == 0) {
+      return;
+    }
+    const double mean =
+        static_cast<double>(t.totalIterations) / static_cast<double>(t.solves);
+    log::info(log::msg() << "solver summary " << name << ": solves=" << t.solves
+                         << " iters_mean=" << mean << " iters_max=" << t.maxIterations
+                         << " rebuilds=" << t.rebuilds << " retries=" << t.retries
+                         << " setup_s=" << reduced[0] << " solve_s=" << reduced[1]);
+    // preconditioner/mat_type record the *resolved* solver backend (a
+    // -<prefix>mat_type override is read back from PETSc), so a run is
+    // self-describing about which linear algebra it actually got (v2 plan
+    // §2B.5; the p2/p3 gates key on mat_type).
+    solverYaml << name << ":\n"
+               << "  preconditioner: " << preconditioner << "\n"
+               << "  mat_type: " << matType << "\n";
+    if (!amgCoarsen.empty()) {
+      solverYaml << "  amg_coarsen_type: " << amgCoarsen << "\n"
+                 << "  amg_relax_type: " << amgRelax << "\n";
+    }
+    solverYaml << "  solves: " << t.solves << "\n"
+               << "  iters_mean: " << mean << "\n"
+               << "  iters_max: " << t.maxIterations << "\n"
+               << "  rebuilds: " << t.rebuilds << "\n"
+               << "  retries: " << t.retries << "\n"
+               << "  setup_s: " << reduced[0] << "\n"
+               << "  solve_s: " << reduced[1] << "\n";
+  };
+  if (surface_) {
+    logSolverSummary("fs", surface_->solverTelemetry(),
+                     config_.solver.surface.preconditioner, surface_->solverMatType(),
+                     surface_->solverAmgCoarsenType(), surface_->solverAmgRelaxType());
+  }
+  if (gw_) {
+    logSolverSummary("gw", gw_->solverTelemetry(),
+                     config_.solver.groundwater.preconditioner, gw_->solverMatType(),
+                     gw_->solverAmgCoarsenType(), gw_->solverAmgRelaxType());
+  }
+  runRecord_->setSolver(solverYaml.str());
+}
+
+void Simulation::finalizeRunRecord() { flushRunRecord(true); }
+
+void Simulation::flushRunRecord(bool finished) {
+  // Closure: the final cumulative budgets already reduced to rank 0 by the
+  // audit recorders (the same numbers the mass-audit monitor tables carry).
+  std::ostringstream closure;
+  closure.setf(std::ios::scientific);
+  closure.precision(10);
+  if (surface_) {
+    closure << "surface:\n"
+            << "  rain_m3: " << cumRain_ << "\n"
+            << "  evaporation_m3: " << cumEvap_ << "\n"
+            << "  boundary_outflow_m3: " << cumOutflow_ << "\n"
+            << "  bc_inflow_m3: " << cumBcInflow_ << "\n"
+            << "  seepage_m3: " << cumSeepage_ << "\n"
+            << "  clamped_m3: " << cumClamped_ << "\n";
+  }
+  if (gw_) {
+    closure << "groundwater:\n"
+            << "  boundary_in_m3: " << cumGwBoundary_ << "\n"
+            << "  ss_storage_m3: " << cumGwStorage_ << "\n"
+            << "  realloc_m3: " << cumGwRealloc_ << "\n"
+            << "  realloc_dropped_m3: " << cumGwDropped_ << "\n"
+            << "  vloss_m3: " << cumGwVloss_ << "\n";
+  }
+  runRecord_->setClosure(closure.str());
+  runRecord_->flush(finished);
 }
 
 void Simulation::runCoupledLoop(real_t t0) {
@@ -610,11 +724,14 @@ void Simulation::runCoupledLoop(real_t t0) {
     coupler_->step(t, dt);
     stepTransport(t, dt, gw_->lastDtg());
 
-    recordMonitors(t);
-    recordMassAudit(t);
-    recordGwMassAudit(t);
-    if (transport_) {
-      recordTransportAudit(t);
+    {
+      Timer::Scoped monitorsTimer("monitors");
+      recordMonitors(t);
+      recordMassAudit(t);
+      recordGwMassAudit(t);
+      if (transport_) {
+        recordTransportAudit(t);
+      }
     }
 
     real_t cflLocal = surface_->maxCfl();
@@ -639,6 +756,7 @@ void Simulation::runCoupledLoop(real_t t0) {
         transportAudit_->flush();
       }
       output_->flush();
+      flushRunRecord(false);
       log::info(log::msg() << "output written at t = " << t << " s, dt = " << dt
                            << " s (fs " << surface_->lastSolve().iterations << " it, gw "
                            << gw_->lastSolve().iterations << " it)");
@@ -664,6 +782,7 @@ void Simulation::runCoupledLoop(real_t t0) {
     transportAudit_->flush();
   }
   output_->flush();
+  flushRunRecord(false);
 }
 
 void Simulation::runSurfaceLoop(real_t t0) {
@@ -687,10 +806,13 @@ void Simulation::runSurfaceLoop(real_t t0) {
     surface_->updateVelocity();
     stepTransport(t, dt, 0.0);
 
-    recordMonitors(t);
-    recordMassAudit(t);
-    if (transport_) {
-      recordTransportAudit(t);
+    {
+      Timer::Scoped monitorsTimer("monitors");
+      recordMonitors(t);
+      recordMassAudit(t);
+      if (transport_) {
+        recordTransportAudit(t);
+      }
     }
 
     real_t cflLocal = surface_->maxCfl();
@@ -713,6 +835,7 @@ void Simulation::runSurfaceLoop(real_t t0) {
         transportAudit_->flush();
       }
       output_->flush();
+      flushRunRecord(false);
       log::info(log::msg() << "output written at t = " << t << " s (solver "
                            << surface_->lastSolve().iterations << " it, residual "
                            << surface_->lastSolve().residualNorm << ")");
@@ -741,6 +864,7 @@ void Simulation::runSurfaceLoop(real_t t0) {
     transportAudit_->flush();
   }
   output_->flush();
+  flushRunRecord(false);
 }
 
 void Simulation::runGroundwaterLoop(real_t t0) {
@@ -774,10 +898,13 @@ void Simulation::runGroundwaterLoop(real_t t0) {
     dtg_ = gw_->nextDt();
     stepTransport(t, dtg, gw_->lastDtg());
 
-    recordMonitors(t);
-    recordGwMassAudit(t);
-    if (transport_) {
-      recordTransportAudit(t);
+    {
+      Timer::Scoped monitorsTimer("monitors");
+      recordMonitors(t);
+      recordGwMassAudit(t);
+      if (transport_) {
+        recordTransportAudit(t);
+      }
     }
 
     if (t >= nextOutput - 1.0e-9) {
@@ -795,6 +922,7 @@ void Simulation::runGroundwaterLoop(real_t t0) {
         transportAudit_->flush();
       }
       output_->flush();
+      flushRunRecord(false);
       log::info(log::msg() << "output written at t = " << t << " s, dtg = " << dtg_
                            << " s (solver " << gw_->lastSolve().iterations << " it, residual "
                            << gw_->lastSolve().residualNorm << ")");
@@ -819,6 +947,7 @@ void Simulation::runGroundwaterLoop(real_t t0) {
     transportAudit_->flush();
   }
   output_->flush();
+  flushRunRecord(false);
 }
 
 }  // namespace frehg::driver

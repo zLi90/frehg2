@@ -58,12 +58,12 @@ domain:
   bottom_elevation: {file: input/dem.dat}
   follow_terrain: true
   terrain_layers: uniform
-  decomposition: {mpi_nx: auto, mpi_ny: auto}
+  decomposition: {mpi_nx: 2, mpi_ny: 1}
 
 time:
   dt: 10.0            # sync common-step initial value (clamped to gw bounds)
   t_end: 157680000.0  # 5 years (SERGHEI simLength)
-  output_interval: 259200  # SERGHEI outFreq (3 days)
+  output_interval: 864000  # SERGHEI outFreq (10 days)
 
 modules:
   surface_water: true
@@ -76,8 +76,8 @@ surface_water:
     law: manning
     coefficient: {constant: 0.03}
   viscosity: {x: 1.0e-06, y: 1.0e-06}
-  min_depth: 1.0e-03          # SERGHEI dryDepth
-  wetting_face_depth: 1.0e-03
+  min_depth: 1.0e-09          # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-09
   rainfall:
     series: {file: input/rain.dat}
   evaporation: {constant: 0.0}

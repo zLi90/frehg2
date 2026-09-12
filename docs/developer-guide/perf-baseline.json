@@ -1,0 +1,14 @@
+{
+  "machine": "macOS-14.4-arm64-arm-64bit",
+  "processor": "arm",
+  "note": "min-over-repeats 'max over ranks' timer seconds for the fixed perf-baseline case (v2 plan \u00a77.1.2); update only with a justifying commit message",
+  "timers_s": {
+    "simulation": 37.7921,
+    "simulation/coupled_step": 37.7596,
+    "simulation/coupled_step/groundwater": 37.6487,
+    "simulation/coupled_step/groundwater/solve": 6.713,
+    "simulation/coupled_step/swe/free_surface": 0.0805,
+    "simulation/coupled_step/swe/free_surface/solve": 0.0277,
+    "simulation/coupled_step/swe/velocity": 0.0253
+  }
+}

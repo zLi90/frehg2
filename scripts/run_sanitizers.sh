@@ -49,6 +49,11 @@ cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
 
 # halt_on_error: any finding fails the lane. Leak checking is enabled where
 # the platform ASan supports it (Linux CI); macOS ASan has no leak detector.
+# FI_PROVIDER pins libfabric to tcp for every label: the default sockets
+# provider intermittently wedges MPICH's OFI finalize hook on this platform
+# (amendment A19 — the regression tests pin it in their ctest environment,
+# but the unit/mpi labels run here too and hang identically without it).
+export FI_PROVIDER=tcp
 export ASAN_OPTIONS="halt_on_error=1:${ASAN_OPTIONS:-}"
 export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:${UBSAN_OPTIONS:-}"
 if [ "$(uname -s)" = "Linux" ]; then

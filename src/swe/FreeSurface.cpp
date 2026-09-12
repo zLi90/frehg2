@@ -339,6 +339,33 @@ void SurfaceSolver::fillAndSolve() {
   Kokkos::View<real_t*, MemSpace> rhs = rhsVec_;
   Kokkos::View<real_t*, MemSpace> sol = solVec_;
 
+  // Wet/dry-mask rebuild trigger (v2 plan §2.2.4): a mask flip is a
+  // structural change of the operator (the A13 dry-cell closure swaps a
+  // row's diagonal between Asz and the cell area), which a frozen AMG
+  // hierarchy does not represent. The hash is Allreduced so every rank
+  // reaches the same rebuild decision (PCSetUp is collective).
+  if (system_->reusesHierarchy()) {
+    Field2<real_t> dept = dept_;
+    long long localHash = 0;
+    Kokkos::parallel_reduce(
+        "swe_wet_mask_hash",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {1, 1}, {nyl + 1, nxl + 1}),
+        KOKKOS_LAMBDA(const int j, const int i, long long& sum) {
+          if (dept(j, i) > 0.0) {
+            sum += static_cast<long long>(gid(j, i)) + 1;
+          }
+        },
+        localHash);
+    long long hash = 0;
+    MPI_Allreduce(&localHash, &hash, 1, MPI_LONG_LONG, MPI_SUM, grid_.comm());
+    if (hash != wetMaskHash_) {
+      wetMaskHash_ = hash;
+      system_->forceRebuild();
+    }
+  }
+
+  const real_t cellArea = grid_.dx() * grid_.dy();
   Kokkos::parallel_for(
       "swe_coo_fill",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
@@ -347,13 +374,17 @@ void SurfaceSolver::fillAndSolve() {
         const std::size_t row = static_cast<std::size_t>(gid(j, i) - offset);
         const std::size_t base = 5 * row;
         if (isEtaBc(j, i) != 0.0) {
-          // Prescribed-stage row: identity (shallowwater.c:396-411).
-          values(base + 0) = 1.0;
+          // Prescribed-stage row: decoupled identity (shallowwater.c:396-411),
+          // scaled to the cell area so its diagonal matches the wet rows'
+          // magnitude — a literal 1.0 among ~dx*dy diagonals is the poorly
+          // scaled identity row AMG coarsening mishandles (v2 plan §2.2.5).
+          // The row solution eta = value is unchanged by the scaling.
+          values(base + 0) = cellArea;
           values(base + 1) = 0.0;
           values(base + 2) = 0.0;
           values(base + 3) = 0.0;
           values(base + 4) = 0.0;
-          rhs(row) = etaBcValue(j, i);
+          rhs(row) = etaBcValue(j, i) * cellArea;
           return;
         }
         real_t b = Srhs(j, i);

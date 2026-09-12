@@ -4,6 +4,7 @@
 #include "core/HaloExchanger.hpp"
 
 #include "core/Logger.hpp"
+#include "core/Timer.hpp"
 
 #include <algorithm>
 #include <numeric>
@@ -208,6 +209,10 @@ void HaloExchanger::exchangeWithCorners(const std::vector<std::string>& names) {
 
 void HaloExchanger::exchangeSelected(const std::vector<std::size_t>& selected, int dirBegin,
                                      int dirEnd, bool wideRows) {
+  // Message passing shows up as its own timer section wherever it is called
+  // from (v2 plan §2A: the run record's halo cost); every public exchange
+  // entry funnels through here.
+  Timer::Scoped timer("halo");
   std::array<std::size_t, 4> messageCount = {0, 0, 0, 0};
   for (int dir = dirBegin; dir < dirEnd; ++dir) {
     for (const std::size_t idx : selected) {

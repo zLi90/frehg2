@@ -37,7 +37,7 @@ domain:
   follow_terrain: false
 
 time:
-  dt: 1200.0
+  dt: 300.0
   t_end: 8640000
   output_interval: 86400
 
@@ -48,13 +48,13 @@ modules:
 
 groundwater:
   scheme: pca
-  use_full3d: true
+  use_full3d: false
   timestep:
     dt_init: 0.0001
     dt_min: 0.0001
-    dt_max: 1200.0
+    dt_max: 300.0
     courant_max: 2.0
-  specific_storage: 0.0
+  specific_storage: 1.0e-5
   reallocation_surplus: redistribute
 
 soil:

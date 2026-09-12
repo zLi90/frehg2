@@ -1,0 +1,58 @@
+# p4 — device build integrity (v2 plan §2B.3): build the Kokkos CUDA
+# backend, a Kokkos+CUDA PETSc, and every Frehg2 library, the executable,
+# AND the test binaries with nvcc — compile and LINK, zero warnings, on a
+# GPU-less runner. Nothing executes — the lane proves the kernels are free
+# of host-pointer capture and host-only constructs (plan §11.1 rule 8), the
+# backend-consistency invariants hold (§2B.2 B1/B5), and linkage against the
+# device PETSc/hypre closes. Runtime GPU validation is the owner-executed p6
+# bundle (scripts/gpu_acceptance.sh); until it returns, GPU lanes are
+# 'experimental' (§2B.4).
+#
+# Watch this lane's first runs closely: it was authored before the project
+# had CI history (amendment A22 / report-P5.md), and the runner image's
+# nvcc/host-gcc pairing changes over time.
+name: cuda-compile
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cuda-compile-only:
+    runs-on: ubuntu-24.04
+    env:
+      DEPS_PREFIX: /home/runner/.frehg-deps-cuda
+      # Ubuntu 24.04's nvidia-cuda-toolkit is CUDA 12.0, whose nvcc accepts
+      # host gcc <= 12.
+      NVCC_WRAPPER_DEFAULT_COMPILER: g++-12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nvidia-cuda-toolkit g++-12 mpich \
+            libmpich-dev libhdf5-mpich-dev libyaml-cpp-dev
+          nvcc --version
+
+      - name: Cache built dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_PREFIX }}
+          key: frehg-deps-${{ runner.os }}-cuda12-kokkos5.1.1-petsc3.25.1-kokkoskernels-v3
+
+      - name: Build Kokkos (CUDA backend) and PETSc (Kokkos + CUDA)
+        run: |
+          export CC=gcc-12 CXX=g++-12
+          FREHG_CUDA=1 scripts/ci_install_deps.sh "$DEPS_PREFIX"
+
+      - name: Compile and link Frehg2 + tests with nvcc (p4; zero warnings, no execution)
+        run: |
+          export CMAKE_PREFIX_PATH="$DEPS_PREFIX"
+          cmake -B build-cuda \
+            -DCMAKE_CXX_COMPILER="$DEPS_PREFIX/bin/nvcc_wrapper" \
+            -DFREHG_WERROR=ON \
+            -DFREHG_BACKEND=cuda \
+            -DFREHG_ENABLE_TESTS=ON
+          cmake --build build-cuda -j "$(getconf _NPROCESSORS_ONLN)"

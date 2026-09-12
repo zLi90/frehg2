@@ -81,8 +81,8 @@ surface_water:
     law: manning
     coefficient: {constant: 0.0036}
   viscosity: {x: 1.0e-06, y: 1.0e-06}
-  min_depth: 1.0e-05          # SERGHEI dryDepth
-  wetting_face_depth: 1.0e-04
+  min_depth: 1.0e-06          # SERGHEI dryDepth
+  wetting_face_depth: 1.0e-06
   rainfall:
     series: {file: input/rain.dat}
   evaporation: {constant: 0.0}
@@ -93,7 +93,7 @@ groundwater:
   timestep:
     dt_init: 0.001    # SERGHEI dt_init (also minimum)
     dt_min: 0.001
-    dt_max: 1.0       # SERGHEI dt_max
+    dt_max: 5.0       # SERGHEI dt_max
   specific_storage: 1.0e-05
 
 soil:
@@ -127,7 +127,7 @@ soil:
       aev: 0.0
   map: {file: input/soil_id.dat}
 
-coupling: {mode: sync}
+coupling: {mode: subcycled}
 
 initial_conditions:
   surface:

@@ -13,8 +13,19 @@
 #include <mpi.h>
 
 #include <string>
+#include <vector>
 
 namespace frehg {
+
+/// One timer section merged across ranks (v2 plan §2A: the run record and
+/// the text report share this so they cannot disagree).
+struct TimerSection {
+  std::string path;    ///< full nested path, e.g. "simulation/swe/velocity"
+  long count = 0;      ///< completed cycles (max over ranks)
+  double minSeconds = 0.0;
+  double meanSeconds = 0.0;
+  double maxSeconds = 0.0;
+};
 
 /// Static registry of named, nesting wall-clock timers.
 class Timer {
@@ -32,6 +43,11 @@ class Timer {
 
   /// \return number of completed start/stop cycles for a path.
   static long count(const std::string& path);
+
+  /// Merge all sections across \p comm: min/mean/max seconds per path.
+  /// Collective on \p comm; the result is non-empty on rank 0 only.
+  /// Sections still running are excluded.
+  static std::vector<TimerSection> merged(MPI_Comm comm);
 
   /// Merge all sections across \p comm and return a formatted table
   /// (non-empty on rank 0 only). Collective on \p comm. Sections still

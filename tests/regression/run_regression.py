@@ -45,6 +45,7 @@ input paths keep working and the repository stays clean.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,40 @@ STRICT_PETSC_OPTIONS = ["-fs_pc_type", "jacobi", "-fs_ksp_rtol", "1e-13", "-fs_k
 STRICT_PETSC_OPTIONS_GW = ["-gw_pc_type", "jacobi", "-gw_ksp_rtol", "1e-13",
                            "-gw_ksp_atol", "1e-16"]
 
+# g1 solver-invariance gate (v2 plan §2.3): when --solver is given, every
+# staged configuration gets a solver block selecting that preconditioner for
+# both systems, and the gate criteria are unchanged — the solver choice must
+# not change the physics. Set from args in main(); staging applies it.
+SOLVER_OVERRIDE: str | None = None
+
+# p1 backend-invariance gate (v2 plan §2B.3): when --mat-type is given, the
+# staged solver block additionally selects the PETSc matrix/vector backend
+# ("aij" host, "aijkokkos" Kokkos Kernels). Same contract as SOLVER_OVERRIDE:
+# gate criteria unchanged — the linear-algebra backend must not change the
+# physics. This is the CPU rehearsal of the exact code path a GPU build takes.
+MAT_TYPE_OVERRIDE: str | None = None
+
+
+def apply_solver_override(case_dir: Path) -> None:
+    """Write the SOLVER_OVERRIDE / MAT_TYPE_OVERRIDE into every staged YAML."""
+    if SOLVER_OVERRIDE is None and MAT_TYPE_OVERRIDE is None:
+        return
+    for config in sorted(case_dir.glob("*.yaml")):
+        with open(config, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        solver = doc.setdefault("solver", {})
+        for system in ("surface", "groundwater"):
+            entry = solver.setdefault(system, {})
+            if SOLVER_OVERRIDE is not None:
+                entry["preconditioner"] = SOLVER_OVERRIDE
+            if MAT_TYPE_OVERRIDE is not None:
+                entry["mat_type"] = MAT_TYPE_OVERRIDE
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        print(f"  solver override: {config.name} -> "
+              f"preconditioner {SOLVER_OVERRIDE or '(default)'}"
+              f" mat_type {MAT_TYPE_OVERRIDE or '(default)'}")
+
 
 def run_case(frehg: Path, config: Path, workdir: Path, mpiexec: Path, ranks: int,
              extra_args: list[str] | None = None) -> None:
@@ -82,6 +117,28 @@ def run_case(frehg: Path, config: Path, workdir: Path, mpiexec: Path, ranks: int
         print(f"error: frehg exited {result.returncode}; log tail ({log}):")
         print("\n".join(log.read_text().splitlines()[-25:]))
         raise SystemExit(1)
+    check_run_record(frehg, config, ranks)
+
+
+def check_run_record(frehg: Path, config: Path, ranks: int) -> None:
+    """r1 gate hook (v2 plan §2A.3): every successful gate run must leave a
+    valid run record beside its HDF5 output — present, schema-valid, launch-
+    matched, and configuration-round-tripping."""
+    with open(config, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    output = Path(doc["output"]["filename"])
+    record = (config.parent / output).parent / "run-record.yaml"
+    checker = HERE.parent.parent / "tools" / "check_run_record.py"
+    cmd = [sys.executable, str(checker), str(record),
+           "--frehg", str(frehg), "--input", str(config), "--ranks", str(ranks)]
+    threads = os.environ.get("OMP_NUM_THREADS")
+    if threads:
+        cmd += ["--threads", threads]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print(result.stdout, end="")
+    if result.returncode != 0:
+        print(f"r1 run-record gate: FAIL for {config.name}")
+        raise SystemExit(1)
 
 
 def stage_case(repo: Path, case: str, workdir: Path) -> Path:
@@ -91,6 +148,7 @@ def stage_case(repo: Path, case: str, workdir: Path) -> Path:
     if target.exists():
         shutil.rmtree(target)
     shutil.copytree(source, target)
+    apply_solver_override(target)
     return target
 
 
@@ -1094,11 +1152,30 @@ def gate_rank_invariance_b5(args: argparse.Namespace) -> int:
                 # self-relative under the sanitizer binary, 7e-4 against
                 # the exchange).
                 exchanged = max(abs(base_ma[-1, 6]), 1.0e-12)
+                # Default-mode bounds are data-derived per solver (A5/A8/A14
+                # discipline). The bjacobi-icc numbers are the A14 record.
+                # AMG-class preconditioners are not rank-invariant by
+                # construction (BoomerAMG/GAMG coarsening depends on the
+                # decomposition), and the solver *choice alone* at a fixed
+                # decomposition already moves these observables past the
+                # bjacobi bounds (measured at Q1: subsurface 5.9e-5,
+                # exchanged 4.4e-3 between bjacobi and amg at n=1), so the
+                # amg/gamg bounds are derived from the Q1 measurements
+                # (subsurface 1.8e-4, exchanged 8.1e-3, surface 1.4e-3 at
+                # 600 s) with ~2x headroom — amendment V2-A4.
+                if SOLVER_OVERRIDE in ("amg", "gamg"):
+                    bounds = {"subsurface": 4.0e-4, "exchanged": 1.6e-2,
+                              "surface": 3.0e-3}
+                else:
+                    bounds = {"subsurface": 3.0e-5, "exchanged": 2.0e-3,
+                              "surface": 2.0e-3}
                 checks = [
                     ("subsurface volume", base_ga[-1, 1], ga[-1, 1],
-                     abs(base_ga[-1, 1]), 3.0e-5),
-                    ("exchanged volume", base_ma[-1, 6], ma[-1, 6], exchanged, 2.0e-3),
-                    ("surface volume", base_ma[-1, 1], ma[-1, 1], exchanged, 2.0e-3),
+                     abs(base_ga[-1, 1]), bounds["subsurface"]),
+                    ("exchanged volume", base_ma[-1, 6], ma[-1, 6], exchanged,
+                     bounds["exchanged"]),
+                    ("surface volume", base_ma[-1, 1], ma[-1, 1], exchanged,
+                     bounds["surface"]),
                 ]
                 print(f"  n=1 vs n={ranks} [default, 600 s]: max rel field diff = {worst:.3e} "
                       "(recorded, not gated — trajectory chaos, amendment A14)")
@@ -1215,8 +1292,29 @@ def main() -> int:
     parser.add_argument("--t-end", type=float, default=None,
                         help="b5 gate: shorten the run to this horizon [s]; the "
                              "envelope checks clip to the covered window")
+    parser.add_argument("--solver", choices=["bjacobi-icc", "amg", "gamg"], default=None,
+                        help="g1 solver-invariance gate (v2 plan §2.3): run the gate "
+                             "with this preconditioner selected via the solver YAML "
+                             "block for both systems; pass/fail criteria unchanged")
+    parser.add_argument("--mat-type", choices=["aij", "aijkokkos"], default=None,
+                        help="p1 backend-invariance gate (v2 plan §2B.3): run the "
+                             "gate with this PETSc matrix/vector backend selected "
+                             "via the solver YAML block; pass/fail criteria "
+                             "unchanged")
     args = parser.parse_args()
     args.work.mkdir(parents=True, exist_ok=True)
+
+    if args.solver is not None:
+        if args.gate.startswith("rank-invariance") and args.mode == "strict":
+            print("error: --solver conflicts with strict rank-invariance mode "
+                  "(strict pins -pc_type jacobi on the PETSc command line)")
+            return 2
+        global SOLVER_OVERRIDE
+        SOLVER_OVERRIDE = args.solver
+
+    if args.mat_type is not None:
+        global MAT_TYPE_OVERRIDE
+        MAT_TYPE_OVERRIDE = args.mat_type
 
     if args.gate == "b1":
         return gate_b1(args)

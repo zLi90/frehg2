@@ -22,8 +22,8 @@ build fully offline).
 | CMake | 3.23 | — | |
 | C++ compiler | gcc ≥ 12 or clang ≥ 15 | gcc 13–15, Apple clang 15 tested | must support `-std=c++20` |
 | MPI | any MPI-3 | MPICH 4.3, Open MPI | C++ bindings required (`find_package(MPI COMPONENTS CXX)`) |
-| Kokkos | 5.1 | **5.1.1** | Serial + OpenMP host backends; CUDA optional |
-| PETSc | 3.20 | **3.25.1** | KSP only; `--with-fc=0` (no Fortran) is fine |
+| Kokkos | 5.1 | **5.1.1** | Serial + OpenMP host backends; CUDA optional; build **shared** (invariant 7) |
+| PETSc | 3.20 | **3.25.1** | KSP only; `--with-fc=0` (no Fortran) fine; build **Kokkos-aware** so the solve threads (invariant 7, §4) |
 | HDF5 | 1.10, **parallel** | 1.14.x | must be built `--enable-parallel` against the *same* MPI |
 | yaml-cpp | 0.7 | 0.7–0.8 | |
 
@@ -55,6 +55,19 @@ Python (for the test harness and post-processing only): `python3` with
 6. macOS: gcc on Apple Silicon ships **no sanitizer runtimes** — a
    `FREHG_SANITIZE=ON` build there must use Apple clang (and clang-built
    Kokkos/yaml-cpp). Plain builds work with either compiler.
+7. **Build Kokkos *shared* and make PETSc Kokkos-aware** (v2 Q3). Kokkos
+   must be built `-DBUILD_SHARED_LIBS=ON`: a *static* `libkokkoscore` is
+   absorbed independently into both the `frehg` executable and PETSc's
+   `libkokkoskernels`, giving two copies of Kokkos's runtime singleton in
+   one process — `Kokkos::OpenMP::initialize` prints twice and the first
+   `VecKokkos` access segfaults. PETSc must be configured
+   `--with-kokkos-dir=<prefix> --download-kokkos-kernels --with-openmp` so
+   the linear solve runs on the Kokkos backend and threads under
+   `OMP_NUM_THREADS` (v1's hardcoded `MATAIJ` solve was serial per rank);
+   confirm `PETSC_HAVE_KOKKOS_KERNELS` in `petscconf.h`. If you rebuild
+   Kokkos you MUST rebuild PETSc against it — a stale `libkokkoskernels`
+   embeds the old core and dangles at first run. `scripts/ci_install_deps.sh`
+   and the shipped build scripts already do all of this.
 
 ## 4. Install routes (pick by system)
 
@@ -77,7 +90,10 @@ Script interface: prefix as `$1` (default `~/.frehg-deps`); env
 overrides `KOKKOS_VERSION`, `PETSC_VERSION`; `FREHG_CUDA=1` adds the
 CUDA backend (§7); needs `curl`, internet, and ~10–30 min. PETSc builds
 its own BLAS/LAPACK (`--download-f2cblaslapack`), so none is needed from
-the system.
+the system. Kokkos is built shared and PETSc is built Kokkos-aware
+(`--with-kokkos-dir --download-kokkos-kernels --with-openmp` + downloaded
+hypre for the `amg` solver) per invariant 7 — this is what lets the linear
+solve thread and run device-consistently.
 
 ### Route B — everything from system packages / Spack / modules
 
@@ -91,8 +107,10 @@ wrapper (invariant 2 applies to Cray wrappers too).
 ### Route C — fully manual
 
 Follow Route A's script as a recipe (it is short and readable): Kokkos
-with `-DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON
--DCMAKE_CXX_STANDARD=20`; PETSc with `--with-fc=0 --with-debugging=0`.
+with `-DBUILD_SHARED_LIBS=ON -DKokkos_ENABLE_OPENMP=ON
+-DKokkos_ENABLE_SERIAL=ON -DCMAKE_CXX_STANDARD=20`; PETSc with
+`--with-fc=0 --with-debugging=0 --with-kokkos-dir=<prefix>
+--download-kokkos-kernels --with-openmp --download-hypre` (invariant 7).
 
 ## 5. Configure, build, verify
 
@@ -117,6 +135,7 @@ CMake options:
 | `FREHG_ENABLE_TESTS` | `ON` | test suite (fetches GoogleTest at configure; `OFF` for offline/production-only builds) |
 | `FREHG_SANITIZE` | `OFF` | ASan+UBSan instrumented build |
 | `FREHG_GPU_AWARE_MPI` | `OFF` | compile-time default for GPU-aware MPI staging (runtime-overridable) |
+| `FREHG_BACKEND` | `auto` | Kokkos execution backend: `auto\|serial\|openmp\|cuda\|hip`; verified at configure against the found Kokkos, and a device backend requires a Kokkos-aware PETSc (invariant 7) |
 | `FREHG_LEGACY_BENCHMARKS` | `../legacy/benchmarks` | path to regression goldens — **not distributed**; see §6 |
 
 **Verification (no external data needed):**
@@ -141,18 +160,22 @@ loudly to the self-contained subset — the restart-determinism and
 rank-invariance gates run fine without goldens. Do not treat the skip
 message as a broken install, and do not try to fabricate goldens.
 
-## 7. GPU (CUDA) builds — compile-only support
+## 7. GPU (CUDA) builds — experimental
 
-Frehg2 is **GPU-ready, GPU-unvalidated**: the CUDA backend compiles
-warning-free (CI-gated) but no benchmark has been validated on a device.
-Scripts may offer a CUDA build as *experimental*, with that caveat
-stated. Recipe:
+Frehg2's GPU lane ships **experimental** (v2 Q3): the CUDA backend
+compiles and links warning-free (CI-gated), is statically
+invariant-checked, and its CPU-physics equivalent — the `aijkokkos`
+OpenMP solve lane — is validated, but device *execution* is unverified
+until the owner returns a passing GPU-acceptance bundle
+(`docs/developer-guide/gpu-acceptance.md`). Device builds print this
+status at startup. Scripts may offer a CUDA build as *experimental*, with
+that caveat stated; never promise validated GPU results. Recipe:
 
 ```bash
 export CC=gcc-12 CXX=g++-12          # host gcc must satisfy the local nvcc's support matrix
 FREHG_CUDA=1 FREHG_CUDA_ARCH=AMPERE80 scripts/ci_install_deps.sh $HOME/frehg-deps-cuda
 cmake -B build-cuda -DCMAKE_CXX_COMPILER=$HOME/frehg-deps-cuda/bin/nvcc_wrapper \
-      -DCMAKE_PREFIX_PATH=$HOME/frehg-deps-cuda
+      -DCMAKE_PREFIX_PATH=$HOME/frehg-deps-cuda -DFREHG_BACKEND=cuda
 cmake --build build-cuda -j
 ```
 
@@ -168,7 +191,10 @@ against the documented CPU records before trusting results.
 ## 8. Runtime environment for the scripts you generate
 
 - `OMP_NUM_THREADS=1` for small/benchmark-scale grids (launch-latency
-  bound); threads only pay off on large per-rank subdomains.
+  bound); threads only pay off on large per-rank subdomains. With a
+  Kokkos-aware PETSc the linear *solve* also threads (v2 Q3); select it
+  per system with `solver.<sys>.mat_type: aijkokkos` (see
+  `docs/user-guide/parameters.md`). Device builds force it.
 - MPI: `mpirun -np N build/src/frehg case.yaml`; decomposition is
   automatic (or pinned via `domain.decomposition`).
 - `FI_PROVIDER=tcp` if MPICH+libfabric hangs in `MPI_Finalize`

@@ -29,7 +29,7 @@ domain:
   dy: 0.05
   dz: 0.04
   dz_stretch: 1.0
-  bottom_elevation: {file: ../../benchmarks/b6-kuan/input/bathymetry.dat}
+  bottom_elevation: {file: input/bathymetry.dat}
   follow_terrain: true
 
 time:
@@ -93,7 +93,7 @@ boundary_conditions:
     region: {polygon: [[-0.5, 3.35], [1.5, 3.35], [1.5, 3.45], [-0.5, 3.45]]}
     target: surface
     kind: eta
-    value: {series: {file: ../../benchmarks/b6-kuan/input/tide.dat}}
+    value: {series: {file: input/tide.dat}}
   - name: sea-surface-salinity
     # The flooding water is the ocean reservoir at 35 psu: the golden td run
     # held every wet surface cell at 35 (the legacy wet-cell salinity

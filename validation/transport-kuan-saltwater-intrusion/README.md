@@ -11,9 +11,10 @@ subsurface dispersion tensor, seepage exchange, and the baroclinic feedback into
 the Darcy solve).
 
 It is the validation-suite copy of the project's own **`b6-kuan`** gate
-benchmark (`../../benchmarks/b6-kuan/`); the configs read that case's
-`input/` directory directly (the data is identical — it is not duplicated
-here). Two configurations share it:
+benchmark (`../../benchmarks/b6-kuan/`). The case is self-contained: its
+`input/` directory carries the bathymetry and tide series (byte-identical
+copies of the benchmark's data), so the directory can be copied anywhere
+and run as-is. Two configurations share it:
 
 | file | forcing | seaward stage |
 |---|---|---|

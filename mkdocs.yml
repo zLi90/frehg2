@@ -25,6 +25,7 @@ exclude_docs: |
 
 markdown_extensions:
   - admonition
+  - attr_list
   - toc:
       permalink: true
   - pymdownx.superfences
@@ -62,7 +63,9 @@ nav:
       - Adding an output variable: developer-guide/adding-an-output-variable.md
       - Testing and CI: developer-guide/testing.md
       - Performance: developer-guide/performance.md
+      - GPU acceptance protocol: developer-guide/gpu-acceptance.md
       - Upgrade plan (binding spec): developer-guide/FREHG2_UPGRADE_PLAN.md
+      - v2 development plan (binding spec): developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md
       - Phase records:
           - P0 DoD: developer-guide/dod-P0.md
           - P0 report: developer-guide/report-P0.md
@@ -76,3 +79,9 @@ nav:
           - P4 report: developer-guide/report-P4.md
           - P5 DoD: developer-guide/dod-P5.md
           - P5 report: developer-guide/report-P5.md
+          - Q1 DoD: developer-guide/dod-Q1.md
+          - Q1 report: developer-guide/report-Q1.md
+          - Q2 DoD: developer-guide/dod-Q2.md
+          - Q2 report: developer-guide/report-Q2.md
+          - Q3 DoD: developer-guide/dod-Q3.md
+          - Q3 report: developer-guide/report-Q3.md

@@ -1,0 +1,81 @@
+# Nightly regression lane (plan §8.3, §11.2): the long-running cases (b5,
+# b6) run here rather than per-commit. In P0 the regression label is empty;
+# the nightly still validates every benchmark configuration and runs the
+# full unit + mpi matrix so schema or foundation drift is caught overnight.
+name: regression-nightly
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  nightly:
+    runs-on: ubuntu-24.04
+    env:
+      DEPS_PREFIX: /home/runner/.frehg-deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mpich libmpich-dev libhdf5-mpich-dev \
+            libyaml-cpp-dev python3-yaml python3-h5py
+
+      - name: Cache built dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_PREFIX }}
+          key: frehg-deps-${{ runner.os }}-gcc-kokkos5.1.1-petsc3.25.1-kokkoskernels-v3
+
+      - name: Build Kokkos and PETSc
+        run: scripts/ci_install_deps.sh "$DEPS_PREFIX"
+
+      - name: Build
+        run: |
+          export CMAKE_PREFIX_PATH="$DEPS_PREFIX"
+          cmake -B build -DFREHG_WERROR=ON
+          cmake --build build -j "$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Unit + MPI labels
+        run: |
+          ctest --test-dir build -L unit --output-on-failure
+          ctest --test-dir build -L mpi -LE regression --output-on-failure
+
+      # The regression and nightly gates compare against the legacy goldens
+      # (a development-side archive, not distributed with the repository).
+      # Provision it at legacy/benchmarks next to the checkout — or point
+      # FREHG_LEGACY_BENCHMARKS at it — to arm these steps; they skip
+      # loudly otherwise.
+      - name: Full regression label (b5/b6 nightly per plan §11.2)
+        # Anchored: the plain regex 'regression' would also select the
+        # regression_nightly label by substring and run the envelope
+        # gates twice.
+        run: |
+          LEGACY="$(sed -n 's/^FREHG_LEGACY_BENCHMARKS:[^=]*=//p' build/CMakeCache.txt)"
+          if [ -d "$LEGACY" ]; then
+            ctest --test-dir build -L '^regression$' --output-on-failure --no-tests=ignore
+          else
+            echo "goldens absent: running only the self-contained restart/rank-invariance gates"
+            ctest --test-dir build -L '^regression$' -R "restart|rank_invariance" \
+              --output-on-failure --no-tests=ignore
+          fi
+      - name: Nightly-class envelope gates (the four b5 runs; hours each)
+        run: |
+          LEGACY="$(sed -n 's/^FREHG_LEGACY_BENCHMARKS:[^=]*=//p' build/CMakeCache.txt)"
+          if [ -d "$LEGACY" ]; then
+            ctest --test-dir build -L regression_nightly --output-on-failure --no-tests=ignore
+          else
+            echo "SKIPPED: legacy goldens not found at '$LEGACY'"
+          fi
+      - name: Scalability gates (v2 plan §7.2 s1-s4 + the g2 bjacobi record)
+        run: |
+          ctest --test-dir build -L scaling_nightly --output-on-failure --no-tests=ignore
+      - name: Scaling artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scaling-artifacts
+          path: build/scaling/*.json
+          if-no-files-found: ignore

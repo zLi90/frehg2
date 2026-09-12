@@ -21,6 +21,9 @@ option(FREHG_SANITIZE "Enable Address and UndefinedBehavior sanitizers" OFF)
 option(FREHG_ENABLE_TESTS "Build the test suite" ON)
 option(FREHG_CLANG_TIDY "Run clang-tidy during compilation" OFF)
 option(FREHG_GPU_AWARE_MPI "Compile-time default for GPU-aware MPI staging (runtime-overridable)" OFF)
+set(FREHG_BACKEND "auto" CACHE STRING
+    "Requested execution backend, verified against the found Kokkos: auto|serial|openmp|cuda|hip (v2 plan §2B.2 B5)")
+set_property(CACHE FREHG_BACKEND PROPERTY STRINGS auto serial openmp cuda hip)
 
 # ---------------------------------------------------------------------------
 # Dependencies (explicit find_package; no submodules, no bundled sources)
@@ -34,6 +37,43 @@ if(NOT HDF5_IS_PARALLEL)
 endif()
 find_package(yaml-cpp REQUIRED)
 find_package(PETSc 3.20 REQUIRED)
+
+# ---------------------------------------------------------------------------
+# Backend consistency (v2 plan §2B.2 B5): fail at configure time, not at the
+# first solve.
+# ---------------------------------------------------------------------------
+# 1. The found Kokkos must provide the requested backend.
+if(NOT FREHG_BACKEND STREQUAL "auto")
+  string(TOUPPER "${FREHG_BACKEND}" _frehg_backend_upper)
+  if(NOT Kokkos_ENABLE_${_frehg_backend_upper})
+    message(FATAL_ERROR "FREHG_BACKEND=${FREHG_BACKEND} but the Kokkos at "
+                        "${Kokkos_DIR} was built without the ${_frehg_backend_upper} "
+                        "backend. Point CMAKE_PREFIX_PATH at a matching Kokkos.")
+  endif()
+endif()
+# 2. A device Kokkos backend requires a Kokkos-enabled PETSc: the COO
+#    assembly hands device pointers to MatSetValuesCOO, which a host-only
+#    PETSc would misread (the §2B.1 gap-1 defect, caught here and by the
+#    static_assert in LinearSystem.cpp).
+if(Kokkos_ENABLE_CUDA OR Kokkos_ENABLE_HIP OR Kokkos_ENABLE_SYCL)
+  set(_frehg_petsc_has_kokkos FALSE)
+  foreach(_frehg_dir IN LISTS _frehg_petsc_INCLUDE_DIRS)
+    if(EXISTS "${_frehg_dir}/petscconf.h")
+      file(STRINGS "${_frehg_dir}/petscconf.h" _frehg_petsc_kokkos_line
+           REGEX "#define PETSC_HAVE_KOKKOS 1")
+      if(_frehg_petsc_kokkos_line)
+        set(_frehg_petsc_has_kokkos TRUE)
+      endif()
+    endif()
+  endforeach()
+  if(NOT _frehg_petsc_has_kokkos)
+    message(FATAL_ERROR "Device Kokkos backend (CUDA/HIP/SYCL) but the PETSc found "
+                        "lacks PETSC_HAVE_KOKKOS. Rebuild PETSc with "
+                        "--with-kokkos-dir (or --download-kokkos) "
+                        "--download-kokkos-kernels and the matching device flag "
+                        "(v2 plan §2B.2).")
+  endif()
+endif()
 
 include(FrehgCompilerFlags)
 include(FrehgSanitizers)

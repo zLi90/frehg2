@@ -33,7 +33,8 @@ SolverSettings tightSettings() {
 /// discrete solution u(x) = 1 + x (which second differences reproduce
 /// exactly, so the linear-system error is isolated from discretization
 /// error).
-real_t solve1DPoisson(bool splitDuplicates) {
+real_t solve1DPoisson(bool splitDuplicates, SolverSettings settings = tightSettings(),
+                      const std::string& prefix = "t1d_") {
   const int n = 101;
   const real_t h = 1.0 / (n + 1);
   const real_t invH2 = 1.0 / (h * h);
@@ -73,7 +74,7 @@ real_t solve1DPoisson(bool splitDuplicates) {
   Kokkos::deep_copy(cols, colsH);
   Kokkos::deep_copy(vals, valsH);
 
-  LinearSystem system(MPI_COMM_SELF, "t1d_", n, n, tightSettings());
+  LinearSystem system(MPI_COMM_SELF, prefix, n, n, settings);
   system.setPattern(rows, cols);
   system.setValues(vals);
   EXPECT_TRUE(system.isSymmetric(1.0e-12));
@@ -114,6 +115,114 @@ TEST(LinearSystem, Poisson1DWithBoundaryFold) {
 
 TEST(LinearSystem, CooDuplicateEntriesAreSummed) {
   EXPECT_LT(solve1DPoisson(true), 1.0e-9);
+}
+
+// v2 Q1 (plan §2.2): the same Poisson solve must land at the same accuracy
+// under each selectable preconditioner — the unit-level face of the g1
+// solver-invariance gate.
+TEST(LinearSystem, PoissonSolvesUnderGamg) {
+  SolverSettings s = tightSettings();
+  s.preconditioner = "gamg";
+  EXPECT_LT(solve1DPoisson(false, s, "tgamg_"), 1.0e-9);
+}
+
+TEST(LinearSystem, PoissonSolvesUnderHypreAmg) {
+  PetscBool hasHypre = PETSC_FALSE;
+  ASSERT_EQ(PetscHasExternalPackage("hypre", &hasHypre), PETSC_SUCCESS);
+  if (hasHypre == PETSC_FALSE) {
+    GTEST_SKIP() << "PETSc built without hypre (configure with --download-hypre)";
+  }
+  SolverSettings s = tightSettings();
+  s.preconditioner = "amg";
+  EXPECT_LT(solve1DPoisson(false, s, "tamg_"), 1.0e-9);
+}
+
+TEST(LinearSystem, UnknownPreconditionerIsFatal) {
+  SolverSettings s;
+  s.preconditioner = "ilu";
+  EXPECT_THROW(LinearSystem(MPI_COMM_SELF, "tbadpc_", 4, 4, s), frehg::FatalError);
+}
+
+// v2 Q1 (plan §2.2.4): the hierarchy-reuse policy rebuilds on the cadence,
+// counts every rebuild, and honors forceRebuild().
+TEST(LinearSystem, HierarchyReuseRebuildPolicy) {
+  const int n = 50;
+  const std::size_t nCoo = static_cast<std::size_t>(n) * 3;
+  IdxView rows("rows", nCoo);
+  IdxView cols("cols", nCoo);
+  ValView vals("vals", nCoo);
+  auto rowsH = Kokkos::create_mirror_view(rows);
+  auto colsH = Kokkos::create_mirror_view(cols);
+  auto valsH = Kokkos::create_mirror_view(vals);
+  std::size_t e = 0;
+  for (int r = 0; r < n; ++r) {
+    rowsH(e) = r; colsH(e) = r; valsH(e) = 2.0; ++e;
+    rowsH(e) = r; colsH(e) = (r > 0) ? r - 1 : -1; valsH(e) = -1.0; ++e;
+    rowsH(e) = r; colsH(e) = (r < n - 1) ? r + 1 : -1; valsH(e) = -1.0; ++e;
+  }
+  Kokkos::deep_copy(rows, rowsH);
+  Kokkos::deep_copy(cols, colsH);
+  Kokkos::deep_copy(vals, valsH);
+
+  SolverSettings s = tightSettings();
+  s.preconditioner = "gamg";
+  s.reuseMaxSolves = 3;
+  s.reuseIterationFactor = 100.0;  // cadence is the only live trigger here
+  LinearSystem system(MPI_COMM_SELF, "treuse_", n, n, s);
+  EXPECT_TRUE(system.reusesHierarchy());
+  system.setPattern(rows, cols);
+
+  ValView rhs("rhs", static_cast<std::size_t>(n));
+  ValView sol("sol", static_cast<std::size_t>(n));
+  Kokkos::deep_copy(rhs, 1.0);
+  // Solves 1..7 with the cadence at 3: rebuilds at solves 1, 4, and 7.
+  for (int k = 0; k < 7; ++k) {
+    system.setValues(vals);  // marks the operator changed, as the model does
+    system.solve(rhs, sol);
+  }
+  EXPECT_EQ(system.telemetry().solves, 7);
+  EXPECT_EQ(system.telemetry().rebuilds, 3);
+  EXPECT_EQ(system.telemetry().retries, 0);
+
+  system.forceRebuild();  // the wet/dry-mask trigger path
+  system.setValues(vals);
+  system.solve(rhs, sol);
+  EXPECT_EQ(system.telemetry().solves, 8);
+  EXPECT_EQ(system.telemetry().rebuilds, 4);
+  EXPECT_GT(system.telemetry().totalIterations, 0);
+}
+
+// Without reuse (the bjacobi-icc default) every solve refreshes the
+// preconditioner — the golden-pinned v1 behavior.
+TEST(LinearSystem, DefaultPreconditionerRebuildsEverySolve) {
+  SolverSettings s = tightSettings();
+  ASSERT_EQ(s.preconditioner, "bjacobi-icc");
+  const int n = 8;
+  IdxView rows("rows", static_cast<std::size_t>(n));
+  IdxView cols("cols", static_cast<std::size_t>(n));
+  ValView vals("vals", static_cast<std::size_t>(n));
+  auto rowsH = Kokkos::create_mirror_view(rows);
+  auto colsH = Kokkos::create_mirror_view(cols);
+  for (int r = 0; r < n; ++r) {
+    rowsH(static_cast<std::size_t>(r)) = r;
+    colsH(static_cast<std::size_t>(r)) = r;
+  }
+  Kokkos::deep_copy(rows, rowsH);
+  Kokkos::deep_copy(cols, colsH);
+  Kokkos::deep_copy(vals, 3.0);
+
+  LinearSystem system(MPI_COMM_SELF, "tnoreuse_", n, n, s);
+  EXPECT_FALSE(system.reusesHierarchy());
+  system.setPattern(rows, cols);
+  ValView rhs("rhs", static_cast<std::size_t>(n));
+  ValView sol("sol", static_cast<std::size_t>(n));
+  Kokkos::deep_copy(rhs, 1.0);
+  for (int k = 0; k < 3; ++k) {
+    system.setValues(vals);
+    system.solve(rhs, sol);
+  }
+  EXPECT_EQ(system.telemetry().solves, 3);
+  EXPECT_EQ(system.telemetry().rebuilds, 3);
 }
 
 TEST(LinearSystem, Poisson2DManufacturedSolution) {

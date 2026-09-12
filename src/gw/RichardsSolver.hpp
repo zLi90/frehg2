@@ -250,6 +250,18 @@ class RichardsSolver {
 
   /// Convergence data of the last predictor solve.
   const SolveStats& lastSolve() const { return lastSolve_; }
+  /// Cumulative gw_ solver telemetry (v2 plan §2.2.6; the g2/s-gates parse
+  /// the driver's end-of-run summary line built from this).
+  const SolverTelemetry& solverTelemetry() const { return system_->telemetry(); }
+
+  /// \return the resolved PETSc matrix backend ("aij" | "aijkokkos") for
+  /// the run record's solver section (v2 plan §2B.5).
+  const std::string& solverMatType() const { return system_->matType(); }
+
+  /// \return the resolved BoomerAMG coarsening/smoother (empty unless the
+  /// preconditioner is "amg") for the run record (v2 plan §2B.2 B2).
+  const std::string& solverAmgCoarsenType() const { return system_->amgCoarsenType(); }
+  const std::string& solverAmgRelaxType() const { return system_->amgRelaxType(); }
 
   /// This rank's volume-budget contributions of the last step.
   const GwStepAudit& audit() const { return audit_; }

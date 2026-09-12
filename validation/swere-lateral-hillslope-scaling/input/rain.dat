@@ -1,0 +1,5 @@
+# swere-lateral-hillslope-scaling: constant rainfall [m/s]
+# = SERGHEI case4 first-period rate; the 1-hour run stays within it
+0.0 4.722222222e-09
+86400.0 4.722222222e-09
+90000.0 4.722222222e-09

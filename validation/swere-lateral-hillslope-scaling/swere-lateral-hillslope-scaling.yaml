@@ -1,0 +1,119 @@
+# swere-lateral-hillslope-scaling — MPI strong-scaling baseline (no decomposition)
+# ============================================================================
+# A large, homogeneous 3D extension of validation/swere-lateral-hillslope
+# (SERGHEI case4), built for MPI *strong scaling*. Relative to the parent case:
+#
+#   1. x refined 100 m -> 10 m     : nx 40 -> 400   (physical width 4000 m kept)
+#   2. x-z plane duplicated in y    : ny 1 -> 800, dy = 10 m   (homogeneous in y)
+#   3. run length 5 yr -> 1 hour    : t_end 157 680 000 -> 3 600 s
+#
+# Total grid = 400 x 800 x 60 = 19 200 000 cells (fixed for the whole scaling
+# study). The physics is unchanged from the parent case: the same 4000 m bed
+# line (3.95 - 0.001*x), the same VG soil, the same lateral head BCs, the same
+# rainfall + coupled seepage forcing. Because every y-slice is identical and the
+# y-walls are no-flux, there is no y-gradient — the widened domain reproduces
+# the parent x-z hillslope on each slice, giving a clean, load-balanced workload.
+#
+# THIS FILE IS THE BASELINE: decomposition 1 x 1 (a single MPI rank, no domain
+# decomposition) — the reference point for speedup/efficiency. Strong-scaling
+# variants keep EVERYTHING here identical and change only `decomposition`
+# (and the launch rank count); the input rasters do not depend on it. See
+# README.md for the recommended rank ladder.
+#
+# Inputs are produced by gen_inputs.py (analytic continuations of the parent
+# case). The initial subsurface state is given as a water table
+# (initial_conditions.groundwater.water_table) rather than a 3D head file: this
+# is ~3 MB instead of ~150 MB and reproduces the parent's saturated-zone head
+# exactly (RichardsSolver builds h = (WT + datum offset) - z_cell; the offset
+# cancels). The water table runs linearly from the two lateral head BCs,
+# -4.1 m (left) to -14.1 m (right).
+# ============================================================================
+simulation:
+  id: swere-lateral-hillslope-scaling
+  title: Lateral hillslope subsurface flow — 3D strong-scaling baseline (1x1)
+
+domain:
+  nx: 400
+  ny: 800
+  nz: 60
+  dx: 10.0
+  dy: 10.0
+  dz: 0.25
+  dz_stretch: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: true
+  terrain_layers: uniform
+  decomposition: {mpi_nx: 1, mpi_ny: 1}   # BASELINE: no domain decomposition
+
+time:
+  dt: 10.0            # sync common-step initial value (clamped to gw bounds)
+  t_end: 3600.0       # 1 hour
+  output_interval: 3600   # single field write at t_end (keep I/O out of the timing)
+
+modules:
+  surface_water: true
+  groundwater: true
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-09
+  wetting_face_depth: 1.0e-09
+  rainfall:
+    series: {file: input/rain.dat}
+  evaporation: {constant: 0.0}
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.01
+    dt_min: 0.01
+    dt_max: 90.0
+  specific_storage: 1.0e-05
+
+soil:
+  types:
+    - name: hillslope-soil
+      ksx: 5.78e-04
+      ksy: 5.78e-04
+      ksz: 5.78e-04
+      theta_s: 0.45
+      theta_r: 0.1
+      vg_alpha: 1.65
+      vg_n: 2.0
+      aev: 0.0
+  map: {constant: hillslope-soil}
+
+coupling: {mode: sync}
+
+initial_conditions:
+  surface:
+    eta: {constant: -10.0}       # dry start (below the bed everywhere)
+  groundwater:
+    water_table: {file: input/water_table.dat}   # -4.1 m (left) -> -14.1 m (right)
+
+boundary_conditions:
+  - name: left-head
+    region: {polygon: [[-1.0, -1.0], [11.0, -1.0], [11.0, 8001.0], [-1.0, 8001.0]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: -4.1}}    # headleft.input water table
+  - name: right-head
+    region: {polygon: [[3989.0, -1.0], [4001.0, -1.0], [4001.0, 8001.0], [3989.0, 8001.0]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: -14.1}}   # headright.input water table
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, seepage]
+    groundwater: [hydraulic_head, water_content]
+  monitors:
+    - {name: toe, i: 399, j: 0, variables: [depth, eta]}
+  checkpoint: {interval: 0}

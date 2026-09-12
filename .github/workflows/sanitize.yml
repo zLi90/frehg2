@@ -1,0 +1,44 @@
+# Sanitizer lane (plan §8.4): ASan + UBSan over the unit and mpi labels
+# per PR, zero findings allowed. The nightly schedule runs the full P5
+# sanitizer matrix (amendment A21): every per-PR label in full plus
+# sanitized shortened runs of the nightly-class b5/b6 configurations.
+name: sanitize
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 4 * * *"
+
+jobs:
+  asan-ubsan:
+    runs-on: ubuntu-24.04
+    env:
+      DEPS_PREFIX: /home/runner/.frehg-deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mpich libmpich-dev libhdf5-mpich-dev \
+            libyaml-cpp-dev python3-yaml python3-h5py python3-numpy
+
+      - name: Cache built dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_PREFIX }}
+          key: frehg-deps-${{ runner.os }}-gcc-kokkos5.1.1-petsc3.25.1-kokkoskernels-v3
+
+      - name: Build Kokkos and PETSc
+        run: scripts/ci_install_deps.sh "$DEPS_PREFIX"
+
+      - name: Sanitized build and tests
+        run: |
+          export CMAKE_PREFIX_PATH="$DEPS_PREFIX"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            scripts/run_sanitizers.sh --full build-asan "$DEPS_PREFIX"
+          else
+            scripts/run_sanitizers.sh build-asan "$DEPS_PREFIX"
+          fi

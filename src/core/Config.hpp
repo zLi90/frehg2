@@ -303,9 +303,36 @@ struct RestartConfig {
   real_t time = 0.0;     ///< checkpoint time to resume from [s]
 };
 
+/// solver.\<system\>: per-system linear-solver selection (v2 plan §2.2).
+/// Defaults reproduce the v1 hardcoded behavior (CG + block-Jacobi/ICC(0));
+/// `amg` selects hypre BoomerAMG, `gamg` PETSc's built-in smoothed
+/// aggregation. Every PETSc detail stays overridable through the options
+/// database (the constructor calls KSPSetFromOptions last).
+struct SolverSystemConfig {
+  std::string preconditioner = "bjacobi-icc";  ///< bjacobi-icc | amg | gamg
+  /// PETSc matrix/vector backend (v2 plan §2B.2 B1): "aij" (host, the
+  /// default) or "aijkokkos" (Kokkos Kernels on the build's execution
+  /// space — the threaded-CPU and GPU solve path; requires a Kokkos-enabled
+  /// PETSc). Device builds force "aijkokkos" regardless of this value.
+  std::string matType = "aij";
+  real_t rtol = 1.0e-8;    ///< relative tolerance (legacy SetRTCAccuracy)
+  real_t atol = 1.0e-14;   ///< absolute tolerance
+  int maxIterations = 500; ///< iteration cap
+  /// AMG hierarchy reuse cadence: rebuild the preconditioner at least every
+  /// this many solves (0 = rebuild every solve, the bjacobi-icc behavior).
+  /// Ignored for bjacobi-icc, whose per-solve refresh is cheap.
+  int reuseMaxSolves = 50;
+  /// Early-rebuild trigger: rebuild when an iteration count exceeds this
+  /// factor times the count measured right after the last rebuild.
+  real_t reuseIterationFactor = 1.5;
+};
+
 /// solver
 struct SolverConfig {
-  std::string petscOptionsFile;  ///< optional PETSc options file
+  SolverConfig() { groundwater.maxIterations = 1000; }
+  SolverSystemConfig surface;      ///< the fs_ free-surface system
+  SolverSystemConfig groundwater;  ///< the gw_ Richards predictor system
+  std::string petscOptionsFile;    ///< optional PETSc options file
 };
 
 /// runtime
@@ -360,6 +387,15 @@ FrehgConfig loadConfig(const std::string& path);
 /// Render the effective (defaults-materialized) configuration as a
 /// human-readable listing for the log header (plan §5.4).
 std::string describeConfig(const FrehgConfig& config);
+
+/// Serialize the resolved configuration back to schema-valid YAML (v2 plan
+/// §2A). This is the exact inverse of extraction for every materialized
+/// field: `loadConfig(resolvedConfigYaml(loadConfig(f)))` is a fixed point,
+/// and `frehg --resolve f` prints it so the run record's embedded
+/// configuration can be verified byte-for-byte against a re-resolve of the
+/// original input (gate r1). Blocks are emitted per enabled module
+/// (mirroring the extraction guards), so the output revalidates.
+std::string resolvedConfigYaml(const FrehgConfig& config);
 
 namespace detail {
 /// Structural + cross-field validation used by both entry points above.

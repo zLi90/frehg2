@@ -353,6 +353,22 @@ restart:
   time: 9000            # checkpoint time to resume from [s]
 
 solver:
+  # Per-system linear-solver selection (v2 plan §2.2). bjacobi-icc is the
+  # v1 default; amg = hypre BoomerAMG (needs a hypre-enabled PETSc, the
+  # scripts/ci_install_deps.sh build); gamg = PETSc smoothed aggregation.
+  # AMG-class choices reuse their hierarchy across solves and rebuild on
+  # the reuse_* policy (and, for the surface system, whenever the wet/dry
+  # mask changes).
+  surface:
+    preconditioner: bjacobi-icc   # bjacobi-icc | amg | gamg
+    rtol: 1.0e-8
+    atol: 1.0e-14
+    max_iterations: 500
+    reuse_max_solves: 50          # amg/gamg: rebuild at least every N solves
+    reuse_iteration_factor: 1.5   # amg/gamg: early rebuild trigger
+  groundwater:
+    preconditioner: bjacobi-icc
+    max_iterations: 1000
   petsc_options_file: ""  # optional PETSc options file overriding the fs_/gw_ defaults
 ```
 

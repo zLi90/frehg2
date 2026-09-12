@@ -130,3 +130,30 @@ For interactive exploration or 3D rendering, the file also opens directly in
 **ParaView** and **VisIt** via their HDF5 readers, and in
 [panoply](https://www.giss.nasa.gov/tools/panoply/) or any `h5py`/`xarray`
 workflow.
+
+## The run record (v2)
+
+Every simulation writes `run-record.yaml` into the directory of the HDF5
+output — a self-contained description of what was run and where the time
+went (v2 plan §2A). The record is rewritten at every output flush and
+finalized when the run completes, so a killed or crashed run still leaves a
+truthful partial record (`provenance.finished: false` with the last
+completed state).
+
+Top-level sections:
+
+| Key | Contents |
+|---|---|
+| `provenance` | frehg2 version + git SHA, build type, hostname, MPI ranks and `[px, py]` decomposition, OpenMP threads, Kokkos backend, ISO-8601 start/end times, wall seconds, the input YAML path and its SHA-256, restart parentage (`restart_from`, `restart_time`) when restarted, `finished` |
+| `configuration` | the fully **resolved** configuration — every default materialized; exactly what `frehg --resolve <input>` prints, byte-comparable against a re-resolve of the input |
+| `modules` | module flags, coupling mode, density-coupling state |
+| `boundary_conditions` | per BC: name, target, kind, value (series files carry their SHA-256), polygon vertex count and bounding box, global member-cell count |
+| `timers` | the full hierarchical timer tree (count, min/mean/max seconds over ranks) — identical numbers to the end-of-run stdout table, plus the `init`, `io/output`, `io/checkpoint`, `io/run_record`, `halo` (message passing), and `monitors` sections |
+| `solver` | per-system linear-solver telemetry: solves, iteration mean/max, rebuilds, retries, setup/solve seconds |
+| `closure` | the final cumulative mass-audit budgets (surface and groundwater) |
+
+`frehg --resolve config.yaml` prints the resolved configuration between
+sentinel lines; `tools/check_run_record.py` validates a record (schema,
+launch geometry, configuration round-trip) and is applied to every
+regression gate run automatically (gate r1). `scripts/run_scaling.py` reads
+its timings from the record rather than scraping stdout.

@@ -31,7 +31,7 @@ domain:
   dy: 0.05
   dz: 0.04
   dz_stretch: 1.0
-  bottom_elevation: {file: ../../benchmarks/b6-kuan/input/bathymetry.dat}
+  bottom_elevation: {file: input/bathymetry.dat}
   follow_terrain: true
 
 time:

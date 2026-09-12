@@ -25,7 +25,8 @@ add_library(frehg_core STATIC
   io/GridDataReader.cpp
   io/Hdf5Output.cpp
   io/Monitor.cpp
-  io/Checkpoint.cpp)
+  io/Checkpoint.cpp
+  io/RunRecord.cpp)
 add_library(frehg::core ALIAS frehg_core)
 
 target_include_directories(frehg_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -44,6 +45,7 @@ target_compile_definitions(frehg_core
   PUBLIC
     FREHG_GIT_SHA="${FREHG_GIT_SHA}"
     FREHG_VERSION="${PROJECT_VERSION}"
+    FREHG_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
     # Frehg2 is double-precision only (plan §4); skipping PETSc's optional
     # __float128 surface and C++ complex operator shims keeps a gcc-built
     # (libquadmath-aware) PETSc usable from compilers without __float128,

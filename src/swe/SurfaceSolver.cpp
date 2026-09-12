@@ -149,8 +149,21 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
   buildRainMask(config);
   assignFileOrConstant(grid_, frictionCoef_, sw.friction.coefficient, config);
 
+  // Solver selection from the v2 solver block (v2 plan §2.2): the fs_
+  // system is 2D 5-point, so the BoomerAMG strength threshold stays at the
+  // 2D default 0.25 with no aggressive coarsening.
+  SolverSettings fsSettings;
+  fsSettings.rtol = config.solver.surface.rtol;
+  fsSettings.atol = config.solver.surface.atol;
+  fsSettings.maxIterations = config.solver.surface.maxIterations;
+  fsSettings.preconditioner = config.solver.surface.preconditioner;
+  fsSettings.matType = config.solver.surface.matType;
+  fsSettings.amgStrongThreshold = 0.25;
+  fsSettings.amgAggressiveLevels = 0;
+  fsSettings.reuseMaxSolves = config.solver.surface.reuseMaxSolves;
+  fsSettings.reuseIterationFactor = config.solver.surface.reuseIterationFactor;
   system_ = std::make_unique<LinearSystem>(grid_.comm(), "fs_", grid_.activeCount2Local(),
-                                           grid_.activeCount2Global());
+                                           grid_.activeCount2Global(), fsSettings);
   buildCooPattern();
 
   applyInitialConditions(config);
@@ -451,6 +464,7 @@ void SurfaceSolver::refreshDerivedState() {
 }
 
 void SurfaceSolver::beginStep(real_t t) {
+  Timer::Scoped timer("swe/begin_step");
   Kokkos::deep_copy(etan_, eta_);
   audit_ = SurfaceStepAudit{};
 

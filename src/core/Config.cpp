@@ -447,6 +447,21 @@ FrehgConfig loadConfig(const std::string& path) {
   cfg.output = extractOutput(root["output"]);
   cfg.restart = extractRestart(root["restart"]);
   if (root["solver"].IsDefined()) {
+    const auto parseSystem = [](const YAML::Node& node, SolverSystemConfig& out) {
+      if (!node.IsDefined()) {
+        return;
+      }
+      out.preconditioner = valueOr<std::string>(node["preconditioner"], out.preconditioner);
+      out.matType = valueOr<std::string>(node["mat_type"], out.matType);
+      out.rtol = valueOr<real_t>(node["rtol"], out.rtol);
+      out.atol = valueOr<real_t>(node["atol"], out.atol);
+      out.maxIterations = valueOr<int>(node["max_iterations"], out.maxIterations);
+      out.reuseMaxSolves = valueOr<int>(node["reuse_max_solves"], out.reuseMaxSolves);
+      out.reuseIterationFactor =
+          valueOr<real_t>(node["reuse_iteration_factor"], out.reuseIterationFactor);
+    };
+    parseSystem(root["solver"]["surface"], cfg.solver.surface);
+    parseSystem(root["solver"]["groundwater"], cfg.solver.groundwater);
     cfg.solver.petscOptionsFile =
         valueOr<std::string>(root["solver"]["petsc_options_file"], std::string());
   }
@@ -527,6 +542,310 @@ std::string describeConfig(const FrehgConfig& cfg) {
           : cfg.runtime.gpuAwareMpi == RuntimeConfig::GpuAwareMpi::Off ? "off"
                                                                        : "auto");
   return out.str();
+}
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// Resolved-config serialization (v2 plan §2A): each emit* mirrors the
+// corresponding extract* above exactly, so the pair is a fixed point.
+// ---------------------------------------------------------------------------
+
+YAML::Node emitFileOrConstant(const FileOrConstant& v) {
+  YAML::Node n;
+  if (v.fromFile) {
+    n["file"] = v.file;
+  } else {
+    n["constant"] = v.constant;
+  }
+  return n;
+}
+
+YAML::Node emitSeriesOrConstant(const SeriesOrConstant& v) {
+  YAML::Node n;
+  if (v.fromSeries) {
+    n["series"]["file"] = v.file;
+  } else {
+    n["constant"] = v.constant;
+  }
+  return n;
+}
+
+YAML::Node emitPolygon(const std::vector<std::array<real_t, 2>>& polygon) {
+  YAML::Node n(YAML::NodeType::Sequence);
+  for (const std::array<real_t, 2>& pt : polygon) {
+    YAML::Node vertex(YAML::NodeType::Sequence);
+    vertex.SetStyle(YAML::EmitterStyle::Flow);
+    vertex.push_back(pt[0]);
+    vertex.push_back(pt[1]);
+    n.push_back(vertex);
+  }
+  return n;
+}
+
+YAML::Node emitSolverSystem(const SolverSystemConfig& s) {
+  YAML::Node n;
+  n["preconditioner"] = s.preconditioner;
+  n["mat_type"] = s.matType;
+  n["rtol"] = s.rtol;
+  n["atol"] = s.atol;
+  n["max_iterations"] = s.maxIterations;
+  n["reuse_max_solves"] = s.reuseMaxSolves;
+  n["reuse_iteration_factor"] = s.reuseIterationFactor;
+  return n;
+}
+
+}  // namespace
+
+std::string resolvedConfigYaml(const FrehgConfig& cfg) {
+  YAML::Node root;
+
+  root["simulation"]["id"] = cfg.simulation.id;
+  if (!cfg.simulation.title.empty()) {
+    root["simulation"]["title"] = cfg.simulation.title;
+  }
+
+  YAML::Node domain;
+  domain["nx"] = cfg.domain.nx;
+  domain["ny"] = cfg.domain.ny;
+  domain["nz"] = cfg.domain.nz;
+  domain["dx"] = cfg.domain.dx;
+  domain["dy"] = cfg.domain.dy;
+  domain["dz"] = cfg.domain.dz;
+  domain["dz_stretch"] = cfg.domain.dzStretch;
+  domain["bottom_elevation"] = emitFileOrConstant(cfg.domain.bottomElevation);
+  domain["follow_terrain"] = cfg.domain.followTerrain;
+  if (cfg.domain.followTerrain) {
+    domain["terrain_layers"] =
+        cfg.domain.terrainLayers == DomainConfig::TerrainLayers::Uniform ? "uniform" : "scaled";
+  }
+  // 0 means auto (MPI_Dims_create); the schema accepts "auto" or >= 1.
+  domain["decomposition"]["mpi_nx"] =
+      cfg.domain.decomposition.mpiNx > 0 ? YAML::Node(cfg.domain.decomposition.mpiNx)
+                                         : YAML::Node("auto");
+  domain["decomposition"]["mpi_ny"] =
+      cfg.domain.decomposition.mpiNy > 0 ? YAML::Node(cfg.domain.decomposition.mpiNy)
+                                         : YAML::Node("auto");
+  root["domain"] = domain;
+
+  YAML::Node time;
+  time["dt"] = cfg.time.dt;
+  time["t_start"] = cfg.time.tStart;
+  time["t_end"] = cfg.time.tEnd;
+  time["output_interval"] = cfg.time.outputInterval;
+  root["time"] = time;
+
+  root["modules"]["surface_water"] = cfg.modules.surfaceWater;
+  root["modules"]["groundwater"] = cfg.modules.groundwater;
+  root["modules"]["transport"] = cfg.modules.transport;
+
+  if (cfg.modules.surfaceWater) {
+    const SurfaceWaterConfig& sw = cfg.surfaceWater;
+    YAML::Node node;
+    node["gravity"] = sw.gravity;
+    node["friction"]["law"] =
+        sw.friction.law == FrictionConfig::Law::Chezy ? "chezy" : "manning";
+    node["friction"]["coefficient"] = emitFileOrConstant(sw.friction.coefficient);
+    node["friction"]["thin_layer_depth"] = sw.friction.thinLayerDepth;
+    node["viscosity"]["x"] = sw.viscosityX;
+    node["viscosity"]["y"] = sw.viscosityY;
+    node["min_depth"] = sw.minDepth;
+    node["wetting_face_depth"] = sw.wettingFaceDepth;
+    YAML::Node wind;
+    wind["enabled"] = sw.wind.enabled;
+    wind["cd"] = sw.wind.cd;
+    wind["attenuation_depth"] = sw.wind.attenuationDepth;
+    wind["north_angle"] = sw.wind.northAngle;
+    wind["speed"] = emitSeriesOrConstant(sw.wind.speed);
+    wind["direction"] = emitSeriesOrConstant(sw.wind.direction);
+    node["wind"] = wind;
+    YAML::Node rainfall = emitSeriesOrConstant(sw.rainfall);
+    if (!sw.rainfallExcludePolygon.empty()) {
+      rainfall["exclude"]["polygon"] = emitPolygon(sw.rainfallExcludePolygon);
+    }
+    node["rainfall"] = rainfall;
+    node["evaporation"] = emitSeriesOrConstant(sw.evaporation);
+    root["surface_water"] = node;
+  }
+
+  if (cfg.modules.groundwater) {
+    const GroundwaterConfig& gw = cfg.groundwater;
+    YAML::Node node;
+    node["scheme"] = gw.scheme;
+    node["use_full3d"] = gw.useFull3d;
+    node["timestep"]["dt_init"] = gw.timestep.dtInit;
+    node["timestep"]["dt_min"] = gw.timestep.dtMin;
+    node["timestep"]["dt_max"] = gw.timestep.dtMax;
+    node["timestep"]["dq_grow"] = gw.timestep.dqGrow;
+    node["timestep"]["dq_shrink"] = gw.timestep.dqShrink;
+    node["timestep"]["courant_max"] = gw.timestep.courantMax;
+    node["specific_storage"] = gw.specificStorage;
+    node["reallocation_surplus"] =
+        gw.reallocationSurplus == GroundwaterConfig::ReallocationSurplus::Redistribute
+            ? "redistribute"
+            : "drop";
+    node["density_coupling"]["enabled"] = gw.densityCoupling.enabled;
+    root["groundwater"] = node;
+
+    YAML::Node soil;
+    for (const SoilType& type : cfg.soil.types) {
+      YAML::Node t;
+      t["name"] = type.name;
+      t["ksx"] = type.ksx;
+      t["ksy"] = type.ksy;
+      t["ksz"] = type.ksz;
+      t["theta_s"] = type.thetaS;
+      t["theta_r"] = type.thetaR;
+      t["vg_alpha"] = type.vgAlpha;
+      t["vg_n"] = type.vgN;
+      t["aev"] = type.aev;
+      soil["types"].push_back(t);
+    }
+    if (cfg.soil.map.fromFile) {
+      soil["map"]["file"] = cfg.soil.map.file;
+    } else {
+      soil["map"]["constant"] = cfg.soil.map.constantName;
+    }
+    root["soil"] = soil;
+  }
+
+  if (cfg.modules.surfaceWater && cfg.modules.groundwater) {
+    root["coupling"]["mode"] =
+        cfg.coupling.mode == CouplingConfig::Mode::Subcycled ? "subcycled" : "sync";
+  }
+
+  YAML::Node ic;
+  if (cfg.modules.surfaceWater) {
+    ic["surface"]["eta"] = emitFileOrConstant(cfg.initialConditions.surface.eta);
+    if (cfg.initialConditions.surface.hasUu) {
+      ic["surface"]["uu"] = emitFileOrConstant(cfg.initialConditions.surface.uu);
+    }
+    if (cfg.initialConditions.surface.hasVv) {
+      ic["surface"]["vv"] = emitFileOrConstant(cfg.initialConditions.surface.vv);
+    }
+  }
+  if (cfg.modules.groundwater) {
+    const GroundwaterInitialConfig& gwIc = cfg.initialConditions.groundwater;
+    const char* key = gwIc.form == GroundwaterInitialConfig::Form::WaterTable ? "water_table"
+                      : gwIc.form == GroundwaterInitialConfig::Form::Head    ? "head"
+                                                                             : "moisture";
+    ic["groundwater"][key] = emitFileOrConstant(gwIc.value);
+  }
+  if (cfg.modules.transport) {
+    if (cfg.modules.surfaceWater) {
+      ic["transport"]["surface"] = emitFileOrConstant(cfg.initialConditions.transport.surface);
+    }
+    if (cfg.modules.groundwater) {
+      ic["transport"]["groundwater"] =
+          emitFileOrConstant(cfg.initialConditions.transport.groundwater);
+    }
+  }
+  if (ic.IsDefined() && ic.IsMap() && ic.size() > 0) {
+    root["initial_conditions"] = ic;
+  }
+
+  if (!cfg.boundaryConditions.empty()) {
+    YAML::Node bcs(YAML::NodeType::Sequence);
+    for (const BoundaryConditionConfig& bc : cfg.boundaryConditions) {
+      YAML::Node b;
+      b["name"] = bc.name;
+      b["region"]["polygon"] = emitPolygon(bc.polygon);
+      b["target"] = bc.target == BcTarget::Surface             ? "surface"
+                    : bc.target == BcTarget::GroundwaterTop    ? "groundwater_top"
+                    : bc.target == BcTarget::GroundwaterBottom ? "groundwater_bottom"
+                                                               : "groundwater_side";
+      b["kind"] = bc.kind == BcKind::Eta         ? "eta"
+                  : bc.kind == BcKind::Discharge ? "discharge"
+                  : bc.kind == BcKind::Velocity  ? "velocity"
+                  : bc.kind == BcKind::Outflow   ? "outflow"
+                  : bc.kind == BcKind::Head      ? "head"
+                  : bc.kind == BcKind::Flux      ? "flux"
+                                                 : "scalar_value";
+      // Outflow takes no value (schema cross-check: transmissive).
+      if (bc.kind != BcKind::Outflow) {
+        switch (bc.value.form) {
+          case BcValueConfig::Form::Constant:
+            b["value"]["constant"] = bc.value.constant;
+            break;
+          case BcValueConfig::Form::Series:
+            b["value"]["series"]["file"] = bc.value.seriesFile;
+            break;
+          case BcValueConfig::Form::Gravity:
+            b["value"]["gravity"] = true;
+            break;
+          case BcValueConfig::Form::Hydrostatic:
+            b["value"]["hydrostatic"]["eta"] = bc.value.hydrostaticEta;
+            break;
+        }
+      }
+      bcs.push_back(b);
+    }
+    root["boundary_conditions"] = bcs;
+  }
+
+  if (cfg.modules.transport) {
+    const TransportConfig& tr = cfg.transport;
+    YAML::Node node;
+    node["scheme"]["advection"] =
+        tr.scheme.advection == TransportSchemeConfig::Advection::Superbee ? "superbee" : "upwind";
+    node["surface_diffusivity"]["x"] = tr.surfaceDiffusivityX;
+    node["surface_diffusivity"]["y"] = tr.surfaceDiffusivityY;
+    node["dispersion"]["longitudinal"] = tr.dispersionLongitudinal;
+    node["dispersion"]["transverse"] = tr.dispersionTransverse;
+    node["dispersion"]["molecular"] = tr.dispersionMolecular;
+    node["bounds"]["min"] = tr.boundMin;
+    if (tr.hasBoundMax) {
+      node["bounds"]["max"] = tr.boundMax;
+    }
+    root["transport"] = node;
+  }
+
+  YAML::Node output;
+  output["filename"] = cfg.output.filename;
+  if (!cfg.output.surfaceVariables.empty()) {
+    output["variables"]["surface"] = cfg.output.surfaceVariables;
+  }
+  if (!cfg.output.groundwaterVariables.empty()) {
+    output["variables"]["groundwater"] = cfg.output.groundwaterVariables;
+  }
+  if (!cfg.output.transportVariables.empty()) {
+    output["variables"]["transport"] = cfg.output.transportVariables;
+  }
+  for (const MonitorConfig& mon : cfg.output.monitors) {
+    YAML::Node m;
+    m["name"] = mon.name;
+    m["i"] = mon.i;
+    m["j"] = mon.j;
+    m["variables"] = mon.variables;
+    output["monitors"].push_back(m);
+  }
+  output["checkpoint"]["interval"] = cfg.output.checkpointInterval;
+  root["output"] = output;
+
+  YAML::Node restart;
+  restart["enabled"] = cfg.restart.enabled;
+  if (cfg.restart.enabled) {
+    restart["file"] = cfg.restart.file;
+    restart["time"] = cfg.restart.time;
+  }
+  root["restart"] = restart;
+
+  root["solver"]["surface"] = emitSolverSystem(cfg.solver.surface);
+  root["solver"]["groundwater"] = emitSolverSystem(cfg.solver.groundwater);
+  if (!cfg.solver.petscOptionsFile.empty()) {
+    root["solver"]["petsc_options_file"] = cfg.solver.petscOptionsFile;
+  }
+
+  root["runtime"]["gpu_aware_mpi"] =
+      cfg.runtime.gpuAwareMpi == RuntimeConfig::GpuAwareMpi::On    ? "on"
+      : cfg.runtime.gpuAwareMpi == RuntimeConfig::GpuAwareMpi::Off ? "off"
+                                                                   : "auto";
+
+  YAML::Emitter emitter;
+  emitter.SetDoublePrecision(17);
+  emitter.SetFloatPrecision(9);
+  emitter << root;
+  return std::string(emitter.c_str()) + "\n";
 }
 
 }  // namespace frehg

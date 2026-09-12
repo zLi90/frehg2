@@ -113,3 +113,73 @@ there must preserve the term-by-term audits or re-gate (report-P4 §2).
 - Benchmark gate runtimes for planning: b1/b2 seconds, b3/b4 ~0.5 min,
   b6 ss ~6 min / td ~13 min serial, b5 shortened rain/sync gate ~1 h at
   4 ranks, b5 full horizon ~3.6 h per lane at 4 ranks (A15).
+
+## Solver scalability (v2 Q1)
+
+The v1 default preconditioner — CG with block-Jacobi/ICC(0) — is not
+scalable: block count equals rank count, cross-block coupling is dropped,
+and CG iterations grow with ranks. v2 adds YAML-selectable AMG paths
+(`solver.<system>.preconditioner: amg` for hypre BoomerAMG, `gamg` for
+PETSc smoothed aggregation) with an iteration-and-cadence-triggered
+hierarchy-reuse policy (v2 plan §2.2.4) and per-system telemetry (the
+end-of-run `solver summary` lines; parsed by `scripts/run_scaling.py`).
+
+Standing gates (v2 plan §2.3, §7.2): g1 re-runs the b-gates under each
+preconditioner (solver choice must not change physics); g2 asserts mean CG
+iterations at 8 ranks stay within 1.10× the 1-rank count under AMG on the
+A23 synthetic case; s1 keeps the 70 %-at-4-ranks strong-scaling criterion
+permanent; s2 (weak), s3 (OpenMP kernel-time), and s4 (hybrid placement)
+run nightly via `scripts/run_scaling.py --gate ...`. The per-module
+perf-regression gate compares timers against
+`docs/developer-guide/perf-baseline.json` (fail > +25 %).
+
+The default preconditioner remains `bjacobi-icc` in v2.0: the b1–b6
+goldens were gated under it, and flipping the default is a v2.1 decision
+once g3 history exists on production hardware (v2 plan §2.2.1).
+
+## Run provenance and timing record (v2 Q2)
+
+The timer tree, solver telemetry, and mass-audit closure persist per run as
+`run-record.yaml` beside the HDF5 output (see the user guide's output
+reference for the format). New timer sections complete the breakdown:
+`init` (pre-loop restore/first-output), `io/output`, `io/checkpoint`,
+`io/run_record`, `halo` (all message passing — every exchange funnels
+through one timed path), and `monitors`. Gates: r1 validates every
+regression gate run's record including a byte-exact configuration
+round-trip against `frehg --resolve`; r2 asserts the top-level sections
+tile >= 90 % of the time loop (measured: 100 %), halo/io alive at 4 ranks,
+and record writing <= 1 % of the loop (measured: 0.03 %).
+
+## Performance portability (v2 Q3)
+
+The execution backend is a build choice and the linear-algebra backend
+follows from it (v2 plan §2B.2; lane table in the user guide's
+installation chapter). What Q3 changed:
+
+- `solver.<system>.mat_type: aijkokkos` runs the PETSc solve through Kokkos
+  Kernels on the build's execution space — the path that threads the solve
+  on CPU and is the *only* path on device builds (where it is forced). The
+  RHS/solution handoff uses PETSc's Kokkos view API: zero copies on host,
+  one device-side copy on GPU, never a device↔host round trip per solve.
+- BoomerAMG defaults are backend-aware: HMIS coarsening on host, PMIS on
+  device (the only GPU-capable coarsening); on the Kokkos lanes the smoother
+  defaults to l1-scaled Jacobi because hypre's hybrid SOR/Jacobi host default
+  is thread-count-dependent (measured: gw 8→15 iterations moving to l1, but
+  identical at 1/2/4/8 threads, vs iteration drift under the default). All
+  remain `setOptionDefault` — an options file or command line wins.
+- Why the solve did not thread before Q3: PETSc's native `MATAIJ` is not
+  OpenMP-threaded, so `OMP_NUM_THREADS` only ever accelerated the Kokkos
+  physics kernels while the solve stayed serial per rank (the s3 gate's
+  "solve asserted flat" encoded that design; amended by V2-A6).
+
+Standing gates (v2 plan §2B.3): p1 re-runs b1/b4 (nightly: b6) at 4 threads
+under both `aij` and `aijkokkos` — backend choice must not change physics;
+p2 asserts the aijkokkos+amg gw solve actually threads (4-thread solve
+< 1-thread) with thread-invariant algebra (iteration drift ≤ 2 %); p3 runs
+4 PEs as 4×1/2×2/1×4 with volumes to 1e-8 and iterations within 10 % of
+all-MPI; p4 compiles **and links** the full tree, tests included, under
+Kokkos+CUDA in CI; p5 enforces pointer discipline (forbidden-pattern rule,
+compile-time backend invariant with a WILL_FAIL negative test, debug
+memtype assertions). GPU execution itself is gated by the owner-run p6
+bundle (`scripts/gpu_acceptance.sh`, protocol in `gpu-acceptance.md`);
+until it returns, GPU lanes are `experimental`.

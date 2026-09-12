@@ -155,9 +155,23 @@ RichardsSolver::RichardsSolver(const Grid& grid, const FrehgConfig& config,
   updateBoundaryValues(config.time.tStart);
   applyInitialConditions(config);
 
-  system_ = std::make_unique<LinearSystem>(
-      grid_.comm(), "gw_", grid_.activeCount3Local(), grid_.activeCount3Global(),
-      SolverSettings{1.0e-8, 1.0e-14, 1000});
+  // Solver selection from the v2 solver block (v2 plan §2.2): the gw_
+  // system is 3D 7-point with thin-layer anisotropy (dz << dx), so the
+  // BoomerAMG strength threshold follows hypre's 3D guidance (0.5; below
+  // that in 3D risks complexity blowup) with one aggressive-coarsening
+  // level (v2 plan §2.2.3).
+  SolverSettings gwSettings;
+  gwSettings.rtol = config.solver.groundwater.rtol;
+  gwSettings.atol = config.solver.groundwater.atol;
+  gwSettings.maxIterations = config.solver.groundwater.maxIterations;
+  gwSettings.preconditioner = config.solver.groundwater.preconditioner;
+  gwSettings.matType = config.solver.groundwater.matType;
+  gwSettings.amgStrongThreshold = 0.5;
+  gwSettings.amgAggressiveLevels = 1;
+  gwSettings.reuseMaxSolves = config.solver.groundwater.reuseMaxSolves;
+  gwSettings.reuseIterationFactor = config.solver.groundwater.reuseIterationFactor;
+  system_ = std::make_unique<LinearSystem>(grid_.comm(), "gw_", grid_.activeCount3Local(),
+                                           grid_.activeCount3Global(), gwSettings);
   buildCooPattern();
 }
 

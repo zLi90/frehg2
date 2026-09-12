@@ -54,6 +54,7 @@ surface_water:
   friction:
     law: manning
     coefficient: {file: input/roughness.dat}   # SERGHEI roughness file
+    thin_layer_depth: 1.0e-3
   viscosity: {x: 1.0e-06, y: 1.0e-06}
   min_depth: 1.0e-06                    # SERGHEI dryDepth 0 -> schema minimum
   wetting_face_depth: 1.0e-06

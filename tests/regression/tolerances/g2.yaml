@@ -1,0 +1,20 @@
+# g2 — iteration-flatness-vs-ranks gate (v2 plan §2.3).
+#
+# ratio_cap bounds mean_iters(largest ranks) / mean_iters(smallest ranks):
+# a scalable (AMG-class) preconditioner keeps CG iterations near-flat as the
+# rank count grows, which is exactly where block-Jacobi/ICC degrades.
+#
+# recorded: golden mean-iteration counts per solver at the largest gated
+# rank count, seeded from the first green run on the reference machine and
+# updated only by a justifying commit (PETSc alt-output discipline). The
+# gate additionally allows max(band_abs, band_rel * recorded).
+ratio_cap: 1.10
+band_abs: 3
+band_rel: 0.10
+# Seeded 2026-09-09 from the first green run on the reference M3 (8 ranks,
+# A23 synthetic case): gw mean 9.00 (8.47 at 1 rank); the synthetic case's
+# free surface stays trivial (0-iteration converged solves), so only the
+# gw count is recorded.
+recorded:
+  amg:
+    gw_mean: 9.0

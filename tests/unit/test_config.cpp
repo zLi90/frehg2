@@ -540,4 +540,53 @@ boundary_conditions:
   EXPECT_TRUE(validate(text).ok()) << joined(validate(text));
 }
 
+// v2 Q1 (plan §2.2): the solver block parses per-system preconditioner
+// selection and reuse policy, defaults reproduce v1 (bjacobi-icc, gw cap
+// 1000), and the schema rejects unknown preconditioners.
+TEST_F(ConfigTest, SolverDefaultsReproduceV1) {
+  const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(kBaseConfig));
+  EXPECT_EQ(cfg.solver.surface.preconditioner, "bjacobi-icc");
+  EXPECT_EQ(cfg.solver.groundwater.preconditioner, "bjacobi-icc");
+  EXPECT_DOUBLE_EQ(cfg.solver.surface.rtol, 1.0e-8);
+  EXPECT_DOUBLE_EQ(cfg.solver.groundwater.atol, 1.0e-14);
+  EXPECT_EQ(cfg.solver.surface.maxIterations, 500);
+  EXPECT_EQ(cfg.solver.groundwater.maxIterations, 1000);
+  EXPECT_EQ(cfg.solver.surface.reuseMaxSolves, 50);
+  EXPECT_DOUBLE_EQ(cfg.solver.groundwater.reuseIterationFactor, 1.5);
+}
+
+TEST_F(ConfigTest, SolverBlockParsesSelections) {
+  std::string text = kBaseConfig;
+  text += R"(solver:
+  surface: {preconditioner: amg, rtol: 1.0e-10, reuse_max_solves: 20}
+  groundwater: {preconditioner: gamg, max_iterations: 2000,
+                reuse_iteration_factor: 2.0}
+)";
+  const ValidationResult result = validate(text);
+  EXPECT_TRUE(result.ok()) << joined(result);
+  const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(text));
+  EXPECT_EQ(cfg.solver.surface.preconditioner, "amg");
+  EXPECT_DOUBLE_EQ(cfg.solver.surface.rtol, 1.0e-10);
+  EXPECT_EQ(cfg.solver.surface.reuseMaxSolves, 20);
+  EXPECT_EQ(cfg.solver.groundwater.preconditioner, "gamg");
+  EXPECT_EQ(cfg.solver.groundwater.maxIterations, 2000);
+  EXPECT_DOUBLE_EQ(cfg.solver.groundwater.reuseIterationFactor, 2.0);
+}
+
+TEST_F(ConfigTest, SolverRejectsUnknownPreconditioner) {
+  std::string text = kBaseConfig;
+  text += "solver: {surface: {preconditioner: ilu}}\n";
+  const ValidationResult result = validate(text);
+  EXPECT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "preconditioner")) << joined(result);
+}
+
+TEST_F(ConfigTest, SolverRejectsUnknownKeys) {
+  std::string text = kBaseConfig;
+  text += "solver: {surface: {krylov: gmres}}\n";
+  const ValidationResult result = validate(text);
+  EXPECT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "krylov")) << joined(result);
+}
+
 }  // namespace

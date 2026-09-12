@@ -27,6 +27,7 @@
 #include "io/Checkpoint.hpp"
 #include "io/Hdf5Output.hpp"
 #include "io/Monitor.hpp"
+#include "io/RunRecord.hpp"
 #include "swe/SurfaceSolver.hpp"
 #include "transport/ScalarSolver.hpp"
 
@@ -41,12 +42,19 @@ namespace frehg::driver {
 class Simulation {
  public:
   /// Build the grid, boundary conditions, modules, and output file.
-  /// Collective on \p comm.
-  Simulation(MPI_Comm comm, const FrehgConfig& config);
+  /// Collective on \p comm. \p inputPath is the configuration file the
+  /// run was launched with (recorded in the run record, v2 plan §2A).
+  Simulation(MPI_Comm comm, const FrehgConfig& config,
+             const std::string& inputPath = std::string());
 
   /// Execute the time loop from t_start (or the restart time) to t_end,
   /// writing outputs, monitors, and checkpoints per the configuration.
   void run();
+
+  /// Write the final run record (provenance.finished = true). Collective;
+  /// call after run() returns so the record carries the completed
+  /// "simulation" timer (v2 plan §2A).
+  void finalizeRunRecord();
 
  private:
   void runSurfaceLoop(real_t t0);
@@ -60,6 +68,9 @@ class Simulation {
   void recordGwMassAudit(real_t t);
   void recordTransportAudit(real_t t);
   void writeCheckpoint(real_t t, long step, real_t labelTime = -1.0);
+  /// Refresh the run record's dynamic sections (solver telemetry, closure)
+  /// and rewrite it. Collective (v2 plan §2A).
+  void flushRunRecord(bool finished);
   real_t restoreFromCheckpoint();
   io::Checkpoint::Fields2 checkpointFields2() const;
   io::Checkpoint::Fields3 checkpointFields3() const;
@@ -75,6 +86,7 @@ class Simulation {
   std::unique_ptr<transport::ScalarSolver> transport_;
   std::unique_ptr<io::Hdf5Output> output_;
   std::unique_ptr<io::Checkpoint> checkpoint_;
+  std::unique_ptr<io::RunRecord> runRecord_;
   std::vector<std::unique_ptr<io::Monitor>> monitors_;
   std::unique_ptr<io::Monitor> massAudit_;
   std::unique_ptr<io::Monitor> gwMassAudit_;

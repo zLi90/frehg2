@@ -82,7 +82,7 @@ void Timer::reset() {
   state().stack.clear();
 }
 
-std::string Timer::report(MPI_Comm comm) {
+std::vector<TimerSection> Timer::merged(MPI_Comm comm) {
   int rank = 0;
   int size = 1;
   MPI_Comm_rank(comm, &rank);
@@ -113,7 +113,7 @@ std::string Timer::report(MPI_Comm comm) {
               MPI_CHAR, 0, comm);
 
   if (rank != 0) {
-    return std::string();
+    return {};
   }
 
   struct Merged {
@@ -148,16 +148,38 @@ std::string Timer::report(MPI_Comm comm) {
     m.nRanks += 1;
   }
 
+  std::vector<TimerSection> out;
+  out.reserve(merged.size());
+  for (const auto& [path, m] : merged) {
+    TimerSection section;
+    section.path = path;
+    section.count = m.cycles;
+    section.minSeconds = m.minSec;
+    section.meanSeconds = m.sumSec / m.nRanks;
+    section.maxSeconds = m.maxSec;
+    out.push_back(std::move(section));
+  }
+  return out;
+}
+
+std::string Timer::report(MPI_Comm comm) {
+  int size = 1;
+  MPI_Comm_size(comm, &size);
+  const std::vector<TimerSection> sections = merged(comm);
+  if (sections.empty()) {
+    return std::string();  // non-root ranks (and the no-sections edge case)
+  }
+
   std::ostringstream out;
   out << "timer report (" << size << " rank" << (size > 1 ? "s" : "") << ")\n";
   out << "  " << std::left << std::setw(40) << "section" << std::right << std::setw(10) << "count"
       << std::setw(12) << "min[s]" << std::setw(12) << "mean[s]" << std::setw(12) << "max[s]"
       << "\n";
   out << std::fixed << std::setprecision(4);
-  for (const auto& [path, m] : merged) {
-    out << "  " << std::left << std::setw(40) << path << std::right << std::setw(10) << m.cycles
-        << std::setw(12) << m.minSec << std::setw(12) << (m.sumSec / m.nRanks) << std::setw(12)
-        << m.maxSec << "\n";
+  for (const TimerSection& s : sections) {
+    out << "  " << std::left << std::setw(40) << s.path << std::right << std::setw(10) << s.count
+        << std::setw(12) << s.minSeconds << std::setw(12) << s.meanSeconds << std::setw(12)
+        << s.maxSeconds << "\n";
   }
   return out.str();
 }

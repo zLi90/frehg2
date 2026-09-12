@@ -118,6 +118,7 @@ Useful CMake options (all default sensibly):
 | `FREHG_ENABLE_TESTS` | `ON` | build the GoogleTest / MPI / regression suites |
 | `FREHG_SANITIZE` | `OFF` | Address + UndefinedBehavior sanitizers (debugging) |
 | `FREHG_GPU_AWARE_MPI` | `OFF` | compile-time default for GPU-aware MPI staging (runtime-overridable) |
+| `FREHG_BACKEND` | `auto` | requested execution backend (`serial`/`openmp`/`cuda`/`hip`), verified against the found Kokkos at configure time (v2 plan §2B.2) |
 | `CMAKE_PREFIX_PATH` | — | where to find Kokkos/PETSc/HDF5/yaml-cpp |
 
 For a fast production binary:
@@ -127,15 +128,38 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$HOME/frehg-deps
 cmake --build build -j
 ```
 
-## GPU builds (compile-tested only)
+## Choosing a parallel lane (v2 plan §2B.2)
+
+One source tree covers every deployment; the execution backend is a *build*
+choice (which Kokkos you link) and the linear-algebra backend follows from it:
+
+| Lane | Kokkos backend | `solver.*.mat_type` | Launch | Notes |
+|---|---|---|---|---|
+| laptop serial | Serial | `aij` | 1 rank | the debug/validation lane; the default |
+| laptop OpenMP | OpenMP | `aijkokkos` | 1 rank × N threads | needs ≥ ~1e5 cells to pay off |
+| laptop/HPC MPI | Serial or OpenMP | `aij` | N ranks | best CPU lane at benchmark scale (measured) |
+| HPC hybrid | OpenMP | `aijkokkos` | ranks × threads, ~1 rank/NUMA domain | the p3 gate records the winning ratio |
+| single GPU | CUDA/HIP | forced `aijkokkos` | 1 rank | ≥ ~1e6 cells to pay off |
+| multi-GPU | CUDA/HIP | forced `aijkokkos` | 1 rank per GPU + `runtime.gpu_aware_mpi` | see `developer-guide/gpu-acceptance.md` |
+
+`aijkokkos` requires a Kokkos-enabled PETSc (`build_frehg2_local.sh` and
+`scripts/ci_install_deps.sh` build one: `--with-kokkos-dir
+--download-kokkos-kernels --with-openmp`). On device builds the Kokkos types
+are forced and a configure-time check rejects a PETSc without Kokkos support.
+
+## GPU builds (experimental — compile-verified, not device-executed by CI)
 
 All physics kernels are Kokkos and contain no backend `#ifdef`s; building
-against a CUDA-enabled Kokkos (`scripts/ci_install_deps.sh` with
-`FREHG_CUDA=1`, compiled through `nvcc_wrapper`) compiles warning-free —
-this is enforced by the `cuda-compile` CI lane. The released version is
-**GPU-ready but GPU-unvalidated**: no benchmark gate has been executed on a
-GPU backend yet. Treat GPU runs as experimental and validate against the
-benchmark gates before trusting results.
+against a CUDA-enabled Kokkos and a Kokkos+CUDA PETSc
+(`scripts/ci_install_deps.sh` with `FREHG_CUDA=1`, compiled through
+`nvcc_wrapper`, `-DFREHG_BACKEND=cuda`) compiles **and links, tests
+included**, warning-free — enforced by the `cuda-compile` CI lane (gate p4).
+The memory-space discipline the CPU lanes cannot see is covered statically
+(gate p5: forbidden-pattern scan, compile-time backend invariant with a
+negative test, debug-build memtype assertions). GPU lanes carry the
+**experimental** status until a passing p6 acceptance bundle
+(`scripts/gpu_acceptance.sh`, run on a GPU machine; criteria in
+`developer-guide/gpu-acceptance.md`) is returned — v2 plan §2B.4.
 
 ## Verifying the build
 

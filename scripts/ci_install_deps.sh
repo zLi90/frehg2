@@ -41,16 +41,30 @@ cmake -S "kokkos-${KOKKOS_VERSION}" -B kokkos-build \
 cmake --build kokkos-build -j "$JOBS"
 cmake --install kokkos-build
 
-# ---- PETSc (minimal: MPI + BLAS/LAPACK, no Fortran) ------------------------
+# ---- PETSc (MPI + BLAS/LAPACK + hypre BoomerAMG + Kokkos backend, no
+# Fortran; v2 plan §2.2 and §2B.2 B3) -----------------------------------------
+# PETSc reuses the Kokkos installed above (OpenMP host backend on CPU lanes,
+# CUDA on the FREHG_CUDA=1 lane) and builds Kokkos Kernels against it, which
+# is what makes -mat_type aijkokkos / solver.*.mat_type=aijkokkos real. The
+# CUDA lane adds --with-cuda; compiling PETSc's CUDA support needs no GPU.
 cd "$PREFIX/src"
 curl -fsSL -o petsc.tar.gz \
   "https://web.cels.anl.gov/projects/petsc/download/release-snapshots/petsc-${PETSC_VERSION}.tar.gz"
 tar xf petsc.tar.gz
 cd "petsc-${PETSC_VERSION}"
+PETSC_EXTRA=()
+if [ "${FREHG_CUDA:-0}" = "1" ]; then
+  PETSC_EXTRA+=(--with-cuda=1)
+fi
 ./configure --prefix="$PREFIX" \
   --with-fc=0 \
   --with-debugging=0 \
   --download-f2cblaslapack \
+  --download-hypre \
+  --with-kokkos-dir="$PREFIX" \
+  --download-kokkos-kernels \
+  --with-openmp=1 \
+  "${PETSC_EXTRA[@]}" \
   COPTFLAGS=-O2 CXXOPTFLAGS=-O2
 make -j "$JOBS" all
 make install

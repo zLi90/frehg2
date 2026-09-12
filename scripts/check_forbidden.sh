@@ -81,6 +81,16 @@ for moddir in swe gw transport coupling; do
     fi
   fi
 done
+# PETSc calls taking raw view pointers are confined to the LinearSystem
+# wrappers (v2 plan §2B.3, gate p5): a Mat*/Vec*/KSP*/PC* call receiving a
+# .data() pointer anywhere else is invisible to every CPU lane and wrong on
+# a device build (the §2B.1 gap-1 class of defect).
+PETSC_DATA_HITS=$(grep -rnE --include='*.cpp' --include='*.hpp' \
+  '\b(Mat|Vec|KSP|PC)[A-Za-z]*\([^;]*\.data\(\)' "$SRC" 2>/dev/null | \
+  grep -v 'core/LinearSystem\.cpp')
+if [ -n "$PETSC_DATA_HITS" ]; then
+  fail "raw .data() into PETSc outside LinearSystem" "$PETSC_DATA_HITS"
+fi
 
 # 7. Exception-swallowing.
 scan_src "catch-all handlers" 'catch[[:space:]]*\([[:space:]]*\.\.\.[[:space:]]*\)'

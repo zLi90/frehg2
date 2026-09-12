@@ -1,0 +1,43 @@
+# Kokkos OpenMP lane (plan §10 P5): the whole per-PR matrix pins
+# OMP_NUM_THREADS=1 (benchmark grids are launch-latency-bound and the gates
+# stay deterministic), so this lane is what actually exercises the threaded
+# Kokkos kernels — parallel_for races, reduction identities, and
+# thread-count-dependent rounding surface here and nowhere else.
+name: openmp
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  openmp-threads:
+    runs-on: ubuntu-24.04
+    env:
+      DEPS_PREFIX: /home/runner/.frehg-deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mpich libmpich-dev libhdf5-mpich-dev \
+            libyaml-cpp-dev python3-yaml python3-h5py python3-numpy
+
+      - name: Cache built dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_PREFIX }}
+          key: frehg-deps-${{ runner.os }}-gcc-kokkos5.1.1-petsc3.25.1-kokkoskernels-v3
+
+      - name: Build Kokkos and PETSc
+        run: scripts/ci_install_deps.sh "$DEPS_PREFIX"
+
+      - name: Build
+        run: |
+          export CMAKE_PREFIX_PATH="$DEPS_PREFIX"
+          cmake -B build -DFREHG_WERROR=ON
+          cmake --build build -j "$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Threaded test lane (OMP_NUM_THREADS=4)
+        run: scripts/run_openmp_lane.sh build 4

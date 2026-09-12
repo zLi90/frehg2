@@ -1,0 +1,20 @@
+build/
+build-*/
+*.o
+*.a
+*.dylib
+*.so
+.DS_Store
+__pycache__/
+*.pyc
+out/
+docs/api/
+compile_commands.json
+cases/
+*.pdf
+out-*/
+site/
+*.h5
+# generated result figures (produced by validation/*/makeplot.py)
+*.png
+*.eps
