@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mpich libmpich-dev libhdf5-mpich-dev \
-            libyaml-cpp-dev doxygen python3-yaml clang
+            libyaml-cpp-dev doxygen python3-yaml clang libomp-dev
           pip3 install --user mkdocs mkdocs-material
 
       - name: Cache built dependencies

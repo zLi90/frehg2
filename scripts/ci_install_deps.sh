@@ -17,8 +17,9 @@ JOBS="$(getconf _NPROCESSORS_ONLN)"
 # units each peak at several GB of compiler memory. On a memory-limited box
 # (a 16 GB CI runner, a laptop) that OOM-kills cc1plus -- the build dies with
 # a bare "Error running make on KOKKOS-KERNELS". Cap it memory-aware:
-# ~6 GB per concurrent compile, never above $JOBS, at least 1. Override with
-# PETSC_MAKE_NP for a machine with plenty of RAM per core.
+# ~8 GB per concurrent compile (a heavy ETI TU at -O2 can approach that),
+# never above $JOBS, at least 1. Override with PETSC_MAKE_NP for a machine
+# with plenty of RAM per core.
 if [ -r /proc/meminfo ]; then
   MEM_GB="$(awk '/MemTotal/ {print int($2/1024/1024)}' /proc/meminfo)"
 elif command -v sysctl >/dev/null 2>&1; then
@@ -26,7 +27,7 @@ elif command -v sysctl >/dev/null 2>&1; then
 else
   MEM_GB=0
 fi
-MEM_NP="$(( MEM_GB / 6 ))"
+MEM_NP="$(( MEM_GB / 8 ))"
 [ "$MEM_NP" -lt 1 ] && MEM_NP=1
 PETSC_MAKE_NP="${PETSC_MAKE_NP:-$(( MEM_NP < JOBS ? MEM_NP : JOBS ))}"
 echo "using JOBS=$JOBS, PETSC_MAKE_NP=$PETSC_MAKE_NP (detected ${MEM_GB} GB RAM)"
@@ -77,6 +78,22 @@ PETSC_EXTRA=()
 if [ "${FREHG_CUDA:-0}" = "1" ]; then
   PETSC_EXTRA+=(--with-cuda=1)
 fi
+# On any configure failure, surface the real error: PETSc redirects its
+# downloaded-package build output (kokkos-kernels, hypre, ...) into
+# configure.log, so a failed package build otherwise shows only the generic
+# "Error running make on KOKKOS-KERNELS" on stdout. Dump the tail and the
+# actual compiler diagnostics so CI logs distinguish an OOM ("Killed" /
+# "cc1plus") from a genuine compile error without needing the runner.
+dump_petsc_log() {
+  local log="$PWD/configure.log"
+  [ -f "$log" ] || return 0
+  echo "======== configure.log: compiler errors / OOM markers ========"
+  grep -nE 'error:|fatal error|Killed|cannot allocate|out of memory|virtual memory exhausted' \
+    "$log" | tail -n 60 || true
+  echo "======== configure.log: last 100 lines ========"
+  tail -n 100 "$log" || true
+}
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then dump_petsc_log; fi' ERR
 ./configure --prefix="$PREFIX" \
   --with-fc=0 \
   --with-debugging=0 \
@@ -90,6 +107,7 @@ fi
   COPTFLAGS=-O2 CXXOPTFLAGS=-O2
 make -j "$JOBS" all
 make install
+trap - ERR
 
 touch "$PREFIX/.complete"
 echo "dependencies installed at $PREFIX"
