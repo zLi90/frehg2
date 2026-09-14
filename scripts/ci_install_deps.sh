@@ -10,6 +10,27 @@ KOKKOS_VERSION="${KOKKOS_VERSION:-5.1.1}"
 PETSC_VERSION="${PETSC_VERSION:-3.25.1}"
 JOBS="$(getconf _NPROCESSORS_ONLN)"
 
+# Parallelism for PETSc's OWN downloaded-package builds (kokkos-kernels,
+# hypre) is separate from the "make -j $JOBS" that builds PETSc's sources:
+# PETSc's configure otherwise auto-detects every core and runs e.g. "-j4" on
+# kokkos-kernels, whose explicit-template-instantiation (ETI) translation
+# units each peak at several GB of compiler memory. On a memory-limited box
+# (a 16 GB CI runner, a laptop) that OOM-kills cc1plus -- the build dies with
+# a bare "Error running make on KOKKOS-KERNELS". Cap it memory-aware:
+# ~6 GB per concurrent compile, never above $JOBS, at least 1. Override with
+# PETSC_MAKE_NP for a machine with plenty of RAM per core.
+if [ -r /proc/meminfo ]; then
+  MEM_GB="$(awk '/MemTotal/ {print int($2/1024/1024)}' /proc/meminfo)"
+elif command -v sysctl >/dev/null 2>&1; then
+  MEM_GB="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))"
+else
+  MEM_GB=0
+fi
+MEM_NP="$(( MEM_GB / 6 ))"
+[ "$MEM_NP" -lt 1 ] && MEM_NP=1
+PETSC_MAKE_NP="${PETSC_MAKE_NP:-$(( MEM_NP < JOBS ? MEM_NP : JOBS ))}"
+echo "using JOBS=$JOBS, PETSC_MAKE_NP=$PETSC_MAKE_NP (detected ${MEM_GB} GB RAM)"
+
 if [ -f "$PREFIX/.complete" ]; then
   echo "dependencies already present at $PREFIX (cache hit)"
   exit 0
@@ -64,6 +85,7 @@ fi
   --with-kokkos-dir="$PREFIX" \
   --download-kokkos-kernels \
   --with-openmp=1 \
+  --with-make-np="$PETSC_MAKE_NP" \
   "${PETSC_EXTRA[@]}" \
   COPTFLAGS=-O2 CXXOPTFLAGS=-O2
 make -j "$JOBS" all

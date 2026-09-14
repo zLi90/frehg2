@@ -167,9 +167,12 @@ else
 fi
 
 USE_MODULE_HDF5=0
-if command -v h5pcc >/dev/null 2>&1 && h5pcc -showconfig 2>/dev/null | grep -Eqi 'Parallel HDF5:[[:space:]]+yes'; then
+# A CMake-built HDF5 ships only h5cc (which wraps mpicc when parallel); the
+# autotools build additionally ships h5pcc. Accept either wrapper.
+HDF5_WRAPPER="$(command -v h5pcc || command -v h5cc || true)"
+if [[ -n "$HDF5_WRAPPER" ]] && "$HDF5_WRAPPER" -showconfig 2>/dev/null | grep -Eqi 'Parallel HDF5:[[:space:]]+yes'; then
   USE_MODULE_HDF5=1
-  echo "Usable parallel HDF5 detected: $(command -v h5pcc)"
+  echo "Usable parallel HDF5 detected: $HDF5_WRAPPER"
 else
   echo "A usable parallel HDF5 was not detected; building HDF5 1.14.6 into $PREFIX."
 fi
@@ -177,10 +180,25 @@ fi
 say "3 of 8: Define safe source-build helpers"
 fetch_tarball() {
   local url="$1" archive="$2" directory="$3"
-  if [[ ! -d "$directory" ]]; then
-    [[ -f "$archive" ]] || curl --fail --location --retry 3 --output "$archive" "$url"
-    tar -xf "$archive" -C "$SRC_CACHE"
+  [[ -d "$directory" ]] && return 0
+  [[ -f "$archive" ]] || curl --fail --location --retry 3 --output "$archive" "$url"
+  # Extract into a scratch dir and move the single top-level directory the
+  # archive contains to the expected name. GitLab tag archives (PETSc) name
+  # their top dir <project>-<tag>-<sha>, which will not match "$directory"
+  # otherwise; GitHub archives happen to match but this handles both.
+  local scratch="$SRC_CACHE/.extract-$$"
+  rm -rf "$scratch"; mkdir -p "$scratch"
+  tar -xf "$archive" -C "$scratch"
+  local entries=()
+  while IFS= read -r entry; do entries+=("$entry"); done \
+    < <(find "$scratch" -mindepth 1 -maxdepth 1 ! -name '.DS_Store')
+  if [[ ${#entries[@]} -eq 1 && -d "${entries[0]}" ]]; then
+    mv "${entries[0]}" "$directory"
+    rm -rf "$scratch"
+  else
+    mv "$scratch" "$directory"
   fi
+  [[ -d "$directory" ]] || die "Could not extract $archive into $directory."
 }
 cmake_build_install() {
   local source="$1" build="$2"; shift 2
@@ -225,19 +243,29 @@ say "5 of 8: Obtain a matching parallel HDF5"
 if [[ "$USE_MODULE_HDF5" -eq 0 ]]; then
   HDF5_SRC="$SRC_CACHE/hdf5-hdf5_1.14.6"
   fetch_tarball "https://github.com/HDFGroup/hdf5/archive/refs/tags/hdf5_1.14.6.tar.gz" "$SRC_CACHE/hdf5-1.14.6.tar.gz" "$HDF5_SRC"
-  if [[ ! -x "$PREFIX/bin/h5pcc" ]]; then
+  if ! grep -q '#define H5_HAVE_PARALLEL 1' "$PREFIX/include/H5pubconf.h" 2>/dev/null; then
     cmake_build_install "$HDF5_SRC" "$SRC_CACHE/build-hdf5-1.14.6" \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-      -DCMAKE_C_COMPILER="$(command -v mpicc)" -DCMAKE_CXX_COMPILER="$(command -v mpicxx)" \
-      -DHDF5_ENABLE_PARALLEL=ON -DHDF5_BUILD_CPP_LIB=ON -DHDF5_BUILD_TOOLS=ON \
-      -DHDF5_BUILD_EXAMPLES=OFF -DHDF5_BUILD_TESTING=OFF -DHDF5_ENABLE_Z_LIB_SUPPORT=OFF
+      -DCMAKE_C_COMPILER="$(command -v mpicc)" \
+      -DHDF5_ENABLE_PARALLEL=ON -DHDF5_BUILD_CPP_LIB=OFF -DHDF5_BUILD_TOOLS=ON \
+      -DHDF5_BUILD_FORTRAN=OFF -DHDF5_BUILD_EXAMPLES=OFF -DHDF5_BUILD_TESTING=OFF \
+      -DHDF5_ENABLE_Z_LIB_SUPPORT=OFF -DHDF5_ENABLE_SZIP_SUPPORT=OFF
   else
-    echo "User-built HDF5 already installed in $PREFIX; reusing it."
+    echo "User-built parallel HDF5 already installed in $PREFIX; reusing it."
   fi
   export PATH="$PREFIX/bin:$PATH"
   export HDF5_ROOT="$PREFIX"
 fi
-h5pcc -showconfig 2>/dev/null | grep -Eqi 'Parallel HDF5:[[:space:]]+yes' || die "HDF5 is not parallel. Frehg2 requires an MPI-enabled HDF5 built with the currently loaded MPI."
+# Verify parallel HDF5. The installed public config header carries the fact
+# for both autotools and CMake builds; the compiler-wrapper name (h5pcc vs
+# h5cc) is not portable across the two.
+if [[ "$USE_MODULE_HDF5" -eq 1 ]]; then
+  echo "Using module-provided parallel HDF5: $HDF5_WRAPPER"
+else
+  grep -q '#define H5_HAVE_PARALLEL 1' "$PREFIX/include/H5pubconf.h" 2>/dev/null \
+    || die "HDF5 is not parallel. Frehg2 requires an MPI-enabled HDF5 built with the currently loaded MPI."
+  echo "Parallel HDF5 confirmed (source build): $PREFIX"
+fi
 
 say "6 of 8: Build PETSc in your user prefix"
 PETSC_SRC="$SRC_CACHE/petsc-3.25.1"
@@ -250,9 +278,16 @@ if [[ ! -f "$PREFIX/lib/petsc/conf/petscvariables" && ! -f "$PREFIX/lib64/petsc/
   # built above so the free-surface/groundwater solves run on the Kokkos
   # backend and thread under OMP_NUM_THREADS (mat_type aijkokkos, v2 Q3);
   # --with-openmp also threads the downloaded hypre BoomerAMG (solver amg).
+  # --with-make-np caps the parallelism of PETSc's OWN downloaded-package
+  # builds (kokkos-kernels, hypre, ...). Without it PETSc auto-detects every
+  # core on the (login) node and runs e.g. "make -j136"; kokkos-kernels' ETI
+  # translation units are very memory-heavy, so that many concurrent cc1plus
+  # processes exhaust RAM and the kernel OOM-kills them ("cc1plus: Killed").
+  # Tie it to $JOBS (FREHG_JOBS) like every other build in this script.
   ./configure --prefix="$PREFIX" --with-cc="$(command -v mpicc)" --with-cxx="$(command -v mpicxx)" \
     --with-fc=0 --with-debugging=0 --download-f2cblaslapack --download-hypre \
-    --with-kokkos-dir="$PREFIX" --download-kokkos-kernels --with-openmp=1
+    --with-kokkos-dir="$PREFIX" --download-kokkos-kernels --with-openmp=1 \
+    --with-make-np="$JOBS"
   make -j "$JOBS" all
   make install
   popd >/dev/null
@@ -282,8 +317,17 @@ export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY
 rm -rf "$BUILD_ROOT"
 TESTS="${FREHG_ENABLE_TESTS:-0}"
 WERROR="${FREHG_WERROR:-ON}"
+# Frehg2's CMakeLists requires HDF5_IS_PARALLEL, which only CMake's
+# module-mode FindHDF5 sets. A CMake-built (or Homebrew) HDF5 also ships
+# package-config files that find_package prefers over module mode, and
+# config mode leaves HDF5_IS_PARALLEL unset -- so force module mode and
+# prefer the parallel build. Root it at $PREFIX for the source build; for a
+# module-provided HDF5 let the loaded module supply the paths.
+HDF5_CMAKE_ARGS=( -DHDF5_NO_FIND_PACKAGE_CONFIG_FILE=TRUE -DHDF5_PREFER_PARALLEL=TRUE )
+[[ "$USE_MODULE_HDF5" -eq 0 ]] && HDF5_CMAKE_ARGS+=( -DHDF5_ROOT="$PREFIX" )
 env CC="$REAL_CC" CXX="$REAL_CXX" cmake -S "$ROOT_DIR" -B "$BUILD_ROOT" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH" \
+  "${HDF5_CMAKE_ARGS[@]}" \
   -DFREHG_ENABLE_TESTS="$TESTS" -DFREHG_WERROR="$WERROR"
 cmake --build "$BUILD_ROOT" --parallel "$JOBS"
 EXE="$BUILD_ROOT/src/frehg"
@@ -293,9 +337,22 @@ echo "SUCCESS: executable created: $EXE"
 say "8 of 8: Validate and perform a short scheduled verification"
 export OMP_NUM_THREADS=1
 "$EXE" --validate "$ROOT_DIR/benchmarks/b1-sw/b1-sw.yaml"
-# srun uses this SLURM allocation, not an unmanaged login-node process.
+# Launch the verification run through the MPI implementation's own launcher.
+# Prefer mpirun/mpiexec: Open MPI built without SLURM PMIx support cannot be
+# "srun"-direct-launched (MPI_Init aborts with "OMPI was not built with
+# SLURM's PMI support"), whereas its mpirun reads this SLURM allocation and
+# launches correctly. Fall back to srun only when no MPI launcher is found
+# (e.g. a PMI-enabled MPICH/Cray stack where srun is the intended launcher).
+NRANKS="${SLURM_NTASKS:-1}"
+MPI_LAUNCHER="$(command -v mpirun || command -v mpiexec || true)"
 pushd "$ROOT_DIR/benchmarks/b1-sw" >/dev/null
-srun --ntasks="${SLURM_NTASKS:-1}" --cpus-per-task=1 "$EXE" b1-sw.yaml
+if [[ -n "$MPI_LAUNCHER" ]]; then
+  echo "Launching verification with $MPI_LAUNCHER -np $NRANKS"
+  "$MPI_LAUNCHER" -np "$NRANKS" "$EXE" b1-sw.yaml
+else
+  echo "No mpirun/mpiexec found; falling back to srun."
+  srun --ntasks="$NRANKS" --cpus-per-task=1 "$EXE" b1-sw.yaml
+fi
 popd >/dev/null
 
 echo ""
