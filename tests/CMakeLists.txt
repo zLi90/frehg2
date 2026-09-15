@@ -75,7 +75,12 @@ target_compile_options(frehg_mpi_core PRIVATE -ffp-contract=off)
 # the openmp lane's job via the tolerance-based regression gates; the strict
 # bit-exact drivers stay at one thread, same as ${_regress_env}. OMP_PROC_BIND
 # also silences Kokkos's "MPI ranks must be bound" warning under mpiexec.
-set(_mpi_test_env "OMP_NUM_THREADS=1;OMP_PROC_BIND=false")
+# UCX_TLS restricts UCX to shared-memory/self/tcp: an MPICH built on the ch4:ucx
+# netmod (Ubuntu's apt mpich) otherwise probes InfiniBand verbs at MPI_Init and
+# aborts on a runner with no RDMA hardware (ibv_create_srq: Operation not
+# supported). It is the ch4:ucx analogue of the FI_PROVIDER=tcp pin used for the
+# ch4:ofi netmod below; both are harmless when the other netmod is in use.
+set(_mpi_test_env "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;UCX_TLS=tcp,self,sm")
 foreach(nranks 1 2 4)
   add_test(NAME mpi.halo.n${nranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${nranks}
@@ -155,8 +160,10 @@ set(_regress_args
 # libfabric to its tcp provider: the default sockets provider intermittently
 # wedges MPICH's OFI finalize hook on this platform (the P1/P3 reports'
 # known issue; at P4 it became persistent — post-completion, results
-# unaffected — and the tcp provider exits cleanly).
-set(_regress_env "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;FI_PROVIDER=tcp")
+# unaffected — and the tcp provider exits cleanly). UCX_TLS is the ch4:ucx
+# counterpart (see ${_mpi_test_env}): it keeps an apt-mpich (ucx netmod) off
+# the InfiniBand verbs it can't use on a runner with no RDMA hardware.
+set(_regress_env "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;FI_PROVIDER=tcp;UCX_TLS=tcp,self,sm")
 
 add_test(NAME regression.b1
   COMMAND ${_regress} b1 ${_regress_args} --work ${CMAKE_BINARY_DIR}/regression/b1)
@@ -277,7 +284,7 @@ endforeach()
 set(_scaling ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/run_scaling.py
     --frehg $<TARGET_FILE:frehg> --mpiexec ${MPIEXEC_EXECUTABLE}
     --repo ${CMAKE_SOURCE_DIR})
-set(_scaling_env "FI_PROVIDER=tcp;OMP_PROC_BIND=false")
+set(_scaling_env "FI_PROVIDER=tcp;UCX_TLS=tcp,self,sm;OMP_PROC_BIND=false")
 
 # g1 per-PR lanes: the fast gates (b1-b4) under each new preconditioner, and
 # the default-mode rank-invariance lanes under amg. b5/b6 amg lanes are
@@ -418,7 +425,7 @@ foreach(mt aij aijkokkos)
       COMMAND ${_regress} ${gate} --mat-type ${mt} ${_regress_args}
               --work ${CMAKE_BINARY_DIR}/regression/p1-${gate}-${mt})
     set_tests_properties(regression.p1.${gate}.omp4.${mt} PROPERTIES
-      LABELS "regression" ENVIRONMENT "FI_PROVIDER=tcp;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
+      LABELS "regression" ENVIRONMENT "FI_PROVIDER=tcp;UCX_TLS=tcp,self,sm;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
       PROCESSORS 4 TIMEOUT 3600)
   endforeach()
 endforeach()
@@ -429,7 +436,7 @@ add_test(NAME regression.p1.b6.ss.omp4.aijkokkos
   COMMAND ${_regress} b6 --variant ss --mat-type aijkokkos ${_regress_args}
           --work ${CMAKE_BINARY_DIR}/regression/p1-b6-ss-aijkokkos)
 set_tests_properties(regression.p1.b6.ss.omp4.aijkokkos PROPERTIES
-  LABELS "regression_nightly" ENVIRONMENT "FI_PROVIDER=tcp;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
+  LABELS "regression_nightly" ENVIRONMENT "FI_PROVIDER=tcp;UCX_TLS=tcp,self,sm;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
   PROCESSORS 4 TIMEOUT 43200)
 
 # p2 — OpenMP solver thread scaling (nightly): on the aijkokkos + amg path

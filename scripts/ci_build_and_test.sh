@@ -29,6 +29,16 @@ for _p in ${_pfx//:/ }; do
 done
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 
+# Constrain UCX to shared-memory/self/tcp for every test below. Ubuntu's apt
+# MPICH is built on the ch4:ucx netmod, and UCX otherwise probes InfiniBand
+# verbs at MPI_Init and aborts on a runner with no RDMA hardware
+# (ibv_create_srq: Operation not supported), before any test can run. The
+# unit/validate tests carry no per-test ENVIRONMENT, so the pin is set here in
+# the ambient environment; mpiexec forwards it to the ranks. This is the
+# ch4:ucx analogue of the FI_PROVIDER=tcp pin the regression tests already set
+# in tests/CMakeLists.txt (harmless on a ch4:ofi netmod).
+export UCX_TLS="${UCX_TLS:-tcp,self,sm}"
+
 cmake -B "$BUILD" -S "$ROOT" -DFREHG_WERROR=ON
 cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
 

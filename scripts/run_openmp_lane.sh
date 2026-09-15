@@ -37,6 +37,13 @@ for _p in ${_pfx//:/ }; do
 done
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 
+# Constrain UCX to shared-memory/self/tcp for the unit/mpi ctest runs below
+# (they inherit this ambient env; the ctest entries carry no UCX pin). Ubuntu's
+# apt MPICH uses the ch4:ucx netmod, which otherwise probes InfiniBand verbs at
+# MPI_Init and aborts on a runner with no RDMA hardware. ch4:ucx analogue of the
+# FI_PROVIDER=tcp pin set further down for the regression phase.
+export UCX_TLS="${UCX_TLS:-tcp,self,sm}"
+
 export OMP_NUM_THREADS="$THREADS"
 export OMP_PROC_BIND=spread
 export OMP_PLACES=threads

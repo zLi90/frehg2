@@ -21,6 +21,12 @@ jobs:
       # directly (no wrapper script that would derive this), so the dep lib
       # dirs go on the loader path here. Mirrors build_frehg2_slurm.sh.
       LD_LIBRARY_PATH: /home/runner/.frehg-deps/lib:/home/runner/.frehg-deps/lib64
+      # Constrain UCX to shared-memory/self/tcp: Ubuntu's apt MPICH uses the
+      # ch4:ucx netmod, which otherwise probes InfiniBand verbs at MPI_Init and
+      # aborts on this RDMA-less runner (ibv_create_srq: Operation not
+      # supported). The inline "unit" ctest below carries no per-test UCX pin,
+      # so it is set here for the whole job; mpiexec forwards it to the ranks.
+      UCX_TLS: tcp,self,sm
     steps:
       - uses: actions/checkout@v4
 

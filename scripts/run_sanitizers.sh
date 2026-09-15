@@ -61,7 +61,12 @@ cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
 # provider intermittently wedges MPICH's OFI finalize hook on this platform
 # (amendment A19 — the regression tests pin it in their ctest environment,
 # but the unit/mpi labels run here too and hang identically without it).
+# UCX_TLS is the ch4:ucx counterpart: an apt-mpich (ucx netmod) otherwise
+# probes InfiniBand verbs at MPI_Init and aborts on a runner with no RDMA
+# hardware (ibv_create_srq: Operation not supported). Both are harmless when
+# the other netmod is in use.
 export FI_PROVIDER=tcp
+export UCX_TLS="${UCX_TLS:-tcp,self,sm}"
 export ASAN_OPTIONS="halt_on_error=1:${ASAN_OPTIONS:-}"
 export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:${UBSAN_OPTIONS:-}"
 if [ "$(uname -s)" = "Linux" ]; then

@@ -33,7 +33,8 @@ Modes, selected by --gate:
                 warn > 10 %. --seed-baseline (re)writes the baseline file.
   none          measurement only (record, no assertions).
 
-Common machinery: every run pins FI_PROVIDER=tcp (A19); OMP_NUM_THREADS is
+Common machinery: every run pins FI_PROVIDER=tcp and UCX_TLS=tcp,self,sm (A19,
+plus the ch4:ucx netmod's InfiniBand-verbs workaround); OMP_NUM_THREADS is
 1 unless the mode says otherwise; rank counts run back-to-back in the order
 given (thermal consistency, A23); --repeats keeps the minimum simulation
 time (the fanless-M3 measurement lottery, A23). --solver injects the v2
@@ -184,7 +185,7 @@ def final_volume(output: Path) -> float:
 def run_one(frehg: Path, config: Path, mpiexec: Path, ranks: int, work: Path,
             threads: int = 1, extra_args: list[str] | None = None) -> dict:
     env = dict(os.environ, OMP_NUM_THREADS=str(threads), OMP_PROC_BIND="false",
-               FI_PROVIDER="tcp")
+               FI_PROVIDER="tcp", UCX_TLS="tcp,self,sm")
     log = work / f"scaling_n{ranks}_t{threads}.log"
     cmd = [str(mpiexec), "-n", str(ranks), str(frehg), str(config)] + (extra_args or [])
     started = time.perf_counter()

@@ -23,7 +23,7 @@ BUILD="${1:-$ROOT/build-ci}"
 
 "$ROOT/scripts/ci_build_and_test.sh" "$BUILD"
 
-export OMP_NUM_THREADS=1 OMP_PROC_BIND=false FI_PROVIDER=tcp
+export OMP_NUM_THREADS=1 OMP_PROC_BIND=false FI_PROVIDER=tcp UCX_TLS=tcp,self,sm
 MPIEXEC="$(sed -n 's/^MPIEXEC_EXECUTABLE:[^=]*=//p' "$BUILD/CMakeCache.txt")"
 LEGACY="$(sed -n 's/^FREHG_LEGACY_BENCHMARKS:[^=]*=//p' "$BUILD/CMakeCache.txt")"
 
