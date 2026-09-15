@@ -25,6 +25,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="${1:-$ROOT/build}"
 THREADS="${2:-4}"
 
+# Runtime loader path for the shared dependency libraries: Kokkos is built
+# shared (A8 invariant 7), and frehg pulls libkokkoscontainers.so et al. in
+# transitively through PETSc's pkg-config -L flags, which CMake does not turn
+# into an rpath. The ctest and regression runs below launch the frehg binary,
+# so the dep lib dirs must be on LD_LIBRARY_PATH. Derived from CMAKE_PREFIX_PATH
+# (the workflow step exports it); mirrors build_frehg2_slurm.sh.
+_pfx="${CMAKE_PREFIX_PATH:-}"
+for _p in ${_pfx//:/ }; do
+  [ -n "$_p" ] && LD_LIBRARY_PATH="$_p/lib:$_p/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+done
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+
 export OMP_NUM_THREADS="$THREADS"
 export OMP_PROC_BIND=spread
 export OMP_PLACES=threads

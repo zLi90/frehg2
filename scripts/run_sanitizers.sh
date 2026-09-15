@@ -38,6 +38,14 @@ case "$BUILD" in
   *) BUILD="$PWD/$BUILD" ;;
 esac
 
+# Runtime loader path for the shared dependency libraries: Kokkos is built
+# shared (A8 invariant 7), and frehg pulls libkokkoscontainers.so et al. in
+# transitively through PETSc's pkg-config -L flags, which CMake does not turn
+# into an rpath. The sanitized ctest and smoke runs below launch the frehg
+# binary, so the dep lib dirs must be on LD_LIBRARY_PATH. Mirrors
+# build_frehg2_slurm.sh.
+export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 cmake -B "$BUILD" -S "$ROOT" \
   -DCMAKE_PREFIX_PATH="$PREFIX" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \

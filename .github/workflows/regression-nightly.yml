@@ -14,6 +14,13 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       DEPS_PREFIX: /home/runner/.frehg-deps
+      # Runtime loader path for the shared dependency libraries. Kokkos is
+      # built shared (A8 invariant 7) and frehg pulls libkokkoscontainers.so
+      # et al. in transitively via PETSc's pkg-config -L flags, which CMake
+      # does not turn into an rpath. The ctest steps below launch the binary
+      # directly (no wrapper script that would derive this), so the dep lib
+      # dirs go on the loader path here. Mirrors build_frehg2_slurm.sh.
+      LD_LIBRARY_PATH: /home/runner/.frehg-deps/lib:/home/runner/.frehg-deps/lib64
     steps:
       - uses: actions/checkout@v4
 

@@ -14,6 +14,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="${1:-$ROOT/build-ci}"
 
+# Runtime loader path for the shared dependency libraries. Kokkos is built
+# shared (A8 invariant 7: one libkokkoscore runtime in the process, or
+# VecKokkos double-inits the singleton and segfaults), and frehg pulls
+# libkokkoscontainers.so et al. in transitively through PETSc's pkg-config -L
+# flags. CMake does not turn those -L flags into an rpath -- unlike PETSc's own
+# libpetsc.so, which carries the rpath PETSc bakes in -- so the ctest runs
+# below cannot find the Kokkos .so's without the dep lib dirs on
+# LD_LIBRARY_PATH. Derived from CMAKE_PREFIX_PATH (the documented invocation
+# above sets it); mirrors build_frehg2_slurm.sh, which exports the same.
+_pfx="${CMAKE_PREFIX_PATH:-}"
+for _p in ${_pfx//:/ }; do
+  [ -n "$_p" ] && LD_LIBRARY_PATH="$_p/lib:$_p/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+done
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+
 cmake -B "$BUILD" -S "$ROOT" -DFREHG_WERROR=ON
 cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
 
