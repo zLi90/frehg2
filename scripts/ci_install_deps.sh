@@ -56,9 +56,18 @@ if [ "${FREHG_CUDA:-0}" = "1" ]; then
     "-DKokkos_ARCH_${FREHG_CUDA_ARCH:-AMPERE80}=ON"
     "-DCMAKE_CXX_COMPILER=$PREFIX/src/kokkos-${KOKKOS_VERSION}/bin/nvcc_wrapper")
 fi
+# BUILD_SHARED_LIBS=ON is load-bearing (A8 invariant 7): frehg links Kokkos and
+# so does PETSc (via the Kokkos Kernels built below, linked into libpetsc.so). A
+# static Kokkos core is absorbed into BOTH, giving two copies of Kokkos's
+# runtime singleton in one process -- it initializes twice and the first
+# VecKokkos access segfaults. A single shared libkokkoscore keeps one runtime.
+# It also produces -fPIC objects, without which the static Kokkos Kernels
+# archive cannot be linked into the shared libpetsc.so (R_X86_64_TPOFF32 TLS
+# relocation error on the ETI translation units).
 cmake -S "kokkos-${KOKKOS_VERSION}" -B kokkos-build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+  -DBUILD_SHARED_LIBS=ON \
   -DCMAKE_CXX_STANDARD=20 \
   -DKokkos_ENABLE_OPENMP=ON \
   -DKokkos_ENABLE_SERIAL=ON \
@@ -94,6 +103,7 @@ fi
 cmake -S "kokkos-kernels-${KOKKOS_VERSION}" -B kokkos-kernels-build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+  -DBUILD_SHARED_LIBS=ON \
   -DCMAKE_CXX_STANDARD=20 \
   -DKokkos_ROOT="$PREFIX" \
   -DKokkosKernels_ENABLE_TPL_BLAS=OFF \

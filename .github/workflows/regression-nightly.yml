@@ -27,7 +27,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_PREFIX }}
-          key: frehg-deps-${{ runner.os }}-gcc-kokkos5.1.0-petsc3.25.1-kokkoskernels-v5
+          key: frehg-deps-${{ runner.os }}-gcc-kokkos5.1.0-petsc3.25.1-kokkoskernels-v6
 
       - name: Build Kokkos and PETSc
         run: scripts/ci_install_deps.sh "$DEPS_PREFIX"
