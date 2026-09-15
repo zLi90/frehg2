@@ -66,16 +66,28 @@ add_executable(frehg_mpi_core mpi/test_parallel_core.cpp)
 target_link_libraries(frehg_mpi_core PRIVATE frehg::core frehg::compiler_flags)
 target_compile_options(frehg_mpi_core PRIVATE -ffp-contract=off)
 
+# These drivers assert bit-exact parallel layout (gid compression, parallel
+# HDF5 j*NX+i flattening, checkpoint round-trip) with -ffp-contract=off, so
+# they must run single-threaded: with the Kokkos OpenMP backend a threaded
+# partition of the copy/pack ranges gives no fixed order, and an unset
+# OMP_NUM_THREADS makes Kokkos grab every core (mpi.core.n2 then fails the
+# "j*NX+i bit-exact" check on an oversubscribed runner). Threaded coverage is
+# the openmp lane's job via the tolerance-based regression gates; the strict
+# bit-exact drivers stay at one thread, same as ${_regress_env}. OMP_PROC_BIND
+# also silences Kokkos's "MPI ranks must be bound" warning under mpiexec.
+set(_mpi_test_env "OMP_NUM_THREADS=1;OMP_PROC_BIND=false")
 foreach(nranks 1 2 4)
   add_test(NAME mpi.halo.n${nranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${nranks}
             $<TARGET_FILE:frehg_mpi_halo>)
-  set_tests_properties(mpi.halo.n${nranks} PROPERTIES LABELS "mpi" PROCESSORS ${nranks})
+  set_tests_properties(mpi.halo.n${nranks} PROPERTIES LABELS "mpi"
+    PROCESSORS ${nranks} ENVIRONMENT "${_mpi_test_env}")
 
   add_test(NAME mpi.core.n${nranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${nranks}
             $<TARGET_FILE:frehg_mpi_core>)
-  set_tests_properties(mpi.core.n${nranks} PROPERTIES LABELS "mpi" PROCESSORS ${nranks})
+  set_tests_properties(mpi.core.n${nranks} PROPERTIES LABELS "mpi"
+    PROCESSORS ${nranks} ENVIRONMENT "${_mpi_test_env}")
 endforeach()
 
 # ---------------------------------------------------------------------------
