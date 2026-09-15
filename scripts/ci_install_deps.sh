@@ -127,6 +127,26 @@ PETSC_EXTRA=()
 if [ "${FREHG_CUDA:-0}" = "1" ]; then
   PETSC_EXTRA+=(--with-cuda=1)
 fi
+# PETSc MUST be built against the SAME MPI that the frehg binary links (CMake
+# FindMPI -> system MPICH), that parallel HDF5 uses (libhdf5-mpich), and that
+# ctest launches with (the system mpiexec). If PETSc is configured with a bare
+# CC=gcc/clang and no MPI directive it cannot find Ubuntu's split-layout MPICH
+# and silently --download-mpich's its own; the binary then MPI_Init's under
+# PETSc's MPICH while the system mpiexec drives PMI for a different one, so the
+# ranks never join a world -- every process becomes a size-1 MPI_COMM_WORLD
+# (the "1 MPI rank" banner on all ranks) and the parallel-HDF5 tests race on a
+# colliding filename. Hand PETSc the system MPICH wrappers, exactly as
+# build_frehg2_slurm.sh does. MPICH_CC/MPICH_CXX keep the wrapper's underlying
+# compiler equal to the lane compiler (report-P0.md §4) so PETSc's C++ and its
+# Kokkos linkage match the Kokkos we built above and the frehg binary.
+MPICC="${MPICC:-$(command -v mpicc.mpich || command -v mpicc)}"
+MPICXX="${MPICXX:-$(command -v mpicxx.mpich || command -v mpicxx)}"
+if [ -z "$MPICC" ] || [ -z "$MPICXX" ]; then
+  echo "ci_install_deps.sh: no MPICH compiler wrappers (mpicc/mpicxx) on PATH" >&2
+  exit 3
+fi
+export MPICH_CC="${CC:-gcc}" MPICH_CXX="${CXX:-g++}"
+echo "PETSc MPI: $MPICC / $MPICXX (MPICH_CC=$MPICH_CC MPICH_CXX=$MPICH_CXX)"
 # On any configure failure, surface the real error: PETSc redirects its
 # downloaded-package build output (hypre, ...) into configure.log, so a failed
 # package build otherwise shows only a generic "Error running make on <PKG>" on
@@ -145,6 +165,8 @@ dump_petsc_log() {
 }
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then dump_petsc_log; fi' ERR
 ./configure --prefix="$PREFIX" \
+  --with-cc="$MPICC" \
+  --with-cxx="$MPICXX" \
   --with-fc=0 \
   --with-debugging=0 \
   --download-f2cblaslapack \

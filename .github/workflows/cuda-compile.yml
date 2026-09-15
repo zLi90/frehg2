@@ -40,7 +40,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_PREFIX }}
-          key: frehg-deps-${{ runner.os }}-cuda12-kokkos5.1.0-petsc3.25.1-kokkoskernels-v6
+          key: frehg-deps-${{ runner.os }}-cuda12-kokkos5.1.0-petsc3.25.1-kokkoskernels-v7
 
       - name: Build Kokkos (CUDA backend) and PETSc (Kokkos + CUDA)
         run: |
