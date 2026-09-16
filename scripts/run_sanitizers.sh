@@ -67,6 +67,15 @@ cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
 # the other netmod is in use.
 export FI_PROVIDER=tcp
 export UCX_TLS="${UCX_TLS:-tcp,self,sm}"
+# Pin single-threaded execution for every label below (the FULL block further
+# down re-states this for its smoke subprocesses). The unit/validate ctest
+# entries carry no per-test OMP pin, so without this Kokkos grabs every core
+# and the strict bit-exact / conservation unit tests run threaded and drift
+# (no fixed reduction / wet-dry-threshold order across a threaded partition —
+# SweModule.OutflowConditionDrainsASlopedChannel...). Per-PR lanes are
+# single-threaded by design; ASan/UBSan detect no data races anyway (that is
+# TSan), so threading buys the sanitizer lane nothing.
+export OMP_NUM_THREADS=1 OMP_PROC_BIND=false
 export ASAN_OPTIONS="halt_on_error=1:${ASAN_OPTIONS:-}"
 export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:${UBSAN_OPTIONS:-}"
 if [ "$(uname -s)" = "Linux" ]; then

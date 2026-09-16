@@ -39,6 +39,18 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 # in tests/CMakeLists.txt (harmless on a ch4:ofi netmod).
 export UCX_TLS="${UCX_TLS:-tcp,self,sm}"
 
+# Pin single-threaded execution for this per-PR gate. The unit and validate
+# ctest entries carry no per-test OMP pin (only the mpi and regression entries
+# do, via ${_mpi_test_env}/${_regress_env} in tests/CMakeLists.txt); with
+# OMP_NUM_THREADS unset, Kokkos grabs every core and the strict bit-exact /
+# conservation unit tests run threaded. Those have no fixed reduction or
+# wet/dry-threshold evaluation order across a threaded partition, so they drift
+# and fail intermittently (SweModule.OutflowConditionDrainsASlopedChannel...).
+# Every per-PR lane runs at one thread by design (report-P1.md; the invariant
+# stated in run_openmp_lane.sh) — threaded coverage is the openmp lane's
+# tolerance-based gates, not the bit-exact unit suite.
+export OMP_NUM_THREADS=1 OMP_PROC_BIND=false
+
 cmake -B "$BUILD" -S "$ROOT" -DFREHG_WERROR=ON
 cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
 
