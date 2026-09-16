@@ -36,7 +36,17 @@ target_compile_definitions(frehg_unit_tests PRIVATE
   FREHG_REPO_DIR="${CMAKE_SOURCE_DIR}")
 
 add_test(NAME unit.all COMMAND frehg_unit_tests)
-set_tests_properties(unit.all PROPERTIES LABELS "unit" PROCESSORS 1)
+# Pin single-threaded. The gtest binary carries strict bit-exact / conservation
+# assertions (SweModule.OutflowConditionDrainsASlopedChannelConservatively,
+# VelocityConditionDrivesAndForcesTheEdgeFace) that have no fixed reduction or
+# wet/dry-threshold evaluation order under a threaded Kokkos partition, so they
+# drift and fail intermittently when Kokkos grabs every core. This ENVIRONMENT
+# overrides the openmp lane's ambient OMP_NUM_THREADS=4 for this test only (per
+# run_openmp_lane.sh's own note: the unit suite is single-threaded by design;
+# the lane's threaded coverage is its tolerance-based b1/b2/b6-restart gates,
+# which run directly at OMP_NUM_THREADS=4 and are unaffected by this pin).
+set_tests_properties(unit.all PROPERTIES LABELS "unit" PROCESSORS 1
+  ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false")
 
 # p5 negative test (v2 plan §2B.3): the backend-consistency invariant in
 # LinearSystem.hpp must REJECT a device MemSpace paired with a PETSc that

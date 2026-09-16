@@ -37,6 +37,18 @@ for _p in ${_pfx//:/ }; do
 done
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 
+# Prepend the system MPICH runtime dir so the frehg binary resolves libmpi to
+# the same MPICH that mpiexec.mpich launches under. If a stray libmpi ever lands
+# in the dependency prefix (on LD_LIBRARY_PATH above), it would shadow the
+# system one and the binary would MPI_Init under a different MPICH than the
+# launcher's PMI -- every rank then degrades to a size-1 MPI_COMM_WORLD and the
+# parallel-HDF5 mpi tests race on a colliding filename. A no-op when the prefix
+# is clean. (DT_RPATH in libpetsc still wins over LD_LIBRARY_PATH; the ci build
+# lane's diagnostics surface a downloaded-and-rpath'd MPI, if any.)
+_mpich_libdir="$( { mpicxx.mpich -show 2>/dev/null || mpicxx -show 2>/dev/null || true; } \
+  | tr ' ' '\n' | sed -n 's/^-L//p' | grep -i mpich | head -1 )"
+[ -n "$_mpich_libdir" ] && export LD_LIBRARY_PATH="$_mpich_libdir:${LD_LIBRARY_PATH}"
+
 # Constrain UCX to shared-memory/self/tcp for the unit/mpi ctest runs below
 # (they inherit this ambient env; the ctest entries carry no UCX pin). Ubuntu's
 # apt MPICH uses the ch4:ucx netmod, which otherwise probes InfiniBand verbs at
@@ -47,6 +59,18 @@ export UCX_TLS="${UCX_TLS:-tcp,self,sm}"
 export OMP_NUM_THREADS="$THREADS"
 export OMP_PROC_BIND=spread
 export OMP_PLACES=threads
+
+# MPI launch diagnostics (singleton triage for mpi.core.n4): print the launcher
+# identity and the exact libmpi the frehg binary resolves, so a degraded size-1
+# world is readable from this lane's log too. Read-only; cannot fail the lane.
+# (unit.all pins OMP_NUM_THREADS=1 in its own ctest ENVIRONMENT, overriding the
+# OMP_NUM_THREADS=$THREADS above -- the strict bit-exact unit tests are
+# single-threaded by design; this lane's threaded coverage is its b1/b2/
+# b6-restart tolerance gates below, which run at $THREADS.)
+echo "==== MPI launch diagnostics (OMP_NUM_THREADS=$THREADS) ===="
+mpiexec --version 2>&1 | head -3 || true
+ldd "$BUILD/src/frehg" 2>/dev/null | grep -iE 'mpi|petsc' || echo "  (none reported)"
+echo "==========================================================="
 
 ctest --test-dir "$BUILD" -L unit --output-on-failure
 ctest --test-dir "$BUILD" -L mpi -LE regression --output-on-failure

@@ -29,6 +29,20 @@ for _p in ${_pfx//:/ }; do
 done
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 
+# Prepend the system MPICH runtime dir so the frehg binary resolves libmpi to
+# the same MPICH that mpiexec.mpich launches under. The dependency prefix is on
+# LD_LIBRARY_PATH above (for the Kokkos .so's); if a stray libmpi ever lands
+# there it would shadow the system one, and the binary would MPI_Init under a
+# different MPICH than the launcher's PMI -- every rank then degrades to a
+# size-1 MPI_COMM_WORLD ("1 MPI rank" on all ranks) and the parallel-HDF5 tests
+# race on a colliding filename (mpi.core.n4). Derived from the MPICH wrapper's
+# own -L flags; a no-op when the prefix is clean (same dir the loader would pick
+# anyway). DT_RPATH in libpetsc still wins over this, so it does not mask a
+# downloaded-and-rpath'd MPI -- the diagnostics below surface that case.
+_mpich_libdir="$( { mpicxx.mpich -show 2>/dev/null || mpicxx -show 2>/dev/null || true; } \
+  | tr ' ' '\n' | sed -n 's/^-L//p' | grep -i mpich | head -1 )"
+[ -n "$_mpich_libdir" ] && export LD_LIBRARY_PATH="$_mpich_libdir:${LD_LIBRARY_PATH}"
+
 # Constrain UCX to shared-memory/self/tcp for every test below. Ubuntu's apt
 # MPICH is built on the ch4:ucx netmod, and UCX otherwise probes InfiniBand
 # verbs at MPI_Init and aborts on a runner with no RDMA hardware
@@ -53,6 +67,26 @@ export OMP_NUM_THREADS=1 OMP_PROC_BIND=false
 
 cmake -B "$BUILD" -S "$ROOT" -DFREHG_WERROR=ON
 cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
+
+# --- MPI launch diagnostics (singleton triage for mpi.core.n4) --------------
+# The mpi tests intermittently degrade to size-1 MPI_COMM_WORLD on every rank
+# ("1 MPI rank" banner, [frehg:0] prefix on all output) -- four singletons then
+# race on the parallel-HDF5 filename and the bit-exact layout check flakes. That
+# happens only when the frehg binary's runtime libmpi does not match the MPICH
+# that mpiexec launches under. These lines make the cause readable from the log
+# instead of guessed: the launcher identity, the exact libmpi the binary
+# resolves (DT_RPATH first, then LD_LIBRARY_PATH), and whether the dependency
+# prefix ever grew its own MPI. All are read-only and cannot fail the gate.
+echo "==== MPI launch diagnostics ===="
+echo "-- launcher:"; command -v mpiexec mpiexec.mpich 2>/dev/null || true
+mpiexec --version 2>&1 | head -3 || true
+echo "-- frehg runtime MPI/PETSc linkage (the libmpi actually loaded):"
+ldd "$BUILD/src/frehg" 2>/dev/null | grep -iE 'mpi|petsc' || echo "  (none reported)"
+echo "-- dependency-prefix MPI libraries (MUST be empty; a hit here is the bug):"
+for _p in ${CMAKE_PREFIX_PATH//:/ }; do
+  ls -1 "$_p"/lib*/libmpi* "$_p"/lib*/libpmi* "$_p"/bin/mpiexec 2>/dev/null || true
+done
+echo "================================"
 
 ctest --test-dir "$BUILD" -L unit --output-on-failure
 # -LE regression: the rank-invariance regressions also carry the mpi label

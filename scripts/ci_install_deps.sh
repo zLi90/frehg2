@@ -181,5 +181,26 @@ make -j "$JOBS" all
 make install
 trap - ERR
 
+# Guard against PETSc having downloaded and built its own MPI. We configure with
+# --with-cc/--with-cxx pointed at the MPICH wrappers precisely so PETSc reuses
+# the system MPICH; if that detection ever slips, PETSc falls back to
+# --download-mpich and bakes a private libmpi into $PREFIX with a DT_RPATH that
+# the loader honours before LD_LIBRARY_PATH. The frehg binary then MPI_Init's
+# under that private MPICH while mpiexec launches under the system one, so every
+# rank degrades to a size-1 MPI_COMM_WORLD and the parallel-HDF5 mpi tests race
+# (mpi.core.n4). That is unfixable downstream (rpath wins), so fail the build
+# here where the cache is produced, with a clear message, rather than shipping a
+# poisoned cache that flakes silently for every consumer.
+_stray_mpi="$( ls -1 "$PREFIX"/lib*/libmpi.so* "$PREFIX"/bin/mpiexec \
+  "$PREFIX"/bin/mpichversion 2>/dev/null || true )"
+if [ -n "$_stray_mpi" ]; then
+  echo "ci_install_deps.sh: FATAL — a private MPI was installed into the prefix:" >&2
+  echo "$_stray_mpi" | sed 's/^/  /' >&2
+  echo "  PETSc must reuse the system MPICH (--with-cc=$MPICC --with-cxx=$MPICXX);" >&2
+  echo "  a downloaded MPI here rpath-shadows the launcher's and degrades every" >&2
+  echo "  rank to a size-1 world. Not writing the cache-complete marker." >&2
+  exit 1
+fi
+
 touch "$PREFIX/.complete"
 echo "dependencies installed at $PREFIX"

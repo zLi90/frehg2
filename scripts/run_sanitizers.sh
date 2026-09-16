@@ -46,6 +46,15 @@ esac
 # build_frehg2_slurm.sh.
 export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+# Prepend the system MPICH runtime dir so the frehg binary resolves libmpi to
+# the same MPICH that mpiexec.mpich launches under (the dep prefix above carries
+# the Kokkos .so's; a stray libmpi there would shadow the system one and every
+# rank would degrade to a size-1 MPI_COMM_WORLD, racing the parallel-HDF5 mpi
+# tests). A no-op when the prefix is clean.
+_mpich_libdir="$( { mpicxx.mpich -show 2>/dev/null || mpicxx -show 2>/dev/null || true; } \
+  | tr ' ' '\n' | sed -n 's/^-L//p' | grep -i mpich | head -1 )"
+[ -n "$_mpich_libdir" ] && export LD_LIBRARY_PATH="$_mpich_libdir:${LD_LIBRARY_PATH}"
+
 cmake -B "$BUILD" -S "$ROOT" \
   -DCMAKE_PREFIX_PATH="$PREFIX" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
