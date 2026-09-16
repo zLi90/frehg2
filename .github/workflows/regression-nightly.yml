@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mpich libmpich-dev libhdf5-mpich-dev \
-            libyaml-cpp-dev python3-yaml python3-h5py
+            libyaml-cpp-dev python3-yaml python3-h5py python3-numpy
 
       - name: Cache built dependencies
         uses: actions/cache@v4
