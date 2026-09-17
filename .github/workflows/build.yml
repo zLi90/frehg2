@@ -28,6 +28,14 @@ jobs:
             clang libomp-dev
           pip3 install --user mkdocs mkdocs-material
 
+      # Noble's apt mpich (4.2.0-5build3) is built against PMIx while its hydra
+      # mpiexec speaks only PMI-1, so every launched rank degrades to a size-1
+      # MPI_COMM_WORLD (Launchpad #2072338) — the mpi label then runs racing
+      # singletons. Installs the fixed 4.2.0-5.1 (same ABI) and verifies a
+      # 2-rank world actually forms.
+      - name: Fix noble's broken MPICH (PMIx/hydra mismatch)
+        run: scripts/ci_fix_mpich_noble.sh
+
       - name: Cache built dependencies
         uses: actions/cache@v4
         with:

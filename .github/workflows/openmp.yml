@@ -24,6 +24,12 @@ jobs:
           sudo apt-get install -y mpich libmpich-dev libhdf5-mpich-dev \
             libyaml-cpp-dev python3-yaml python3-h5py python3-numpy
 
+      # Noble's apt mpich launches every rank as a size-1 singleton (PMIx/hydra
+      # PMI mismatch, Launchpad #2072338); install the fixed 4.2.0-5.1 and
+      # verify a 2-rank world forms. See scripts/ci_fix_mpich_noble.sh.
+      - name: Fix noble's broken MPICH (PMIx/hydra mismatch)
+        run: scripts/ci_fix_mpich_noble.sh
+
       - name: Cache built dependencies
         uses: actions/cache@v4
         with:

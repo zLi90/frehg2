@@ -36,6 +36,14 @@ jobs:
             libmpich-dev libhdf5-mpich-dev libyaml-cpp-dev
           nvcc --version
 
+      # Noble's apt mpich launches every rank as a size-1 singleton (PMIx/hydra
+      # PMI mismatch, Launchpad #2072338). This lane never executes, but the
+      # PETSc dependency build DOES compile/link against libmpich-dev, so it
+      # gets the same fixed 4.2.0-5.1 for header/library consistency with the
+      # other lanes. See scripts/ci_fix_mpich_noble.sh.
+      - name: Fix noble's broken MPICH (PMIx/hydra mismatch)
+        run: scripts/ci_fix_mpich_noble.sh
+
       - name: Cache built dependencies
         uses: actions/cache@v4
         with:

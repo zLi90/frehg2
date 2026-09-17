@@ -91,18 +91,28 @@ target_compile_options(frehg_mpi_core PRIVATE -ffp-contract=off)
 # supported). It is the ch4:ucx analogue of the FI_PROVIDER=tcp pin used for the
 # ch4:ofi netmod below; both are harmless when the other netmod is in use.
 set(_mpi_test_env "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;UCX_TLS=tcp,self,sm")
+# FREHG_EXPECT_RANKS: both drivers assert the launched MPI_COMM_WORLD really
+# has this size. A launcher/libmpich PMI mismatch (e.g. noble's PMIx-linked apt
+# mpich 4.2.0-5build3 under its PMI-1 hydra, Launchpad #2072338) silently
+# degrades every rank to a size-1 world: the halo driver then "passes"
+# trivially on its single-rank paths and the parallel-HDF5 driver's N
+# singletons race on one shared filename and flake. The assertion turns that
+# into a deterministic, named failure. mpiexec (hydra) forwards the variable
+# to the ranks.
 foreach(nranks 1 2 4)
   add_test(NAME mpi.halo.n${nranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${nranks}
             $<TARGET_FILE:frehg_mpi_halo>)
   set_tests_properties(mpi.halo.n${nranks} PROPERTIES LABELS "mpi"
-    PROCESSORS ${nranks} ENVIRONMENT "${_mpi_test_env}")
+    PROCESSORS ${nranks}
+    ENVIRONMENT "${_mpi_test_env};FREHG_EXPECT_RANKS=${nranks}")
 
   add_test(NAME mpi.core.n${nranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${nranks}
             $<TARGET_FILE:frehg_mpi_core>)
   set_tests_properties(mpi.core.n${nranks} PROPERTIES LABELS "mpi"
-    PROCESSORS ${nranks} ENVIRONMENT "${_mpi_test_env}")
+    PROCESSORS ${nranks}
+    ENVIRONMENT "${_mpi_test_env};FREHG_EXPECT_RANKS=${nranks}")
 endforeach()
 
 # ---------------------------------------------------------------------------

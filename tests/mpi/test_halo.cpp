@@ -13,6 +13,7 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -198,6 +199,14 @@ void runCase(const frehg::Grid& grid, bool gpuAware) {
 int main(int argc, char** argv) {
   frehg::PetscSession session(argc, argv);
   {
+    // A launcher/libmpich PMI mismatch degrades every rank to a size-1 world,
+    // and this driver would then "pass" trivially on its single-rank paths.
+    // The ctest entries set FREHG_EXPECT_RANKS to the mpiexec -n value.
+    if (const char* expect = std::getenv("FREHG_EXPECT_RANKS")) {
+      check(session.size() == std::atoi(expect),
+            "MPI world size equals the launched rank count (PMI handshake)");
+    }
+
     frehg::DomainConfig dom;
     dom.nx = 7;   // deliberately non-divisible over 2 and 4 ranks
     dom.ny = 5;

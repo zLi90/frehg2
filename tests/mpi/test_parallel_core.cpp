@@ -17,6 +17,7 @@
 #include <mpi.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -323,6 +324,15 @@ void testParallelHdf5(const frehg::PetscSession& session, const std::string& scr
 int main(int argc, char** argv) {
   frehg::PetscSession session(argc, argv);
   {
+    // A launcher/libmpich PMI mismatch degrades every rank to a size-1 world;
+    // N singletons then race on the shared scratch filename below and the
+    // bit-exact checks flake. The ctest entries set FREHG_EXPECT_RANKS to the
+    // mpiexec -n value, turning that into a deterministic, named failure.
+    if (const char* expect = std::getenv("FREHG_EXPECT_RANKS")) {
+      check(session.size() == std::atoi(expect),
+            "MPI world size equals the launched rank count (PMI handshake)");
+    }
+
     std::string scratchDir;
     if (session.rank() == 0) {
       scratchDir = (std::filesystem::temp_directory_path() / "frehg_mpi_core").string();
