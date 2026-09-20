@@ -80,6 +80,16 @@ envelope runs are not sanitizable in practice (hours uninstrumented ×
 check (amendment A21). Test timeouts are scaled at configure time
 (`FREHG_TEST_TIMEOUT_SCALE=5`).
 
+Linux leak checking runs with the third-party suppressions in
+`scripts/lsan.supp`: MPICH's singleton-mode hwloc topology and PETSc's
+registry state are process-lifetime allocations their finalizers never
+free, and without the suppressions every direct (non-`mpiexec`) binary
+invocation — `frehg --validate`, the r1 run-record revalidation, the unit
+gtest binary — exits nonzero on a constant ~22 KB report. The file
+documents the per-module rationale and the one accepted blind spot
+(leaks of PETSc-held objects match the libpetsc rule; frehg's own
+allocations stay fully covered).
+
 ## The OpenMP lane
 
 ```bash

@@ -29,6 +29,35 @@ set_property(CACHE FREHG_BACKEND PROPERTY STRINGS auto serial openmp cuda hip)
 # Dependencies (explicit find_package; no submodules, no bundled sources)
 # ---------------------------------------------------------------------------
 find_package(MPI REQUIRED COMPONENTS CXX)
+# Scrub leaked LTO flags from the MPI imported target. Ubuntu's MPICH
+# compiler wrappers embed the distribution's package-build flags on their
+# -show/-compile_info lines (dpkg-buildflags default LTO: "-flto=auto
+# -ffat-lto-objects"), and FindMPI harvests every -f* flag from that line
+# into MPI::MPI_CXX's INTERFACE_COMPILE_OPTIONS (its filter drops only
+# stack-protector/aliasing/PIC flags). MPI::MPI_CXX is PUBLIC on
+# frehg::core, so the leak silently turns every Frehg2 TU into a fat-LTO
+# build. Host gcc/clang resolve that transparently at link, but nvcc has no
+# host-LTO support: each nvcc TU embeds its CUDA fatbin under a file-local
+# `fatbinData` toplevel-asm symbol, and gcc's LTRANS repartitioning
+# concatenates those asm blocks — "symbol `fatbinData' is already defined"
+# at every executable link of the cuda lane. Optimization policy belongs to
+# this project (CMAKE_BUILD_TYPE), never to the MPI package's build recipe.
+foreach(_frehg_mpi_prop INTERFACE_COMPILE_OPTIONS INTERFACE_LINK_OPTIONS)
+  get_target_property(_frehg_mpi_opts MPI::MPI_CXX ${_frehg_mpi_prop})
+  if(_frehg_mpi_opts)
+    set(_frehg_mpi_clean "")
+    foreach(_frehg_mpi_opt IN LISTS _frehg_mpi_opts)
+      # Link flags may arrive as one space-joined string; scrub inside
+      # elements, then drop elements that become empty.
+      string(REGEX REPLACE "-f(no-)?(lto[^ ]*|fat-lto-objects)" "" _frehg_mpi_opt "${_frehg_mpi_opt}")
+      string(STRIP "${_frehg_mpi_opt}" _frehg_mpi_opt)
+      if(NOT _frehg_mpi_opt STREQUAL "")
+        list(APPEND _frehg_mpi_clean "${_frehg_mpi_opt}")
+      endif()
+    endforeach()
+    set_target_properties(MPI::MPI_CXX PROPERTIES ${_frehg_mpi_prop} "${_frehg_mpi_clean}")
+  endif()
+endforeach()
 find_package(Kokkos 5.1 REQUIRED)
 find_package(HDF5 REQUIRED COMPONENTS C)
 if(NOT HDF5_IS_PARALLEL)

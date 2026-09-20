@@ -1,0 +1,37 @@
+# LeakSanitizer suppressions for the sanitizer lane (run_sanitizers.sh wires
+# this in via LSAN_OPTIONS; Linux only — macOS ASan has no leak detector).
+#
+# Scope discipline: every rule below names a dependency LIBRARY MODULE, and a
+# rule matches only when a frame of the ALLOCATION stack lands in that module.
+# frehg's own allocations (operator new, Kokkos views, std containers) never
+# allocate through these modules, so they remain fully leak-checked. The lane's
+# ASan (overflows, use-after-free) and UBSan coverage is unaffected by this
+# file entirely — it filters the end-of-process leak report only.
+#
+# libhwloc / libmpich: a process that calls MPI_Init WITHOUT a hydra proxy
+# (singleton mode — the unit gtest binary, frehg --validate, the r1
+# run-record round-trip revalidation) makes MPICH load the hardware topology
+# itself (hwloc_topology_load) and park it in process-global state that
+# MPI_Finalize does not free: a constant ~22 KB / 269 allocations per
+# process. Hydra-launched ranks receive the topology from the proxy and
+# report no leak — which is why the mpi.* tests were green while every
+# singleton invocation exited nonzero on the leak report (the r1 gate and
+# the --validate suite judge by exit code, so they failed with "VALID" on
+# their own stdout).
+leak:libhwloc
+leak:libmpich
+#
+# libpetsc: registry / function-list state (kh_resize_HMapFunc,
+# PetscFunctionListCreate_Private) that outlives PetscFinalize, plus objects
+# abandoned by the unit tests that deliberately drive fatal paths
+# mid-construction (LinearSystem.UnknownPreconditionerIsFatal,
+# ApiMisuseIsFatal, ...): log::fatal throws, the half-built KSP/PC is
+# abandoned by design — in production that path is followed by process
+# death.
+#   Accepted blind spot: a genuinely leaked frehg-HELD PETSc object (an
+# undestroyed Mat/KSP) also allocates through libpetsc and is suppressed by
+# this rule. That coverage was never real — the leak checker had never run
+# before this file existed (dev machines are macOS) — and frehg-side
+# allocations, where a leak would live in code this project can fix, stay
+# covered.
+leak:libpetsc

@@ -61,7 +61,7 @@ cmake -B "$BUILD" -S "$ROOT" \
   -DFREHG_SANITIZE=ON \
   -DFREHG_WERROR=ON \
   -DFREHG_TEST_TIMEOUT_SCALE=5 \
-  "${FREHG_CMAKE_EXTRA[@]:-}"
+  ${FREHG_CMAKE_EXTRA[@]+"${FREHG_CMAKE_EXTRA[@]}"}
 cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
 
 # halt_on_error: any finding fails the lane. Leak checking is enabled where
@@ -89,6 +89,16 @@ export ASAN_OPTIONS="halt_on_error=1:${ASAN_OPTIONS:-}"
 export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:${UBSAN_OPTIONS:-}"
 if [ "$(uname -s)" = "Linux" ]; then
   export ASAN_OPTIONS="detect_leaks=1:$ASAN_OPTIONS"
+  # Third-party leak suppressions. MPICH's singleton-mode hwloc topology and
+  # PETSc's registry state are process-lifetime allocations their finalizers
+  # never free; without the suppressions every DIRECT (non-mpiexec) binary
+  # invocation — the unit gtest binary, frehg --validate, the r1 run-record
+  # revalidation — exits nonzero on a constant ~22 KB leak report, failing
+  # those gates on exit code rather than on any finding in frehg code.
+  # scripts/lsan.supp documents the per-module rationale and the one accepted
+  # blind spot. The env var is inherited by every ctest/regression subprocess
+  # and forwarded to ranks by mpiexec.
+  export LSAN_OPTIONS="suppressions=$ROOT/scripts/lsan.supp:print_suppressions=0:${LSAN_OPTIONS:-}"
 fi
 
 if [ "$FULL" -eq 0 ]; then
