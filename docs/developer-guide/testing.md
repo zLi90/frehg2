@@ -36,13 +36,17 @@ MPICH's `MPI_Finalize` — post-completion only, but it hangs harness runs).
 
 ## Rank invariance
 
-Two lanes per case (plan §8.2, amendments A5/A8/A14):
+Two lanes per case (plan §8.2, amendments A5/A8/A14, V2-A9):
 
 - **strict** — rank-invariant `jacobi` preconditioning at machine-precision
   tolerances proves the assembly, physics, and exchange operators
-  rank-invariant (bounds at 1e-12, measured down to ~1e-14). Horizons are
-  limited to windows before discrete threshold crossings (wet/dry fronts,
-  saturation-front cell crossings) amplify rounding differences.
+  rank-invariant (b1/b2 bounds at 1e-12, measured down to ~1e-14). Horizons
+  are limited to windows before discrete threshold crossings (wet/dry fronts,
+  saturation-front cell crossings) amplify rounding differences — but *which
+  step* the first crossing lands on is platform rounding, so the coupled b5
+  one-step bound is 1e-9 (V2-A9: one threshold-class branch flips inside
+  step 1 on the x86-64 CI platform, isolated footprint 2.2e-10; the harness
+  prints the per-field breakdown for the record).
 - **default** — production solver settings over longer windows, gated at
   data-derived bounds (the harness prints achieved values on every run).
 

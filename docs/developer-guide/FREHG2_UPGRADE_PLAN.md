@@ -828,6 +828,13 @@ the achieved per-field trajectory difference for the record. The full
 envelope gate (both scenarios, both modes) runs at 4 ranks, so the
 production decomposition is itself exercised end-to-end.
 
+**Amended by V2-A9 (2026-09-20):** the strict one-step bound is 1e-9. The
+1e-12 figure was calibrated on the dev machine's rounding; the first true
+multi-rank CI execution (x86-64/glibc, after the noble MPICH PMI fix)
+measured a stable 2.2e-10 at n=4 — one threshold-class branch flips inside
+step 1 on that platform. See V2-A9 in FREHG2_V2_DEVELOPMENT_PLAN.md for the
+measurement and derivation; b1/b2 strict stay at 1e-12.
+
 
 ### A15 (P3, 2026-08-11) — §9/§10 P3: owner-directed shortened b5 gate horizons
 

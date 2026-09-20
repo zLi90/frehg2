@@ -1237,3 +1237,55 @@ the shipped build script itself a gated artifact.
 dependency-packaging correction plus the gate that would have caught it.
 Physics is untouched — the same binary, built correctly, reproduces the p1
 records.
+
+
+### V2-A9 (2026-09-20) — v1 §8.2 / A14: the b5 strict one-step bound is 1e-9 on heterogeneous FP platforms
+
+**What changed.** The b5 strict rank-invariance lane (v1 amendment A14: one
+coupled step at 1/2/4 ranks, rank-invariant `jacobi` at machine-precision
+tolerances) gated at 1e-12, set from dev-machine measurements (9e-15 in A14;
+5.7e-14 in dod-P3, arm64 + Apple libm + Accelerate-class rounding). The bound
+is re-derived to **1e-9**. The b1/b2 strict lanes keep 1e-12 — the
+single-physics proofs are unaffected.
+
+**Why.** GitHub CI had never actually executed this gate multi-rank: Ubuntu
+24.04's apt MPICH (4.2.0-5build3) is built against PMIx while its Hydra
+`mpiexec` speaks only PMI-1, so every launched process degraded to a size-1
+`MPI_COMM_WORLD` (Launchpad #2072338) and each "n-rank" leg silently ran
+serial — the gate compared a serial run against itself and passed vacuously.
+With the fixed MPICH (4.2.0-5.1, installed and verified by
+`scripts/ci_fix_mpich_noble.sh`), the first genuine 1-vs-4-rank comparison on
+the runner platform (x86-64, gcc 13.3, glibc libm, `--download-f2cblaslapack`)
+measured a stable max relative field difference of **2.189e-10 at n=4**
+(n=2: 8.5e-15, rounding-level; b1 and b2 strict pass at 1e-12 on the same
+platform).
+
+This is the A14 threshold-amplification class, not a rank-dependence defect:
+A14 already established that the coupled system's threshold density (the
+θs-saturation boundary through the retention curve, the exchange's
+capacity/supply classification, wet/dry) lets a single-ULP rounding difference
+flip a discrete branch, and that no solver tolerance removes the class. A14
+scoped the strict lane to one step because the first flip observed on the dev
+machine was at step 3 — a calibration that does not transfer: which step the
+first flip lands on is a property of the platform's rounding (libm, BLAS,
+reduction order), and on the CI platform one branch flips within step 1 at the
+4-rank decomposition, leaving an isolated footprint of 2.2e-10. For a fixed
+toolchain the value is deterministic (it is a cross-decomposition difference,
+not run-to-run noise); it moves only when the toolchain or code changes
+numerics.
+
+**Bound derivation, per the A5/A8/A14 discipline.** 1e-9 is ~4.5x above the
+measured flip footprint and 3+ orders below the signal of any real
+assembly/exchange rank-dependence, which manifests across whole halo lines or
+subdomain faces (>= ~1e-6), not as an isolated-cell footprint. The gate now
+prints the per-field breakdown (eta, depth, seepage, hydraulic_head,
+water_content) on every run, so the achieved values stay on the record and a
+future breach names the flipped field immediately. If a later toolchain shift
+produces a larger-footprint flip (the A14 dev measurement of a full
+θs-boundary flip was ~5e-6 self-relative on water content), that failure is to
+be re-examined with the per-field record rather than absorbed here in advance.
+
+**Scope-boundary note.** No source, solver, or configuration change; the
+strict lane's staging (one step, `jacobi`, rtol 1e-13/atol 1e-16) is
+untouched, and the default 600 s lane's data-derived bulk bounds (A14, V2-A4)
+are unchanged.

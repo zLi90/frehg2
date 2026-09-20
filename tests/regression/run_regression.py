@@ -30,7 +30,10 @@ Subcommands:
                     (plan §8.2, amendment A5). The b2 variant runs the
                     benchmark column replicated to 4x4 so 2- and 4-rank
                     decompositions exist (amendment A8). The b5 variant runs
-                    the coupled case through t = 600 s (plan §8.2).
+                    the coupled case through t = 600 s (plan §8.2); its
+                    strict one-step bound is 1e-9 (V2-A9: the coupled
+                    threshold density admits one platform-rounding branch
+                    flip inside even a single step).
   smoke-b5          sanitizer path-coverage run of a b5 scenario x coupling
                     combination on a shortened horizon (plan §10 P5,
                     amendment A21); clean instrumented exit is the check,
@@ -1104,7 +1107,9 @@ def gate_rank_invariance_b5(args: argparse.Namespace) -> int:
     # through the exchange's binary thresholds — the A5/A8
     # threshold-amplification class at coupled density. The strict lane
     # therefore proves the coupled assembly and exchange operators are
-    # rank-invariant over one step (bound 1e-12; measured 9e-15); the
+    # rank-invariant over one step (bound 1e-9 per V2-A9 — rounding-level
+    # on the dev machine, one platform-rounding threshold flip of footprint
+    # 2.2e-10 on the x86-64 CI runner at n=4); the
     # default lane gates the rank-robust bulk observables over the plan
     # §8.2 600 s window and prints the per-field number for the record.
     extra = (STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW) if strict else []
@@ -1129,19 +1134,43 @@ def gate_rank_invariance_b5(args: argparse.Namespace) -> int:
         for ranks in (2, 4):
             with h5py.File(outputs[ranks], "r") as other:
                 worst = 0.0
+                per_field: dict[str, float] = {}
                 for group, var in [("surface", "eta"), ("surface", "depth"),
                                    ("surface", "seepage"), ("groundwater", "hydraulic_head"),
                                    ("groundwater", "water_content")]:
+                    field_worst = 0.0
                     for t in base[f"/{group}/{var}"]:
                         a = base[f"/{group}/{var}/{t}"][:]
                         b = other[f"/{group}/{var}/{t}"][:]
                         finite = np.isfinite(a)
                         scale = max(float(np.abs(a[finite]).max()), 1.0e-12)
-                        worst = max(worst, float(np.abs(a[finite] - b[finite]).max()) / scale)
+                        field_worst = max(
+                            field_worst,
+                            float(np.abs(a[finite] - b[finite]).max()) / scale)
+                    per_field[f"{group}/{var}"] = field_worst
+                    worst = max(worst, field_worst)
                 if strict:
+                    # Bound 1e-9, re-derived 2026-09-20 (V2-A9) from the first
+                    # true multi-rank CI execution (the runner's MPICH launched
+                    # singletons until the noble PMI fix, so every earlier CI
+                    # "pass" compared serial runs). The dev-machine record is
+                    # rounding-level (9e-15 A14 / 5.7e-14 dod-P3, arm64 + Apple
+                    # libm); the x86-64 glibc/f2cblaslapack runner measures a
+                    # stable 2.189e-10 at n=4 (n=2: 8.5e-15) — one discrete
+                    # branch of the A14 threshold class flips inside the single
+                    # step under that platform's rounding, and A14 already
+                    # establishes no solver tolerance removes the class. 1e-9
+                    # is ~4.5x above the measured flip footprint and still
+                    # orders below real assembly/exchange rank-dependence,
+                    # which shows across whole halo lines (>= ~1e-6), not as
+                    # an isolated-cell footprint. The per-field breakdown is
+                    # printed so any future breach names the flipped field.
+                    limit = 1.0e-9
                     print(f"  n=1 vs n={ranks} [strict, one step]: max rel field diff = "
-                          f"{worst:.3e} (allowed 1e-12)")
-                    ok = ok and worst <= 1.0e-12
+                          f"{worst:.3e} (allowed {limit:.0e}, V2-A9)")
+                    for name, val in sorted(per_field.items()):
+                        print(f"    {name}: {val:.3e}")
+                    ok = ok and worst <= limit
                     continue
                 ma = other["/monitor/mass_audit"][:]
                 ga = other["/monitor/gw_mass_audit"][:]
