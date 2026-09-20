@@ -76,6 +76,28 @@ jobs:
       - name: Compile and link Frehg2 + tests with nvcc (p4; zero warnings, no execution)
         run: |
           export CMAKE_PREFIX_PATH="$DEPS_PREFIX"
+          # PETSc's CUDA build links the toolkit's STUB libraries by design
+          # (config/packages/cuda.py stubliblist: "enables compiles on non-GPU
+          # nodes", deliberately without an rpath to the stubs dir), so
+          # libpetsc.so carries DT_NEEDED entries for driver sonames — here
+          # libnvidia-ml.so.1 (NVML; nvml.h/nvmlInit_v2 are hard requirements
+          # of PETSc's cuda package, not optional). On a GPU machine the
+          # driver provides that soname; this runner has no driver, and the
+          # toolkit ships only the UNVERSIONED stub libnvidia-ml.so — so ld,
+          # chasing libpetsc.so's dependencies at executable link time, finds
+          # no file named libnvidia-ml.so.1 and errors on the nvml symbols.
+          # Alias the stubs under their sonames in a scratch dir and expose it
+          # via LD_LIBRARY_PATH, which is in ld's documented search order for
+          # needed-by-shared-library resolution. Link-time only: nothing in
+          # this lane executes, no rpath to the stubs lands in any binary, and
+          # the toolkit tree itself is not modified.
+          CUDA_STUBS=/usr/local/cuda-12.6/lib64/stubs
+          test -e "$CUDA_STUBS/libnvidia-ml.so" || { echo "FATAL: nvml stub missing at $CUDA_STUBS" >&2; exit 1; }
+          SONAME_DIR="$RUNNER_TEMP/cuda-stub-sonames"
+          mkdir -p "$SONAME_DIR"
+          ln -sf "$CUDA_STUBS/libnvidia-ml.so" "$SONAME_DIR/libnvidia-ml.so.1"
+          ln -sf "$CUDA_STUBS/libcuda.so" "$SONAME_DIR/libcuda.so.1"
+          export LD_LIBRARY_PATH="$SONAME_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           cmake -B build-cuda \
             -DCMAKE_CXX_COMPILER="$DEPS_PREFIX/bin/nvcc_wrapper" \
             -DFREHG_WERROR=ON \
