@@ -177,6 +177,8 @@ class SurfaceSolver {
   /// \return the resolved BoomerAMG coarsening/smoother (empty unless the
   /// preconditioner is "amg") for the run record (v2 plan §2B.2 B2).
   const std::string& solverAmgCoarsenType() const { return system_->amgCoarsenType(); }
+  /// \return the resolved BoomerAMG relaxation (smoother) choice; same
+  /// contract and run-record destination as solverAmgCoarsenType().
   const std::string& solverAmgRelaxType() const { return system_->amgRelaxType(); }
 
   /// This rank's volume-budget contributions of the current step.
@@ -196,10 +198,18 @@ class SurfaceSolver {
   // guide, "Extended Lambda Restrictions"). Treat as private.
  public:
   // Initialization helpers (SurfaceSolver.cpp).
+  /// Read/stage the bathymetry (cell bottom elevations, with the
+  /// load-bearing elevation offset) from the config inputs.
   void readBathymetry(const FrehgConfig& config);
+  /// Stage the rain coverage mask (whole domain or rain polygon) on device.
   void buildRainMask(const FrehgConfig& config);
+  /// Set the initial eta/velocity state from the config and derive the
+  /// consistent depth and face geometry.
   void applyInitialConditions(const FrehgConfig& config);
+  /// Stage the surface boundary-condition member-cell lists on device.
   void buildBoundaryLists(const BoundarySet& boundaries);
+  /// Build the fixed 5-point COO sparsity pattern handed to
+  /// MatSetValuesCOO on every assembly.
   void buildCooPattern();
 
   // Free-surface phase pieces (FreeSurface.cpp).
@@ -210,22 +220,42 @@ class SurfaceSolver {
   /// step — a rounding-class seed the coupled trajectory chaos amplifies
   /// (found at P3; b1's rain exclusion on its tide row masked it).
   void enforceSurfBc(bool prescribeStage);
+  /// Free-surface RHS from the current eta and explicit momentum fluxes.
   void assembleRhs();
+  /// Free-surface matrix coefficients from the face flow areas and the
+  /// semi-implicit gravity/drag factors.
   void assembleCoefficients();
+  /// Apply the outflow-condition row corrections before the solve.
   void applyOutflowCorrections();
+  /// Fill the PETSc system and run the eta solve.
   void fillAndSolve();
+  /// Accumulate the boundary face volumes of the step (inflow, outflow,
+  /// prescribed stages) into the mass audit.
   void accumulateBoundaryFluxes();
 
   // Momentum pieces (Momentum.cpp).
+  /// Explicit momentum operators Fu/Fv (advection, diffusion, sources)
+  /// for the semi-implicit step.
   void momentumSource();
+  /// Update the drag coefficients from the current depths (Manning form,
+  /// with the drag limit-cycle clamp found at P3).
   void updateDragCoef();
+  /// Back-substitute the face velocities from the solved eta gradient.
   void updateVelocityField();
+  /// Cell-centered uy/vx interpolation (the four-point stencil with one
+  /// diagonal neighbor; needs the corner halos).
   void interpolateVelocity();
 
   // Wet/dry and geometry pieces (WetDry.cpp).
+  /// Depth from eta and bathymetry with the wet/dry classification
+  /// against the thin-layer threshold.
   void updateDepth();
+  /// Face wet areas and geometry factors from the updated depths.
   void updateGeometry();
+  /// Track the per-face CFL numbers of the step (feeds maxCfl()).
   void cflLimiter();
+  /// Clamp non-physical face velocities (the legacy limiter set; clamped
+  /// volume is audited).
   void applyVelocityLimiters();
   /// How enforceVeloBc applies the stage-boundary velocity correction.
   enum class VeloBcApply {
@@ -243,9 +273,13 @@ class SurfaceSolver {
   /// Velocity ghost fills, prescribed faces, and the mass-consistent
   /// stage-boundary face velocities per \p apply.
   void enforceVeloBc(VeloBcApply apply);
+  /// Fill the four velocity halo corners the uy/vx interpolation stencil
+  /// reads (pairs with HaloExchanger::exchangeWithCorners()).
   void fillVelocityGhostCorners();
 
   // Sources (SurfaceSources.cpp).
+  /// Apply the rain and evaporation depth sources of the step (their
+  /// volumes feed the mass audit).
   void evapRain();
 
  private:

@@ -79,26 +79,39 @@ class HaloExchanger {
   // (KOKKOS_LAMBDA) inside private member functions (CUDA C++ programming
   // guide, "Extended Lambda Restrictions"). Treat as private.
  public:
+  /// One registered field: the unique name and the (shallow-copied) view it
+  /// aliases — exactly one of \c f2 / \c f3 is active per \c is3d.
   struct Entry {
-    std::string name;
-    bool is3d = false;
-    Field2<real_t> f2;
-    Field3<real_t> f3;
+    std::string name;         ///< registration key (unique across add() calls)
+    bool is3d = false;        ///< selects which view below is the live one
+    Field2<real_t> f2;        ///< the 2D view (when !is3d)
+    Field3<real_t> f3;        ///< the 3D view (when is3d)
   };
 
-  /// Per-direction packing geometry. Directions: 0 = west, 1 = east,
-  /// 2 = south, 3 = north.
-  static constexpr int kWest = 0;
-  static constexpr int kEast = 1;
-  static constexpr int kSouth = 2;
-  static constexpr int kNorth = 3;
+  // Per-direction packing geometry indices.
+  static constexpr int kWest = 0;   ///< pack/unpack direction: west neighbor
+  static constexpr int kEast = 1;   ///< pack/unpack direction: east neighbor
+  static constexpr int kSouth = 2;  ///< pack/unpack direction: south neighbor
+  static constexpr int kNorth = 3;  ///< pack/unpack direction: north neighbor
 
+  /// Scalar count one field contributes to a message in one direction
+  /// (rows x planes; \p wideRows includes the i-halo columns of the
+  /// corner-filling south/north phase).
   std::size_t planeCount(const Entry& entry, int direction, bool wideRows) const;
+  /// Size the per-neighbor device buffers (and host mirrors when staging)
+  /// to the registered fields' worst-case coalesced message.
   void ensureCapacity();
+  /// Pack one field's boundary cells for \p direction into the send buffer
+  /// starting at scalar \p offset.
   void packEntry(const Entry& entry, int direction, std::size_t offset, bool wideRows);
+  /// Unpack one field's received halo cells for \p direction from the recv
+  /// buffer starting at scalar \p offset.
   void unpackEntry(const Entry& entry, int direction, std::size_t offset, bool wideRows);
+  /// Run the Irecv/pack/fence/Isend/wait/unpack protocol for the selected
+  /// entries over directions [\p dirBegin, \p dirEnd).
   void exchangeSelected(const std::vector<std::size_t>& selected, int dirBegin, int dirEnd,
                         bool wideRows);
+  /// Map registration names to entry indices; an unknown name is fatal.
   std::vector<std::size_t> resolveNames(const std::vector<std::string>& names) const;
 
  private:

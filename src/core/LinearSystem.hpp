@@ -35,6 +35,8 @@ namespace frehg {
 /// asserts the compile fails.
 template <bool PetscHasKokkos, class Mem>
 struct PetscBackendConsistent {
+  /// True when the (PETSc capability, MemSpace) pair is allowed; the
+  /// static_assert below names the rebuild that fixes a violation.
   static constexpr bool value = PetscHasKokkos || std::is_same_v<Mem, Kokkos::HostSpace>;
   static_assert(PetscHasKokkos || std::is_same_v<Mem, Kokkos::HostSpace>,
                 "Frehg2: a device MemSpace requires a Kokkos-enabled PETSc "
@@ -166,6 +168,8 @@ class LinearSystem {
   /// unless preconditioner == "amg"; "petsc-default" when nothing set it).
   /// Feeds the run record's solver section (v2 plan §2B.2 B2).
   const std::string& amgCoarsenType() const { return amgCoarsenType_; }
+  /// \return the resolved BoomerAMG relaxation (smoother) choice; same
+  /// contract and run-record destination as amgCoarsenType().
   const std::string& amgRelaxType() const { return amgRelaxType_; }
 
  private:

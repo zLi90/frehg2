@@ -199,25 +199,41 @@ class ScalarSolver {
   // guide, "Extended Lambda Restrictions"). Treat as private.
  public:
   // ScalarSolver.cpp
+  /// Stage the scalar boundary lists (scalar_value conditions and their
+  /// paired discharge inflows) on device.
   void buildBoundaryLists(const BoundarySet& boundaries);
+  /// Set the initial surface/subsurface concentrations from the config.
   void applyInitialConditions(const FrehgConfig& config);
+  /// Snapshot the restart-carried state (the s_fu_old/s_fv_old flow rates
+  /// and the top-cell Dzz; see the file comment).
   void snapshotEndOfStep();
 
   // SurfaceTransport.cpp (scalar_shallowwater, scalar.c:25-298)
+  /// Advance the surface scalar over \p dt: superbee advection on the
+  /// pre-correction flow rates, rain/evap dilution, boundary sources.
   void stepSurface(real_t t, real_t dt, real_t rain, real_t evap);
 
   // SubsurfaceTransport.cpp (scalar_groundwater, scalar.c:303-498)
+  /// Advance the subsurface scalar over \p dt on the completed gw step's
+  /// face fluxes and moisture basis (\p dtgLast).
   void stepSubsurface(real_t t, real_t dt, real_t dtgLast);
+  /// Re-impose the subsurface scalar boundary values at time \p t.
   void enforceSubsurfaceBc(real_t t);
 
   // Dispersion.cpp (dispersion_tensor, scalar.c:958-1003)
+  /// Rebuild the dispersion tensor from the current Darcy fluxes and
+  /// face conductivities.
   void updateDispersionTensor();
 
   // Far-neighbor staging for the superbee stencils at rank interfaces
   // (the legacy guards fall back to upwind at *rank-local* edges, which is
   // rank-count-dependent; Frehg2 stages shifted copies so decomposed runs
   // reproduce the serial golden stencil — docs/theory/transport.md).
+  /// Stage the shifted far-neighbor copies the surface superbee stencil
+  /// reads across rank interfaces.
   void stageSurfaceFarNeighbors();
+  /// Stage the shifted far-neighbor copies the subsurface superbee stencil
+  /// reads across rank interfaces.
   void stageSubsurfaceFarNeighbors();
 
  private:

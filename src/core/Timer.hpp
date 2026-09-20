@@ -22,9 +22,9 @@ namespace frehg {
 struct TimerSection {
   std::string path;    ///< full nested path, e.g. "simulation/swe/velocity"
   long count = 0;      ///< completed cycles (max over ranks)
-  double minSeconds = 0.0;
-  double meanSeconds = 0.0;
-  double maxSeconds = 0.0;
+  double minSeconds = 0.0;   ///< smallest per-rank accumulated wall time [s]
+  double meanSeconds = 0.0;  ///< mean per-rank accumulated wall time [s]
+  double maxSeconds = 0.0;   ///< largest per-rank accumulated wall time [s]
 };
 
 /// Static registry of named, nesting wall-clock timers.

@@ -36,6 +36,13 @@ jobs:
       - name: Fix noble's broken MPICH (PMIx/hydra mismatch)
         run: scripts/ci_fix_mpich_noble.sh
 
+      # The docs gate (doxygen with FAIL_ON_WARNINGS) is validated against
+      # doxygen 1.17; the image's apt doxygen is 1.9.8, whose parser reports
+      # member-group-documented members as undocumented. Pin the validated
+      # version (sha256-checked release binary).
+      - name: Pin doxygen to the validated version
+        run: scripts/ci_pin_doxygen.sh
+
       - name: Cache built dependencies
         uses: actions/cache@v4
         with:

@@ -261,6 +261,8 @@ class RichardsSolver {
   /// \return the resolved BoomerAMG coarsening/smoother (empty unless the
   /// preconditioner is "amg") for the run record (v2 plan §2B.2 B2).
   const std::string& solverAmgCoarsenType() const { return system_->amgCoarsenType(); }
+  /// \return the resolved BoomerAMG relaxation (smoother) choice; same
+  /// contract and run-record destination as solverAmgCoarsenType().
   const std::string& solverAmgRelaxType() const { return system_->amgRelaxType(); }
 
   /// This rank's volume-budget contributions of the last step.
@@ -276,35 +278,64 @@ class RichardsSolver {
   // guide, "Extended Lambda Restrictions"). Treat as private.
  public:
   // Initialization (RichardsSolver.cpp).
+  /// Stage the per-cell soil parameters (van Genuchten curves, Ks, Ss,
+  /// porosity) from the config onto device views.
   void stageSoil(const FrehgConfig& config);
+  /// Set the initial head state from the config (file or derived) and the
+  /// consistent θ through the retention curve.
   void applyInitialConditions(const FrehgConfig& config);
+  /// Stage the subsurface boundary-condition member-cell lists on device.
   void buildBoundaryLists(const BoundarySet& boundaries, const FrehgConfig& config);
+  /// Build the fixed 7-point COO sparsity pattern handed to
+  /// MatSetValuesCOO on every assembly.
   void buildCooPattern();
+  /// Evaluate the time-dependent boundary values at simulation time \p t.
   void updateBoundaryValues(real_t t);
 
   // Predictor (Predictor.cpp).
+  /// Face hydraulic conductivities from the current heads (the legacy
+  /// upstream-weighted K faces).
   void computeFaceConductivity();
+  /// Assemble the Richards matrix and RHS for the head solve at step \p dtg.
   void assembleSystem(real_t dtg);
+  /// Fill the PETSc system and run the predictor head solve.
   void fillAndSolve();
+  /// Re-impose prescribed-head boundary values on the solved heads.
   void enforceHeadBc();
 
-  // Baroclinic activation (Baroclinic.cpp): r_rho/r_visc from the attached
-  // scalar and their face means (legacy update_rhovisc + baroclinic_face).
+  /// Baroclinic activation (Baroclinic.cpp): r_rho/r_visc from the attached
+  /// scalar and their face means (legacy update_rhovisc + baroclinic_face).
   void updateBaroclinicFaces();
 
   // Corrector (Corrector.cpp).
+  /// Classify each coupled top face for step \p dtg (the capacity/supply
+  /// split the exchange budget is booked against; plan §10 P3).
   void classifyCoupledTop(real_t dtg);
+  /// Darcy face fluxes of the completed solve (fills the volumetric
+  /// qx/qy/qz views the transport module reads).
   void computeFluxes(real_t dtg);
+  /// Book the coupled-top exchange terms of the step (cplExchanged, bounce,
+  /// vent, seepage-accumulator evaporation) over \p dtg.
   void applyCoupledTopBookkeeping(real_t dtg);
+  /// Corrector θ update from the face-flux divergence over \p dtg.
   void updateWaterContent(real_t dtg);
+  /// Re-impose prescribed-moisture boundary values on the updated θ.
   void enforceMoistureBc();
+  /// Final θ clamp to [θr, θs] with the created/removed volume audited
+  /// into vloss.
   void finalizeWaterContent();
+  /// Accumulate the boundary Darcy volumes of the step into the audit
+  /// over \p dtg.
   void accumulateBoundaryFlux(real_t dtg);
 
   // Post-allocation (Reallocate.cpp).
+  /// Redistribute over/under-saturated cells along the legacy send walk
+  /// (amendment A6 semantics; overflow drops audited in reallocDropped).
   void reallocateWaterContent();
 
   // Adaptive stepping (AdaptiveStep.cpp).
+  /// Adapt the next dtg from the step's moisture change and the unsaturated
+  /// Courant cap (the legacy adaptive controller; feeds nextDt()).
   void adaptTimeStep(real_t dtg);
 
  private:

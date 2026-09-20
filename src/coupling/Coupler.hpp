@@ -116,8 +116,17 @@ class Coupler {
   // (KOKKOS_LAMBDA) inside private member functions (CUDA C++ programming
   // guide, "Extended Lambda Restrictions"). Treat as private.
  public:
+  /// Seed the coupling window's per-cell infiltration budget from the
+  /// post-solve depth and clear the deposit tally (amendment A9: the limit
+  /// debits this budget across subcycles; every coupled deposit credits it).
   void beginWindow();
+  /// Apply the window's exchanged volume to the surface over \p dt (legacy
+  /// subsurface_source): infiltration in full with the eta >= bottom clamp,
+  /// seepage in full onto wet cells, withheld into the accumulator over dry
+  /// cells until min_depth is exceeded; refreshes the qss rate observable.
   void applySeepage(real_t dt);
+  /// Device-reduce the per-cell deposit and held-seepage tallies into this
+  /// rank's CouplingAudit.
   void reduceAudit();
 
  private:
