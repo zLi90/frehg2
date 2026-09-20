@@ -125,7 +125,10 @@ tar xf petsc.tar.gz
 cd "petsc-${PETSC_VERSION}"
 PETSC_EXTRA=()
 if [ "${FREHG_CUDA:-0}" = "1" ]; then
-  PETSC_EXTRA+=(--with-cuda=1)
+  # Compile-only lane runs on a GPU-less machine: PETSc cannot query a device
+  # for the arch, so pin it to the same target the Kokkos build above uses
+  # (FREHG_CUDA_ARCH, default AMPERE80 -> sm_80).
+  PETSC_EXTRA+=(--with-cuda=1 "--with-cuda-arch=$(echo "${FREHG_CUDA_ARCH:-AMPERE80}" | tr -dc '0-9')")
 fi
 # PETSc MUST be built against the SAME MPI that the frehg binary links (CMake
 # FindMPI -> system MPICH), that parallel HDF5 uses (libhdf5-mpich), and that

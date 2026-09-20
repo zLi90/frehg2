@@ -31,7 +31,16 @@ namespace {
 // ---------------------------------------------------------------------------
 
 struct Spec;
-using KeyedSpecs = std::vector<std::pair<std::string, Spec>>;
+struct KeyedSpec;
+/// The named children of a map node. A named aggregate element rather than
+/// std::pair<std::string, Spec>: instantiating pair's constructor traits
+/// re-enters the enclosing, still-incomplete Spec through the children
+/// member — ill-formed, and diagnosed as an incomplete-type error by
+/// clang 18 against libstdc++ 14's completeness asserts (older libstdc++
+/// and libc++ accepted the cycle by instantiation-order luck). std::vector
+/// itself supports an incomplete element type, so vector<KeyedSpec> is
+/// conformant with KeyedSpec defined once Spec is complete, below.
+using KeyedSpecs = std::vector<KeyedSpec>;
 
 /// One node of the declarative schema tree.
 struct Spec {
@@ -55,6 +64,12 @@ struct Spec {
   // Sequence behavior.
   std::vector<Spec> element;            ///< single-element vector = element spec
   std::size_t minItems = 0;
+};
+
+/// One map child: the YAML key and the spec of the node beneath it.
+struct KeyedSpec {
+  std::string key;   ///< the YAML map key
+  Spec spec;         ///< the schema node the key maps to
 };
 
 Spec boolean(bool required = false) {
@@ -416,7 +431,7 @@ void checkMap(const YAML::Node& node, const Spec& spec, const std::string& where
   for (const auto& item : node) {
     const std::string key = item.first.as<std::string>();
     const bool known = std::any_of(spec.children.begin(), spec.children.end(),
-                                   [&key](const auto& kv) { return kv.first == key; });
+                                   [&key](const auto& kv) { return kv.key == key; });
     if (!known) {
       const std::string suggestion = nearestKey(key, spec.children);
       std::string message = "unknown key '" + key + "'";
