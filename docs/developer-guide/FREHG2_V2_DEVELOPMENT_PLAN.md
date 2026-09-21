@@ -77,6 +77,16 @@ These are cheap and de-risk everything after:
   Recalibration follows the risk register's pre-committed remedy — hard gates on
   iteration counts and correctness, soft (warn) on timing until real runners
   calibrate — and requires its own amendment with the measured numbers.
+  **Closed 2026-09-21 (V2-A12).** The owner supplied the step-11 log: **one**
+  test failed, not four — `scaling.s1.strong` at 68.8 % against its 70 % bound,
+  with s2, s3, s4, p2, p3 and the g2 bjacobi record all passing. The remedy the
+  risk register pre-committed (soften timing to a warning) was **not** applied,
+  because on this evidence it would have produced a gate incapable of failing —
+  the V2-A9/A10/A11 pattern a third time. s1 is instead asserted at the largest
+  rank count the machine can host with a *performance* core to spare — which on
+  both the runner (4 vCPU) and the M3 (4 P-cores of 8 logical) means n=2, so
+  the 70 %@4 bound is now recorded everywhere and asserted nowhere until ≥ 5-core
+  hardware exists. See V2-A12, which states that limitation explicitly.
 - **Q0.3** Resolve the swere-superslab broken run flagged 2026-08-30 (15 m³ rain
   injected, zero ponding/outflow/seepage) — either a config defect or a genuine
   mass-balance bug; must be diagnosed before Q4 touches the rain/evap source path.
@@ -873,6 +883,18 @@ assertions:
   end-to-end efficiency ≥ 70 % at 4 ranks (the v1 P5 bar, now permanent), plus the
   g2 iteration-flatness assertion. Reported per module so a regression names its
   culprit.
+  **Amended by V2-A12:** the bound is now per-rank-count
+  (`S1_EFFICIENCY_BOUNDS = {2: 0.80, 4: 0.70, 8: 0.55}`) and is asserted at the
+  largest rank count that leaves a **performance** core free for the OS and
+  MPI's progress engine. Both machines this project has — the 4-vCPU CI runner
+  and the M3 (4 P-cores + 4 E-cores) — therefore gate at n=2; the n=4 and n=8
+  points are still run and recorded, but as *calibration data* rather than
+  gates, because at ranks ≥ performance cores the efficiency deficit is core
+  contention and not something this repository can regress. **Consequence,
+  stated plainly: the 70 %@4 bound is currently enforced on no available
+  hardware.** It applies automatically on the first machine with ≥ 5
+  performance cores. A machine too small to host any gated point **fails**
+  rather than passing silently.
 - **s2 — MPI weak scaling (nightly):** g3 as specified in §2.3, permanent.
 - **s3 — OpenMP thread scaling (nightly):** same case, 1 rank × {1, 2, 4, 8}
   threads on a grid sized ≥ 1e6 cells/rank (the v1 finding that benchmark-scale
@@ -1563,3 +1585,195 @@ across the plan, the theory page, the three READMEs and the case files now read
 uniquely greppable (`Asx(j, 0) = Asx(j, 1)` and `Asy(0, i) = Asy(1, i)`) —
 prefer the text over the line number, which drifts whenever the comment block
 above them is edited, as it did twice while writing this amendment.
+
+### V2-A12 (Q0, 2026-09-21) — §1.1 Q0.2 / §7.2 s1: the nightly's step-11 failure was one saturated measurement, not four miscalibrated thresholds
+
+**What changed.** §7.2's s1 bound becomes per-rank-count and is asserted at the
+largest rank count that leaves a spare **performance** core, rather than
+unconditionally at n=4. The Q0.2 open residual closes.
+`scripts/run_scaling.py` gains `usable_cores()` (performance-core aware),
+`CORE_RESERVE`, `S1_EFFICIENCY_BOUNDS`, and a rewritten `gate_strong()`; the s1
+JSON artifact gains `machine`, `processor`, `usable_cores`, `core_reserve` and a
+per-result `gated` flag. No other s-gate, no physics, no discretization, no
+solver, no tolerance elsewhere.
+
+**What the log actually said.** The owner supplied the step-11 output from the
+`regression-nightly` run on `ubuntu-24.04`. Of the seven `scaling_nightly`
+tests, **one** failed:
+
+| test | result |
+|---|---|
+| `scaling.g2.record.bjacobi` | Passed (498.66 s) |
+| **`scaling.s1.strong`** | **Failed (1181.21 s)** |
+| `scaling.s2.weak.amg` | Passed (618.43 s) |
+| `scaling.s3.threads` | Passed (1263.09 s) |
+| `scaling.s4.hybrid` | Passed (725.80 s) |
+| `scaling.p2.solver_threads` | Passed (1332.97 s) |
+| `scaling.p3.hybrid` | Passed (823.18 s) |
+
+This **corrects the prediction recorded in V2-A10 and restated when this work
+was scoped**, which was that the timing-hard gates s1/s2/s3/p2 would all fail
+on a 4-vCPU runner. s3 gates kernel efficiency ≥ 60 % at 4 threads and p2
+requires the 4-thread solve to beat the 1-thread solve; both passed. Only s1
+failed, at **68.8 % against its 70 % bound** — a 1.2-percentage-point miss.
+
+**Why the pre-committed remedy was not applied.** The risk register (§10)
+pre-committed "hard gates only on iteration counts and correctness, soft
+(warn) on timing until real runners calibrate." Applied literally to s1 that
+would have removed its only assertion, leaving a nightly test that measures
+for 20 minutes and cannot fail. That is precisely the failure mode of V2-A9
+(rank-invariance passing vacuously), V2-A10 (the same on the s-axis) and
+V2-A11 (`outflow` authored but never exercised) — **three amendments in a row
+about gates that did not gate.** Making it four in the name of following the
+register would be the wrong kind of discipline. The register's intent was to
+avoid chasing thermal noise on the fanless M3; it did not anticipate a runner
+that is *more* repeatable than the dev machine but has too few cores.
+
+**Why this is saturation, not noise, and not a regression.** Three independent
+lines of evidence, all from the supplied log:
+
+1. **Repeatability.** The three n=1 repeats measured 208.52 / 208.43 /
+   208.79 s — a 0.17 % spread, with n=2 and n=4 equally tight. The A23
+   measurement lottery this threshold was written to survive is not present on
+   this runner. A tolerance widened to absorb noise would be absorbing
+   something that is not there.
+2. **n=2 is essentially ideal.** 97.9 % efficiency at 2 ranks. Communication
+   and load imbalance, the things strong scaling is meant to expose, are not
+   the cause of the n=4 deficit; whatever happens, happens between 2 and 4.
+3. **Both components fall off together.** Decomposing the per-module timers:
+
+   | component | n=1 | n=2 | n=4 | eff@2 | eff@4 |
+   |---|---|---|---|---|---|
+   | gw kernels (`groundwater` − `solve`) | 175.88 | 88.53 | 61.31 | 99.3 % | 71.7 % |
+   | gw solve | 31.72 | 17.48 | 14.06 | 90.7 % | 56.4 % |
+
+   The kernels are local stencil work whose *total* halo time is 0.14 s out of
+   75.71 s; they cannot lose 28 % to communication. An AMG coarse-grid or
+   surface-to-volume explanation would hit the solve and spare the kernels, and
+   would degrade gradually rather than cliff between 2 and 4. Both components
+   being near-ideal at n=2 and falling together at n=4 is the signature of
+   running out of cores: the runner has 4 vCPUs, so at n=4 the ranks occupy
+   every one with nothing left for the OS, the runner agent, or MPI's progress
+   engine. At n=2 there are two spare cores.
+
+**The dev machine failed too, and that changed the bounds.** Running the
+recalibrated gate on the M3 before committing produced **65.9 % at n=4** —
+below the 70 % bound, on the machine whose Q1 measurement of 78.9 % was the
+bound's own justification. Two facts already in `performance.md` explain it and
+were missed when this amendment was first drafted:
+
+- **The M3 has 4 performance cores, not 8.** `hw.ncpu` = 8 but
+  `hw.perflevel0.logicalcpu` = 4; the other four are E-cores at roughly half
+  the throughput, and the Q1 record notes that "eight ranks always land on
+  E-cores here". So n=4 on this machine is *also* a headroom-free measurement,
+  in exactly the sense this amendment defines, and the reserve rule was reading
+  the wrong core count.
+- **78.9 % was the lucky end of a lottery, not a calibration datum.** The Q1
+  artifact records the three n=4 attempts as 38.89 / 48.69 / 54.76 s — a 41 %
+  spread — and min-over-repeats selected the fastest. The same section records
+  4-rank bursts spanning 38.1–62.0 s across the measurement day and *sustained*
+  multi-minute 4-core loads capping at **51 %**, while 2-rank efficiency "held
+  at 87–100 % throughout". Today's 65.9 % sits inside that documented band. It
+  is not a regression; it is what this chip does on a 20-minute gate run.
+
+So `usable_cores()` counts **performance** cores (`hw.perflevel0.logicalcpu` on
+Darwin, `sched_getaffinity` elsewhere). The M3 then reports 4 and gates at n=2,
+like the runner.
+
+**Direct corroboration.** The recalibrated gate was then run twice on this M3,
+back to back, on identical work:
+
+| | run 1 | run 2 | swing |
+|---|---|---|---|
+| n=2 efficiency | 95.2 % | 93.3 % | **1.9 pt** |
+| n=4 efficiency | 65.9 % | 76.8 % | **10.9 pt** |
+
+The n=4 point moved eleven percentage points — straddling the 70 % bound in both
+directions — while n=2 moved under two. A bound asserted at n=4 on this hardware
+would be a coin flip; the same bound at n=2 is a measurement. This is the
+A23 lottery reproduced under controlled conditions, and it is why the
+gated-vs-recorded split is drawn at performance-core headroom rather than at a
+fixed rank count.
+
+**The derivation of the new bounds.** `{2: 0.80, 4: 0.70, 8: 0.55}`. Each bound
+is set below the **worst** headroom-free measurement on record, not the best —
+the opposite of how the 70 % anchor was originally justified, and the specific
+mistake this amendment is correcting.
+
+- **80 %@2** — the headroom-free n=2 evidence is 97.9 % (runner) and 87–100 %
+  (M3, across the Q1 measurement day). The binding number is the **87 % floor**,
+  not the 97.9 % ceiling. A 90 % bound would have flaked against the M3's own
+  documented range; 80 % clears the floor by 7 points while still failing on any
+  regression that costs more than ~7 points at 2 ranks.
+- **70 %@4** — unchanged in value, but see below: it is now **recorded and not
+  asserted anywhere**, because no machine in hand can measure it.
+- **55 %@8** — unchanged and still **provisional**: never measured on a machine
+  with ≥ 9 cores; the 4-rank bound scaled by a halving-of-headroom heuristic.
+
+**Honest limitation: the 70 %@4 bound is currently unenforced on all available
+hardware.** The CI runner has 4 vCPUs; the M3 has 4 performance cores. Both
+gate at n=2 and both record n=4 as a calibration datum. This is stated here
+rather than glossed, because an unenforced bound that *looks* enforced is the
+same defect as a vacuous gate — the reader of §7.2 must not believe 70 %@4 is
+being checked nightly when it is not. The gate itself says so at runtime ("the
+4-rank, 8-rank bound(s) are NOT asserted on this machine"), and `gate_strong()`
+applies the bound automatically the first time it runs somewhere with ≥ 5
+performance cores. Closing this needs hardware, not code: the same ≥ 9-core run
+that calibrates 55 %@8 will enforce 70 %@4 on the way past.
+
+`CORE_RESERVE = 1` is the rule that decides gated-vs-recorded. `usable_cores()`
+reads `hw.perflevel0.logicalcpu` on Darwin, otherwise `os.sched_getaffinity`,
+which honours cgroup limits and cpusets — so it reports 4 on the runner and the
+*allocation* rather than the node under Slurm — with `FREHG_SCALING_CORES` as
+an override for heterogeneous or externally-fenced machines it cannot read.
+
+**The gate still fails when it should.** Verified against seven scenarios:
+
+| machine / data | gated point | verdict |
+|---|---|---|
+| 4 cores, runner's measured numbers | n=2 @ 97.9 % vs 80 % | PASS, exit 0; n=4 reported SATURATED |
+| 4 P-cores, M3's numbers measured today | n=2 @ 95.2 % vs 80 % | PASS, exit 0; n=4 reported SATURATED |
+| 4 P-cores, M3 at its worst documented n=2 (87 %) | n=2 @ 87 % vs 80 % | PASS, exit 0 — bound does not flake |
+| 4 P-cores, n=2 regressed to 72 % | n=2 @ 72 % vs 80 % | **FAIL**, exit 1 |
+| 8 cores, fed the runner's n=4 number | n=4 @ 68.8 % vs 70 % | **FAIL**, exit 1 |
+| 16 cores, healthy | n=4 @ 82 % vs 70 % | PASS, exit 0 |
+| 2 cores | none fits | **FAIL**, exit 1, names the remedy |
+| `--ranks 1` only | nothing with a bound | **FAIL**, exit 1, names the cause |
+
+Rows 4 and 5 are the §6.3 negative tests. Row 5 is the load-bearing one: the
+runner's own failing n=4 number, fed through a machine with the headroom to
+measure it, still fails — so the n=4 bound is dormant for want of hardware, not
+deleted. Row 4 proves the *surviving* assertion is live: a real 2-rank
+regression fails on the hardware we actually have. Row 3 is the anti-flake
+check the M3's documented 87 % floor demands. Row 7 closes the vacuity hole — a
+machine too small to evaluate s1 fails loudly rather than passing silently,
+which is the one outcome this amendment exists to prevent.
+
+**Verification.** `gate_strong()` exercised over the eight scenarios above;
+`usable_cores()` returns 4 on this M3 (was 8 before the P-core fix, against
+`hw.ncpu` = 8 / `hw.perflevel0.logicalcpu` = 4); the harness driven end-to-end
+at `--ranks 1 2 --repeats 1 --t-end 200` (91.2 % at n=2, PASS, artifact written
+with the new provenance fields); the real `ctest -R scaling.s1.strong` run to
+completion on the M3 **twice** — 644 s, **PASS**, gating n=2 at 93.3 % against
+the 80 % bound and recording n=4 at 76.8 % ungated (the run-1/run-2 table
+above); `python3 -m py_compile`, `python3 -m mkdocs build
+--strict` and `scripts/check_forbidden.sh` clean; `ctest -R
+"r2_timer_coverage|g2.iters"` passed.
+
+**Scope-boundary note.** s1's assertion strength is reduced *only* for rank
+counts at or above the machine's performance-core count. On any allocation with
+≥ 5 performance cores the gate is unchanged at n=4 and stronger elsewhere (n=2
+and n=8 were previously unasserted at any rank count; they now carry bounds,
+and the n=2 one is asserted on every machine this project has). What is lost is
+the *appearance* of an n=4 assertion on two machines that were never measuring
+it honestly. No other gate's criteria, no physics, no discretization, no solver
+configuration, and no tolerance file is touched.
+
+**Residual, carried forward.** Two items. (1) The recalibrated s1 has not yet
+been observed green on the runner — that needs a `workflow_dispatch` of
+`regression-nightly` against the official remote, which under the §1.2 policy is
+the standing CI exception and must be back-ported before Q4 closes. (2) The n=4
+and n=8 bounds remain unasserted for want of a machine with ≥ 5 (resp. ≥ 9)
+performance cores and stable clocks; `docs/developer-guide/scaling-history.md`
+(§7.3) is where those land when one appears. Until then s1's live assertion is
+the 2-rank bound alone, and §7.2 says so.

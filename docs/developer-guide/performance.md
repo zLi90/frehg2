@@ -64,6 +64,14 @@ are reported, not gated. On a bindable, uniform-core, actively cooled
 node the script's exit-code gate applies unchanged and none of these
 caveats exist.
 
+Read the 79.0 % above as *the best of three attempts spanning 41 %*, not as
+a calibration of this machine at 4 ranks — v2's s1 recalibration (V2-A12)
+re-ran the same gate here twice back-to-back and measured n=4 at 65.9 % and
+76.8 % (an 11-point swing straddling the 70 % bound) while n=2 moved only
+95.2 → 93.3 %. With just 4 performance cores the M3 cannot measure n=4 with
+headroom at all. The 2-rank column is the stable one, and is what s1 now
+asserts on this hardware.
+
 ## The b5 grid itself (informational)
 
 `--case b5`: rain/sync, fixed dt = 2 s, 3600 steps (t = 7200 s), single
@@ -128,7 +136,17 @@ Standing gates (v2 plan §2.3, §7.2): g1 re-runs the b-gates under each
 preconditioner (solver choice must not change physics); g2 asserts mean CG
 iterations at 8 ranks stay within 1.10× the 1-rank count under AMG on the
 A23 synthetic case; s1 keeps the 70 %-at-4-ranks strong-scaling criterion
-permanent; s2 (weak), s3 (OpenMP kernel-time), and s4 (hybrid placement)
+permanent, asserted at the largest rank count that leaves a *performance*
+core free for the OS and MPI progress (V2-A12:
+`{2: 80 %, 4: 70 %, 8: 55 %}`). Both machines in hand gate at n=2 — the CI
+runner has 4 vCPUs and this M3 has 4 performance cores of its 8 logical —
+and record n=4/n=8 as calibration data rather than gating saturated
+measurements. **The 70 %@4 and 55 %@8 bounds are therefore currently
+asserted on no available hardware**; they apply automatically on the first
+machine with ≥ 5 (resp. ≥ 9) performance cores. The 80 %@2 bound clears the
+87 % floor of the sustained 2-rank range recorded above, so it does not
+flake against this chip's own thermal spread. s2 (weak), s3 (OpenMP
+kernel-time), and s4 (hybrid placement)
 run nightly via `scripts/run_scaling.py --gate ...`. The per-module
 perf-regression gate compares timers against
 `docs/developer-guide/perf-baseline.json` (fail > +25 %).

@@ -4,8 +4,13 @@
 Modes, selected by --gate:
 
   strong        (s1) strong scaling over --ranks on a fixed grid; PASS iff
-                parallel efficiency >= 70 % at 4 ranks (plan §10 P5 / A23,
-                permanent per v2 plan §7.2 s1).
+                parallel efficiency clears S1_EFFICIENCY_BOUNDS at the
+                largest rank count that leaves a *performance* core free
+                (plan §10 P5 / A23, permanent per v2 plan §7.2 s1, as
+                amended by V2-A12).
+                Rank counts that saturate the machine are recorded, not
+                gated; a machine too small to host any gated point FAILS
+                rather than passing silently.
   weak          (s2/g3) weak scaling: the synthetic grid's nx is scaled by
                 the rank count so per-rank work is constant (Kollet-2010
                 protocol). PASS iff solver-time efficiency >= the hard
@@ -305,13 +310,121 @@ def print_module_table(results: list[dict], key: str = "ranks") -> None:
         print(row)
 
 
+# s1 strong-scaling efficiency bounds, per rank count (v2 plan §7.2 s1, as
+# amended by V2-A12). Each bound sits below the WORST headroom-free
+# measurement on record, not the best, because the fanless M3's spread is the
+# thing this harness exists to survive (A23):
+#   n=2: measured 97.9 % on a 4-vCPU runner and 87-100 % on the M3 across the
+#        Q1 measurement day (dod-Q1 / performance.md) -> bound 80 %, which
+#        clears the 87 % floor with room rather than flaking against it.
+#   n=4: the original A23/P5 70 % anchor, KEPT UNCHANGED but currently
+#        unenforceable -- see the note below.
+#   n=8: never measured on a machine with headroom; the 4-rank bound scaled
+#        by the usual halving-of-headroom heuristic. PROVISIONAL.
+#
+# NOTE (V2-A12, honest limitation): no machine available to this project can
+# evaluate the n=4 bound. The M3 has only 4 performance cores and is
+# thermally unstable under sustained load (Q1 recorded 4-rank bursts from
+# 38.1 to 62.0 s on identical work, and sustained 4-core loads capping at
+# 51 %); the CI runner has 4 vCPUs total. So 70 %@4 is recorded everywhere
+# and asserted nowhere until a >= 5-core machine with stable clocks runs it.
+# That gap is real and is tracked in the plan, not papered over here.
+S1_EFFICIENCY_BOUNDS = {2: 0.80, 4: 0.70, 8: 0.55}
+
+# Cores to leave unoccupied when deciding whether a rank count is measurable.
+# One core absorbs the OS, the CI runner agent and MPI's progress engine; at
+# ranks == cores those land on top of the compute ranks and the measurement
+# stops being a scaling measurement (V2-A12).
+CORE_RESERVE = 1
+
+
+def usable_cores() -> int:
+    """Cores this process may run on *at full speed*.
+
+    Performance cores only. On Apple Silicon hw.ncpu counts E-cores, which
+    run roughly half as fast, so a rank landing on one looks like a scaling
+    loss that no code change can fix -- the Q1 record notes that 8 ranks
+    "always land on E-cores here". hw.perflevel0.logicalcpu is the P-core
+    count (4 on this M3).
+
+    On Linux sched_getaffinity honours cgroup CPU limits and cpusets, so it
+    reports 4 on a 4-vCPU GitHub runner and the allocation (not the node)
+    under Slurm. FREHG_SCALING_CORES overrides both, for heterogeneous or
+    externally-fenced machines this cannot read.
+    """
+    override = os.environ.get("FREHG_SCALING_CORES")
+    if override:
+        return max(1, int(override))
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+                                 capture_output=True, text=True, check=True)
+            return max(1, int(out.stdout.strip()))
+        except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+            pass
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
+
+
 def gate_strong(results: list[dict]) -> int:
-    four = next((res for res in results if res["ranks"] == 4), None)
-    if four is None:
-        return 0
-    ok = four["efficiency"] >= 0.70
-    print(f"s1 strong gate (4-rank efficiency >= 70 %): {four['efficiency']:.1%} — "
+    """s1: assert the efficiency bound at the largest *measurable* rank count.
+
+    A rank count is measurable when it leaves CORE_RESERVE cores free. Larger
+    rank counts are still run and recorded — they are the numbers a future
+    recalibration needs — but they are reported as saturated rather than
+    gated, because on a machine with ranks >= cores the efficiency deficit is
+    core contention and not anything this repository can regress.
+
+    The gate never degrades to "no assertion": if the machine cannot host any
+    rank count >= 2 with headroom it FAILS and says so. A silent pass here
+    would be the V2-A9 vacuous-gate failure mode over again.
+    """
+    cores = usable_cores()
+    measured = {res["ranks"]: res for res in results if res["ranks"] in S1_EFFICIENCY_BOUNDS}
+    gateable = [n for n in sorted(measured) if n + CORE_RESERVE <= cores]
+
+    print(f"\ns1 strong gate — {cores} usable performance core(s), "
+          f"reserving {CORE_RESERVE} for OS/MPI progress")
+    for ranks in sorted(measured):
+        eff = measured[ranks]["efficiency"]
+        bound = S1_EFFICIENCY_BOUNDS[ranks]
+        measured[ranks]["gated"] = bool(gateable) and ranks == gateable[-1]
+        if ranks + CORE_RESERVE > cores:
+            print(f"  n={ranks}: {eff:.1%} (bound {bound:.0%}) — SATURATED on this "
+                  f"machine ({ranks} ranks on {cores} performance cores), "
+                  f"recorded not gated")
+        elif measured[ranks]["gated"]:
+            print(f"  n={ranks}: {eff:.1%} (bound {bound:.0%}) — GATED")
+        else:
+            print(f"  n={ranks}: {eff:.1%} (bound {bound:.0%}) — measurable, "
+                  f"superseded by n={gateable[-1]}")
+
+    if not gateable:
+        if not measured:
+            print(f"s1 strong gate: FAIL — no rank count with a bound "
+                  f"({sorted(S1_EFFICIENCY_BOUNDS)}) was measured; --ranks gave "
+                  f"{sorted(res['ranks'] for res in results)}.")
+        else:
+            print(f"s1 strong gate: FAIL — no rank count >= 2 fits in {cores} "
+                  f"performance core(s) with {CORE_RESERVE} reserved, so the gate "
+                  f"cannot be evaluated here. Run it on >= {2 + CORE_RESERVE} cores, "
+                  f"or set FREHG_SCALING_CORES if the core count is fenced by other "
+                  f"means.")
+        return 1
+
+    ranks = gateable[-1]
+    eff = measured[ranks]["efficiency"]
+    bound = S1_EFFICIENCY_BOUNDS[ranks]
+    ok = eff >= bound
+    print(f"s1 strong gate ({ranks}-rank efficiency >= {bound:.0%}): {eff:.1%} — "
           f"{'PASS' if ok else 'FAIL'}")
+    if ranks < max(S1_EFFICIENCY_BOUNDS):
+        ungated = [n for n in sorted(S1_EFFICIENCY_BOUNDS) if n > ranks]
+        print(f"  note: the {', '.join(f'{n}-rank' for n in ungated)} bound(s) are "
+              f"NOT asserted on this machine — it has too few performance cores to "
+              f"measure them with headroom. Values recorded above at those rank "
+              f"counts are calibration data, not gate results.")
     return 0 if ok else 1
 
 
@@ -788,13 +901,21 @@ def main() -> int:
             "solver": args.solver,
             "repeats": args.repeats,
             "selection": "minimum simulation time over repeats",
+            # V2-A12: the machine's core count decides which points are gated
+            # rather than merely recorded, so a recalibration can tell a
+            # headroom-free measurement from a saturated one years later.
+            "machine": platform.platform(),
+            "processor": platform.processor(),
+            "usable_cores": usable_cores(),
+            "core_reserve": CORE_RESERVE,
             "results": [
                 {k: res[k] for k in
                  ("ranks", "threads", "wall_s", "solver")} |
                 {"simulation_s": res["timers"]["simulation"]["max"],
                  "timers_max_s": {p: t["max"] for p, t in res["timers"].items()},
                  **({"efficiency": round(res["efficiency"], 4)}
-                    if "efficiency" in res else {})}
+                    if "efficiency" in res else {}),
+                 **({"gated": res["gated"]} if "gated" in res else {})}
                 for res in results
             ],
         }
