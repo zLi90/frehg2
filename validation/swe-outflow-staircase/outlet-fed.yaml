@@ -1,0 +1,79 @@
+# Transmissive-outflow face-area defect (V2-A11): OUTLET-FED variant.
+#
+# 10 x 1 strip, dx = dy = 1 m, bed descending west-ward in 0.1 m steps
+# (bed_i = 0.1*i, so the same 10 % staircase as swere-superslab's DEM).
+# A steady 1e-4 m3/s is injected into the WEST-most cell (i = 0) -- the same
+# cell that carries the `outflow` BC -- standing in for the return flow that
+# the superslab's groundwater delivers to its outlet.
+#
+# Manning normal depth for q = 1e-4 m2/s, n = 0.0036, S = 0.1:
+#     h = (n q / sqrt(S))^(3/5) = 2.71e-4 m
+# so the correct answer is a 0.27 mm film in cell 0 and an outlet discharge
+# of 1e-4 m3/s from the first step.
+#
+# Today the boundary face borrows the interior face area, gauged over the
+# 0.1 m sill at bed[1], so the cell must fill to the sill before it passes
+# anything:
+#     stock            depth[0] = 0.1046 m (385x normal), 0.1092 m3 trapped,
+#                      outflow EXACTLY ZERO until t = 1001.5 s of 4000 s
+#     WetDry.cpp:144   depth[0] = 2.039e-4 m (0.75x normal),
+#     deleted          0.3997 m3 of the 0.400 m3 injected leaves
+#
+# This is the 500x-failing negative test the plan §8.2 x-gate cell needs.
+simulation:
+  id: outflow-staircase-outlet
+  title: Transmissive outflow BC on a descending staircase, fed at the outlet
+
+domain:
+  nx: 10
+  ny: 1
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.5
+  t_end: 4000.0
+  output_interval: 250
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.0036}
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-06
+  wetting_face_depth: 1.0e-06
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: -10.0}
+
+boundary_conditions:
+  - name: inflow
+    region: {polygon: [[-0.1, -0.1], [0.95, -0.1], [0.95, 1.1], [-0.1, 1.1]]}
+    target: surface
+    kind: discharge
+    value: {constant: 1.0e-04}     # total m3/s (dy = 1 m -> unit q 1e-4 m2/s)
+  - name: outlet
+    region: {polygon: [[-0.1, -0.1], [0.95, -0.1], [0.95, 1.1], [-0.1, 1.1]]}
+    target: surface
+    kind: outflow
+
+output:
+  filename: out/outlet-fed.h5
+  variables:
+    surface: [eta, depth]
+  monitors:
+    - {name: outlet, i: 0, j: 0, variables: [depth, eta]}
+  checkpoint: {interval: 0}

@@ -41,6 +41,29 @@ analytical (kinematic) solution (`ReferenceData/analytical.csv`).
 frehg2's surface solver is **semi-implicit** versus SERGHEI's explicit scheme.
 This is subcritical overland flow, so the scheme difference is minor.
 
+## Known limitation: the outlet cannot drain below the upslope sill (V2-A11)
+
+This case's `kind: outflow` BC is on the **south (-y)** edge, which runs
+through the defective west/south ghost rule diagnosed under plan item Q0.3
+(`src/swe/WetDry.cpp:158`, `Asy(0, i) = Asy(1, i)`): the boundary face is
+given the *interior* face area, gauged over the higher of the two beds rather
+than the outlet cell's own bed. The transmissive volume goes as that area
+squared, so the outlet is throttled until it fills to the upslope sill.
+
+Measured in `out/output.h5`: the channel cells `i = 80, 81` at `j = 0` hold
+**0.192 m** of water against a 0.2 m bed step along y, at a throttle of
+`(0.0121 / 0.192)^2 ~ 1/252`. That pool is 38.4 of the 39.7 m³ standing in
+row `j = 0` at `t_end`, and it is what the long recession tail in the `volume`
+column is draining (7719 -> 1151 -> 690 -> 451 -> 318 -> 253 m³).
+
+The recession limb of the hydrograph and any late-time storage number from
+this case are therefore affected. The rising limb and peak, which are set
+upslope, are not. See plan amendment **V2-A11** for the derivation, the
+verified two-line fix, and why it is deferred behind an x-gate;
+[`../swere-superslab/README.md`](../swere-superslab/README.md) has the full
+write-up, and [`../swe-outflow-staircase/`](../swe-outflow-staircase/README.md)
+is the minimal reproducer with an analytic answer.
+
 ## Cost (OMP_NUM_THREADS=1, ~1e-7 s per cell-step)
 
 16200 cells × (35000 / 2.0) = 2.8e8 cell-steps ≈ **~30 s — LOCAL**.

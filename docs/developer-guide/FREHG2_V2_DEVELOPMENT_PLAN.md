@@ -56,12 +56,38 @@ These are cheap and de-risk everything after:
   `value > bed` classification) — its `src/` is byte-identical to the local uncommitted
   tree. So Q0.1 is: commit the same changes in the dev repo (with the b-gate suite
   green), then assert `diff -r` cleanliness of `src/` between the two repos.
+  **Done 2026-09-21** at the first pass (commit `ee82c27`), then *re-opened and
+  re-closed*: between 2026-09-12 and 2026-09-21 the Q0.2 bring-up work landed
+  only in the official repo, so the drift ran official → dev — the reverse of
+  the release flow §1.2 assumes. Reconciled by back-porting that work into the
+  dev repo as five reviewed commits, with whole-tree equality asserted in both
+  directions. See **V2-A10**, which also states the sync policy that governs
+  from here.
 - **Q0.2** Push the dev repo to a real remote and watch the five authored CI workflows
   execute once; fix runner-side issues (the golden-dependent steps need a documented
   `FREHG_LEGACY_BENCHMARKS` provisioning step or a vendored golden subset).
+  **Substantially done 2026-09-21**, via the official repo's remote: at
+  `b1ca0d0` the `build`, `openmp`, `sanitize` and `cuda-compile` workflows are
+  green on GitHub runners, and `regression-nightly` passes steps 1–10 —
+  including the full regression label and the four nightly b5 envelope runs, so
+  **b1–b6 are green on real runners**. The runner-side fixes are catalogued in
+  V2-A10. **Open residual:** the nightly's step 11 (the §7.2 s1–s4 scalability
+  gates plus the g2 bjacobi record) fails; the s-gate thresholds were calibrated
+  on the fanless M3 (A23 lottery) and have never run on a 4-vCPU runner.
+  Recalibration follows the risk register's pre-committed remedy — hard gates on
+  iteration counts and correctness, soft (warn) on timing until real runners
+  calibrate — and requires its own amendment with the measured numbers.
 - **Q0.3** Resolve the swere-superslab broken run flagged 2026-08-30 (15 m³ rain
   injected, zero ponding/outflow/seepage) — either a config defect or a genuine
   mass-balance bug; must be diagnosed before Q4 touches the rain/evap source path.
+  **Done 2026-09-21 (V2-A11).** Neither: the flag was read from a file the run
+  was still writing, and the completed run closes its surface budget to
+  −5.4e-4 m³ on 15.02 m³ of rain. **The rain source path Q4 depends on is exact**
+  (`1.3889e-5 × 100 × 10818 = 15.025 m³`, matching the recorded value), so Q4 is
+  unblocked. The diagnosis did surface a genuine, previously unexercised defect —
+  the west/south transmissive-outflow face area (`WetDry.cpp:144,158`) — which is
+  recorded as a known limitation with a verified fix deferred behind the §1.3
+  x-gate on BC kind × side. See V2-A11.
 - **Q0.4** Workspace cleanup — **done 2026-09-09** (recorded here so it isn't
   re-litigated). Deleted as verified-duplicated or regenerable: all five `frehg2/build*`
   trees; `serghei-validation/` and `frehg2-validation/` (pre-merge snapshots — every
@@ -83,10 +109,22 @@ These are cheap and de-risk everything after:
 
 Development happens in `~/frehg2-upgrade/frehg2` (the full-history dev repo:
 P0–P5 commits, tags, goldens machinery beside it). The **official public repo** is
-`~/Codes/frehg2` → `github.com/zLi90/frehg2` (squashed history). Release flow: a
-version is cut in the dev repo (tag), then synced to the official repo as a single
-release commit; after every sync, `diff -r --exclude=.git` between the two trees
-must be empty. The other `~/Codes/frehg2-*` directories (dev/legacy/testing) are
+`~/Codes/frehg2` → `github.com/zLi90/frehg2` (squashed history).
+
+**Sync direction is one-way: dev → official, at phase boundaries only**
+(owner decision 2026-09-21, V2-A10). All development — including CI and
+build-system work — is committed in the dev repo first. A completed phase
+(or a cut version) is then copied to the official repo as a single commit;
+after every sync, `diff -r --exclude=.git` between the two trees must be
+empty in **both** directions. Work committed directly to the official repo
+is off-policy: it inverts the flow, and the resulting drift has to be
+back-ported by hand and re-reviewed, which is what Q0.1 cost the second
+time. The one standing exception is CI iteration that can only be
+exercised by pushing to the remote — those commits may land in the
+official repo first, but must be back-ported to the dev repo before the
+phase closes, never left to accumulate.
+
+The other `~/Codes/frehg2-*` directories (dev/legacy/testing) are
 outside this plan's scope and are not written to.
 
 ### 1.3 Gate taxonomy: three axes (new in v2)
@@ -912,6 +950,19 @@ for v1 features**, which will surface today's silent gaps (the y+-only subsurfac
 scalar injection is the known example: v2 either generalizes it to all sides or makes
 the schema reject the other sides — silent no-op is the one forbidden outcome).
 
+**Two matrix cells are already known to be defective, ahead of the backfill
+(V2-A11): `Outflow × W` and `Outflow × S`.** Both are wrong today — the ghost
+rule at `WetDry.cpp:144,158` gives the boundary face the interior face area, so
+a transmissive outlet on those edges cannot drain below its upslope neighbour's
+bed. Every `kind: outflow` gate in the repo sits on the east edge, which is why
+b1–b6 are green. These two cells are the x-gate work's **first** deliverable,
+not part of the general backfill, and they come with a ready-made gate case:
+`validation/swe-outflow-staircase/` (added by V2-A11) is a 10×1
+descending-staircase pair with an analytic answer (Manning normal depth
+2.715e-4 m) and a `check.py` that returns 5 failures against today's code and
+passes once lines 144/158 are deleted. Authoring it satisfies §6.1's gate-first
+rule and its §6.3 negative-test self-check simultaneously.
+
 ### 8.3 Feature-interaction coverage (release tier)
 
 A tracked table (`docs/developer-guide/feature-coverage.md`): rows = features
@@ -1289,3 +1340,226 @@ be re-examined with the per-field record rather than absorbed here in advance.
 strict lane's staging (one step, `jacobi`, rtol 1e-13/atol 1e-16) is
 untouched, and the default 600 s lane's data-derived bulk bounds (A14, V2-A4)
 are unchanged.
+
+
+### V2-A10 (Q0, 2026-09-21) — §1.1 Q0.1/Q0.2 and §1.2: repo drift reversed, sync policy made explicit
+
+**What changed.** §1.2 described a release flow (dev → official at version
+cuts) but never said what to do with work that originates on the official
+side. Between 2026-09-12 and 2026-09-21 the entire Q0.2 CI bring-up — 19
+commits — landed *only* in `~/Codes/frehg2`, so the official tree became
+strictly ahead of the dev repo on 27 tracked files. §1.2 is amended with an
+explicit one-way policy (dev → official, at phase boundaries only, verified
+by a bidirectional `diff -r`), and Q0.1/Q0.2 are marked done with their
+residuals named.
+
+**Why the drift happened, and why it matters.** Q0.2 requires watching the
+workflows execute on real runners, and only the official repo has a remote —
+so iterating there was the path of least resistance. The cost is that the
+dev repo, which holds the full P0–P5 history and the `v1.0.0` tag and is the
+repo every later phase builds on, silently stopped being the source of
+truth. Nothing was lost, but reconciling required reading 27 file diffs and
+reconstructing the intent behind commit messages of the form "fixed more
+bugs". The amended policy keeps the remote-iteration escape hatch (it is
+genuinely necessary) and bounds it: back-port before the phase closes.
+
+**What the back-port contained.** Five reviewed commits in the dev repo,
+separating concerns the official history had interleaved:
+
+1. **A real portability defect** (`src/core/ConfigSchema.cpp`). The schema
+   tree held `std::vector<std::pair<std::string, Spec>>` declared while
+   `Spec` was incomplete; instantiating pair's constructor traits re-enters
+   the incomplete `Spec` through the `children` member. Ill-formed, and
+   diagnosed by clang 18 against libstdc++ 14's completeness asserts — older
+   libstdc++ and libc++ accepted it by instantiation-order luck, which is why
+   no dev-machine build ever saw it. Replaced by a named `KeyedSpec`
+   aggregate defined once `Spec` is complete (`std::vector` does support an
+   incomplete element type). This is the only behavioral code in the
+   back-port, and it is a portability fix with no numerical effect.
+2. **Doxygen coverage** across seven headers, for the `FAIL_ON_WARNINGS`
+   docs gate under doxygen 1.17. Comments only.
+3. **V2-A9**, the b5 strict bound re-derivation, recorded separately so the
+   amendment has its own traceable commit.
+4. **The CI runner hardening** (workflows, `ci_fix_mpich_noble.sh`,
+   `ci_pin_doxygen.sh`, `lsan.supp`, the LTO scrub in `CMakeLists.txt`, the
+   `FREHG_EXPECT_RANKS` assertions, UCX/thread pins, loader paths).
+5. **The Q3 close-out docs** that had been sitting uncommitted in the dev
+   worktree, plus untracking the superseded PNG/EPS figures.
+
+**The finding that justifies the whole exercise.** The single most valuable
+thing the real-runner bring-up produced is the discovery that noble's apt
+MPICH degraded every rank to a size-1 `MPI_COMM_WORLD`, so the CI
+rank-invariance lanes had been *passing vacuously* — comparing serial runs
+against themselves (see V2-A9 for the consequence). The `FREHG_EXPECT_RANKS`
+assertion added to both MPI drivers converts that failure mode from a
+silent pass into a named failure, permanently. This is the §1.3 x-gate
+lesson recurring on the s-axis: a gate that cannot distinguish "passed" from
+"never ran" is not a gate.
+
+**Verification.** After the back-port, both repos' tracked file sets are
+identical (341 files) with byte-identical content, and the dev worktree is
+clean. The dev repo rebuilds clean and its per-PR tiers are green — unit
+15/15 (including the p5 WILL_FAIL negative), mpi 6/6 with a genuine 4-rank
+world confirmed, per-PR regression label green, `check_forbidden.sh` clean,
+`mkdocs build --strict` exit 0.
+
+**Scope-boundary note.** No physics, discretization, solver or gate-criteria
+change. The one behavioral edit is the `KeyedSpec` refactor, which changes
+member access only; b1–b6 are unaffected and were re-run to confirm it.
+
+### V2-A11 (Q0, 2026-09-21) — §1.1 Q0.3: the superslab flag was a partial file; the diagnosis found a west/south outflow defect instead
+
+**What changed.** Q0.3 is marked done. The 2026-08-30 flag ("15 m³ rain
+injected, zero ponding/outflow/seepage") is withdrawn as an artifact of
+reading a file mid-write, and the rain source path — the specific thing Q0.3
+gates for Q4 — is verified exact, so **Q4 is unblocked**. The investigation
+surfaced a different, real defect in the transmissive-outflow boundary on the
+west and south edges; that is recorded here as a known limitation with a
+verified fix, added to the §1.3 x-gate matrix, and explicitly *not* landed.
+
+**Why the flag was wrong.** `validation/swere-superslab/makeplot.py` tests for
+a degenerate run as "ponding and outflow ~0 while rain > 0". That is also what
+the first hours of a dry-start run look like. The plot was made at
+2026-08-30 while the 12 h job was still writing; the file completed the next
+morning. The completed run is 86 401 `mass_audit` rows to `t_end = 43 200 s`,
+its embedded config is byte-identical to the yaml on disk, and its surface
+budget closes:
+
+```
+volume 0.1071 = rain 15.0247 - evap 0 - outflow 1.4311 + bc_inflow 0
+              + seepage (-13.4870) + clamped 5.6e-11     (residual -5.4e-4 m3)
+```
+
+`clamped` is 5.6e-11 m³ — the legacy below-bed clamp mints nothing here. The
+groundwater identity closes to rounding as well.
+
+**The Q4 precondition, discharged.** `rain.dat` applies 1.388889e-05 m/s over
+100 m² from t = 0 to 10 800 s, ramping to zero at 10 836 s:
+`1.3889e-5 × 100 × 10818 = 15.025 m³`, against a recorded `rain` of 15.02465
+m³. The rain/evaporation source path carries no defect, which is what Q0.3
+existed to establish.
+
+**Two diagnostics hardened** (`makeplot.py`), so this cannot recur:
+1. `t_end` is now parsed from the config embedded in the output and checked
+   *before* the degenerate test; a short file reports INCOMPLETE and says
+   explicitly not to read it as a physics defect. A diagnostic that cannot
+   distinguish "broken" from "not finished yet" is not a diagnostic — the same
+   lesson as V2-A10's vacuous rank-invariance lanes, on a third axis.
+2. The residual formula was wrong: it subtracted the *signed* seepage and
+   omitted `bc_inflow` and `clamped`, so it reported ~27 m³ unaccounted on a
+   run that closes to 5e-4 m³. It now uses the closure identity from
+   `docs/agents/postprocessing.md` verbatim.
+
+**The defect the diagnosis found.** At `t_end` the superslab holds 0.107 m³ of
+surface water, all of it a **0.1034 m pool in the outlet cell** `i = 0`, level
+at eta ≈ 0.1035 — pinned just below the upslope neighbour's bed at 0.1 m. The
+four inter-comparison codes hold ~2e-4 m³ there, which is the Manning normal
+depth `h = (n q / √S)^(3/5) = 2.7e-4 m` for that outlet.
+
+Cause: `src/swe/WetDry.cpp:144`, the west-edge ghost rule
+(`Asx(j, 0) = Asx(j, 1)`, ported from `shallowwater.c:1067-1099`), and its
+south-edge twin at line 158 (`Asy(0, i) = Asy(1, i)`). These hand the boundary
+face the **interior**
+face area. The interior area is gauged over the higher of two beds — the
+0.1 m sill — not over the outlet cell's own bed. The transmissive BC's
+released volume (`FreeSurface.cpp:311`) goes as that area squared, so the face
+is throttled by `(deptx(j,1) / depth(j,0))² ≈ 1/812` and the outlet cannot
+discharge until it has filled to the sill.
+
+**Derivation and confirmation.** The predicted discharge
+`q = g·dt·Asx(j,0)²·drop / Vs(j,0)` with `Asx(j,0) = deptx(j,1)` reproduces the
+measured hydrograph at ratio **1.0000–1.0003 across 11 snapshot times**
+(25 200–43 200 s), `Dx = 1` exactly. A 10×1 reproducer on the same 0.1 m
+staircase isolates it, and shows the error is *two-sided* — the same wrong
+area, with the sign set by which way the cell is fed. It is now in-tree as
+`validation/swe-outflow-staircase/` (two yaml cases, a shared DEM, a
+self-verifying `check.py`, and a README):
+
+| reproducer | pool | outflow (0.400 m³ in) | `clamped` | depth[0] |
+| --- | --- | --- | --- | --- |
+| fed upslope, stock | 0.004195 m³ | 0.5530 — **38.3 % over-drain** | **0.1573 m³ minted** | 6.78e-5 m |
+| fed upslope, fixed | 0.004685 m³ | 0.3953 | 6.0e-16 | 5.56e-4 m |
+| fed at outlet, stock | **0.10923 m³** | 0.2907, and **identically 0 until t = 1001.5 s of 4000 s** | 7.0e-15 | **0.1046 m** = 385× normal |
+| fed at outlet, fixed | 0.000204 m³ | 0.3997 | 0 | **2.039e-4 m** = 0.75× normal |
+
+Fed from upslope the borrowed area is too *large*, over-draining until eta is
+driven below the bed and the clamp manufactures 39 % of the injected volume
+back; fed from below it is too *small* and the face is shut. One wrong area,
+not two bugs. The fixed lanes settle on the analytic normal depth and pass
+99.9 % of what was injected.
+
+**The override destroys a correct value.** The face kernel
+(`WetDry.cpp:49-57`) already computes `deptx(j,0)` over the halo column. The
+bed ghost is a zero-gradient copy (`SurfaceSolver.cpp:214`) and the outflow
+ghost sets `eta(j,0) = eta(j,1) − drop`, so that computed value is *exactly*
+the outlet cell's own depth. **Deleting lines 144 and 158 is the whole fix**;
+nothing needs to be added.
+
+**Why no gate caught it, and why that is the real finding.** Of the five cases
+in the repo using `kind: outflow`, three are on the east edge — including
+**b4-govindaraju, the only gate that exercises the BC at all**. East/north
+faces use `Sxp`/`Syp`, the cell's own coefficient, and are correct. So
+`outflow` × {west, south} has been *authored but never exercised* since P1.
+§8.3 forbids exactly that in a release, and §1.3's BC kind × side × coupling
+matrix is the instrument that was specified to catch it — it does not exist
+yet. This is the third recurrence of one failure mode (V2-A9: gates that
+passed vacuously; V2-A10: the same on the s-axis), and it is the strongest
+evidence so far that the x-gate matrix should be built before Q7 rather than
+at it.
+
+Independently confirmed on the south edge: `swe-vcatchment` holds a 0.192 m
+pool against its 0.2 m channel bed step, 38.4 of the 39.7 m³ left in row
+`j = 0`, with no groundwater involved. Its recession limb and late-time
+storage are affected; rising limb and peak are not.
+
+**Scope-boundary note — what was deliberately NOT done.** The two-line fix is
+verified but **not landed**. Q0.3's stated deliverable is a diagnosis, and
+changing the west/south ghost rule alters every west/south boundary flux,
+which §6.1 puts behind a gate authored and merged failing first. The correct
+home is the §1.3 x-gate matrix (BC kind × side), where this is now a named
+required cell. Deferring is also cheap: the per-PR regression tier was run
+**32/32 green with the override removed** — b1, b2, b3, b4, b5-restart,
+b6-restart, the rank-invariance lanes, the g1 amg/gamg lanes and the p1
+backend lanes all pass unchanged, because none of them exercise a west/south
+transmissive face. No golden moves.
+
+**What remains open, for whoever picks this up:**
+1. Author the x-gate cell for `outflow` × {west, south}, merged failing. The
+   reproducer is already in-tree at `validation/swe-outflow-staircase/` with an
+   analytic answer (normal depth 2.715e-4 m) and a negative test built in:
+   `check.py` returns 5 failures against the stock build and passes cleanly
+   with the two lines deleted (both directions verified 2026-09-21). Promoting
+   it to a gate is a CMake/ctest registration plus a tolerance review, not new
+   physics work.
+2. Land the deletion of `WetDry.cpp:144,158`, then re-run the **nightly** tier,
+   which this amendment did not run: the four b5 envelope runs and b6. b5 uses
+   `kind: eta`, not `outflow`, so its exposure is only the `difY` viscous term
+   (`Momentum.cpp:82`) and transport (`SurfaceTransport.cpp:179,232`), which
+   read `Asx(j,0)`/`Asy(0,i)` directly. Those must be measured, not assumed.
+3. Regenerate `swe-vcatchment` and `swere-superslab` outputs afterwards.
+   **Both feed manuscript figures** — the late-time storage and recession
+   numbers currently in those outputs carry the defect.
+
+**Verification.** Working tree clean apart from the documented edits; the
+diagnostic build was reverted and rebuilt before the tree was committed.
+Per-PR regression tier 32/32 with the override removed (evidence for the scope
+bound above) and the tree as committed is the unmodified source — `WetDry.cpp`
+carries a comment block and no code change. The new reproducer was exercised
+both ways against a real build on 2026-09-21: stock → 5 failures, two lines
+deleted and rebuilt → clean pass, source restored and rebuilt → 5 failures
+again, so the gate is bidirectional and not merely red. Both yaml files pass
+`--validate`; `mkdocs build --strict` is clean and the new `configuration.md`
+admonition was confirmed to render as `class="admonition warning"` rather than
+as literal text. The superslab PDFs are byte-identical before and after the
+`makeplot.py` change, confirming only console text moved.
+
+One correction made while staging the reproducer: the defect line numbers were
+cited throughout as `WetDry.cpp:124,138`, which were the pre-comment-block
+positions, and the south-edge line was off by one regardless (`Asy(0, i)` is
+the fourth assignment in that lambda, not the fifth). Verified by grep and by
+deleting the lines and observing the intended behaviour change; all citations
+across the plan, the theory page, the three READMEs and the case files now read
+**144** and **158**, the positions as of this commit. Both assignments are
+uniquely greppable (`Asx(j, 0) = Asx(j, 1)` and `Asy(0, i) = Asy(1, i)`) —
+prefer the text over the line number, which drifts whenever the comment block
+above them is edited, as it did twice while writing this amendment.

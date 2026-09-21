@@ -1,0 +1,79 @@
+# Transmissive-outflow face-area defect (V2-A11): UPSLOPE-FED variant.
+#
+# 10 x 1 strip, dx = dy = 1 m, bed descending west-ward in 0.1 m steps
+# (bed_i = 0.1*i, so the same 10 % staircase as swere-superslab's DEM).
+# A steady 1e-4 m3/s is injected into the east-most cell and must leave
+# through the `outflow` BC on the west face of cell i = 0.
+#
+# Manning normal depth for q = 1e-4 m2/s, n = 0.0036, S = 0.1:
+#     h = (n q / sqrt(S))^(3/5) = 2.71e-4 m
+# so the correct answer is a ~0.27 mm film over the whole strip and an
+# outlet discharge of 1e-4 m3/s once the transient has passed.
+#
+# Fed this way the borrowed face area is too LARGE rather than too small, so
+# the failure inverts: the outlet over-drains, eta is driven below the bed,
+# and the legacy below-bed clamp manufactures the difference.
+#     stock            outflow 0.5530 m3 vs 0.400 m3 injected (+38.3 %),
+#                      clamped 0.1573 m3 = 39.3 % of the input minted
+#     WetDry.cpp:144   outflow 0.3953 m3 (-1.2 %, the film still on the
+#     deleted          strip), clamped 6.0e-16 m3
+#
+# Same wrong face area as outlet-fed.yaml; only the feeding direction sets
+# the sign. Pair them in the x-gate so neither sign can regress silently.
+simulation:
+  id: outflow-staircase-upslope
+  title: Transmissive outflow BC on a descending staircase, fed from upslope
+
+domain:
+  nx: 10
+  ny: 1
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {file: input/dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 0.5
+  t_end: 4000.0
+  output_interval: 250
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.0036}
+  viscosity: {x: 1.0e-06, y: 1.0e-06}
+  min_depth: 1.0e-06
+  wetting_face_depth: 1.0e-06
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: -10.0}
+
+boundary_conditions:
+  - name: inflow
+    region: {polygon: [[9.05, -0.1], [10.1, -0.1], [10.1, 1.1], [9.05, 1.1]]}
+    target: surface
+    kind: discharge
+    value: {constant: 1.0e-04}     # total m3/s (dy = 1 m -> unit q 1e-4 m2/s)
+  - name: outlet
+    region: {polygon: [[-0.1, -0.1], [0.95, -0.1], [0.95, 1.1], [-0.1, 1.1]]}
+    target: surface
+    kind: outflow
+
+output:
+  filename: out/upslope-fed.h5
+  variables:
+    surface: [eta, depth]
+  monitors:
+    - {name: outlet, i: 0, j: 0, variables: [depth, eta]}
+  checkpoint: {interval: 0}

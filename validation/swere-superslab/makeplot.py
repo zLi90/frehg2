@@ -143,6 +143,17 @@ with h5py.File(output_file, "r") as f:
     dz = f["/grid/dz"][:]
     nx, nz = x.size, dz.size
 
+    # t_end of the run that produced this file, from the config echoed into
+    # the output. A file being written by a still-running job looks exactly
+    # like a broken run to every signal below (everything is ~0 early on), so
+    # the completeness test has to come first -- see the note by the
+    # `degenerate` check.
+    cfg = f["/frehg2"].attrs.get("config", "")
+    if isinstance(cfg, bytes):
+        cfg = cfg.decode()
+    t_end_cfg = next((float(ln.split(":", 1)[1].split("#", 1)[0])
+                      for ln in str(cfg).splitlines() if ln.strip().startswith("t_end:")), None)
+
     ma = f["/monitor/mass_audit"][:]           # time,volume,rain,evap,bout,...,seepage,clamped
     gma = f["/monitor/gw_mass_audit"][:]       # time,volume,...
     t_s = ma[:, 0]
@@ -154,6 +165,10 @@ with h5py.File(output_file, "r") as f:
     # Snapshot times + the terrain-following z of every cell centre.
     snap_t = sorted(int(t) for t in f["/groundwater/water_content"].keys())
     zcell = f["/groundwater/zcell/0"][:].reshape(nx, nz)      # i*nz+k
+
+    # Final surface depth in the outlet cell, for the V2-A11 pool check below.
+    depth_snaps = sorted(int(t) for t in f["/surface/depth"].keys())
+    outlet_depth = float(f[f"/surface/depth/{depth_snaps[-1]}"][:].ravel()[0]) if depth_snaps else None
 
     # Vertical saturation profiles at the requested (time, x) pairs.
     profiles = {}
@@ -184,10 +199,34 @@ print(f"  surface seepage (cum) : {seep_cum[-1]:.4e} m3")
 d_gw = gma[-1, 1] - gma[0, 1]
 print(f"  d(gw storage)         : {d_gw:+.4e} m3")
 
-# Surface balance: rain_in should equal d(ponding) + outflow + seepage + evap.
-residual = rain_cum[-1] - (pond_vol[-1] - pond_vol[0]) - bout_cum[-1] - seep_cum[-1] - ma[-1, 3]
+# Surface balance, in the closure identity docs/agents/postprocessing.md
+# states for mass_audit:
+#     d(volume) = rain - evaporation - boundary_outflow + bc_inflow
+#                 + seepage + clamped
+# Seepage is signed (negative = surface losing water to the subsurface), so it
+# ADDS to the surface budget; bc_inflow and clamped are part of the identity
+# too. An earlier form here subtracted seepage and dropped the other two,
+# which reported ~27 m3 unaccounted on a run that in fact closes to 5e-4 m3.
+residual = (rain_cum[-1] - ma[-1, 3] - bout_cum[-1] + ma[-1, 5] + seep_cum[-1] + ma[-1, 7]
+            - (pond_vol[-1] - pond_vol[0]))
+
+# Completeness before diagnosis. The `degenerate` test below fires on "rain
+# went in, nothing came out", which is also what the first minutes of a
+# healthy run look like -- so read against a partially written file it
+# reports a mass-balance breakdown that is not there. That is exactly what
+# happened on 2026-08-30: the plot was made while the 12 h run was still
+# going, and the resulting "broken run" flag became plan item Q0.3. The run
+# was fine; the diagnostic could not tell "broken" from "not finished yet"
+# (V2-A11).
+incomplete = t_end_cfg is not None and t_s[-1] < 0.999 * t_end_cfg
+if incomplete:
+    print(f"\n  *** INCOMPLETE: the file stops at t = {t_s[-1]:.0f} s but the config's "
+          f"t_end is {t_end_cfg:.0f} s ({t_s[-1] / t_end_cfg:.1%} of the run).")
+    print("      Either the job is still writing or it died early. Every verdict below "
+          "is about a partial run; do NOT read it as a physics defect.")
+
 degenerate = (pond_vol.max() < 1e-9) and (q_flow.max() < 1e-9) and (rain_cum[-1] > 1e-6)
-if degenerate:
+if degenerate and not incomplete:
     print("\n  *** WARNING: ponding, outflow, and seepage are all ~0 while "
           f"{rain_cum[-1]:.2f} m3 of rain was injected and gw storage is static "
           f"(d={d_gw:+.2e} m3).")
@@ -196,7 +235,21 @@ if degenerate:
     print("      The frehg2 ponding/outflow curves below are therefore degenerate "
           "(flat 0); regenerate out/output.h5 from a valid coupled run.")
 else:
-    print(f"  surface mass residual : {residual:+.4e} m3 (rain - dV_surf - outflow - seepage - evap)")
+    print(f"  surface mass residual : {residual:+.4e} m3 "
+          "(rain - evap - outflow + bc_inflow + seepage + clamped - dV_surf)")
+
+# Known limitation (V2-A11): the transmissive outlet sits on the -x edge, and
+# the west/south ghost rule at WetDry.cpp:144 hands that face the *interior*
+# face area, which is gauged over the upslope neighbour's bed. On this 0.1 m
+# staircase the outlet cell cannot discharge until it fills to the upslope
+# sill, so it traps a pool ~1 bed-step deep. Report it rather than let it
+# read as physics.
+bed_step = float(bottom[1] - bottom[0])
+if outlet_depth is not None and bed_step > 0.0 and outlet_depth > 0.5 * bed_step:
+    print(f"  outlet pool (V2-A11)  : {outlet_depth:.4f} m standing at i=0 against a "
+          f"{bed_step:.3f} m bed step ({pond_vol[-1]:.4e} m3 total surface storage). "
+          "Known limitation of the west/south transmissive BC — the outlet cannot "
+          "drain below the upslope sill — not a property of the case.")
 
 # Saturation-profile sampling (containing cell for each nominal x location).
 print("  saturation profiles   :")
