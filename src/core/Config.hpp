@@ -111,8 +111,33 @@ struct WindConfig {
   SeriesOrConstant direction;      ///< wind direction [deg]
 };
 
+/// atmosphere: met forcing for the bulk-aerodynamic module (v2 Q4, plan
+/// §3.2). One vapor-physics module, several consumers (open-water and soil
+/// evaporation now; the Q5 surface heat exchange later). All previously
+/// hardcoded legacy constants are required inputs here — that is what
+/// makes the legacy aerodynamic formulation shippable again (v1 removed
+/// it for its hardcoded 20 C air/pressure/humidity, not its physics).
+struct AtmosphereConfig {
+  bool present = false;                 ///< true when the block is configured
+  SeriesOrConstant airTemperature;      ///< [C]
+  SeriesOrConstant surfaceTemperature;  ///< T_s [C]; prescribed until Q5
+  SeriesOrConstant pressure;            ///< P0 [kPa]
+  /// Exactly one humidity form (schema cross-check).
+  bool humidityIsRelative = false;      ///< which form was configured
+  SeriesOrConstant specificHumidity;    ///< q_a [-]
+  SeriesOrConstant relativeHumidity;    ///< [-] of q_sat(air temperature)
+  SeriesOrConstant windSpeed;           ///< U [m/s] (shared with the Q6 wind)
+};
+
 /// surface_water: SWE module parameters.
 struct SurfaceWaterConfig {
+  /// Open-water evaporation mode (v2 Q4 §3.2). Prescribed applies the
+  /// configured rate unconditionally with the legacy dry clamp (b1 golden
+  /// fidelity; optional exclude region masks cells, the rain symmetry
+  /// fix). Bulk computes the rate per step from the atmosphere block
+  /// (water-surface q_g = q_sat(T_s)) and removes at most the available
+  /// depth per wet cell — no volume creation.
+  enum class EvapMode { Prescribed, Bulk };
   real_t gravity = 9.81;           ///< [m/s^2]
   FrictionConfig friction;        ///< drag law and roughness
   real_t viscosityX = 1.0e-6;      ///< eddy viscosity in i [m^2/s]
@@ -125,7 +150,22 @@ struct SurfaceWaterConfig {
   /// legacy hardcoded skip of the last global row (shallowwater.c:596),
   /// which the b1 goldens embed for their outlet row.
   std::vector<std::array<real_t, 2>> rainfallExcludePolygon;
-  SeriesOrConstant evaporation;    ///< evaporation rate [m/s]
+  SeriesOrConstant evaporation;    ///< evaporation rate [m/s] (prescribed)
+  EvapMode evapMode = EvapMode::Prescribed;  ///< evaporation.mode
+  /// Region receiving no evaporation (prescribed mode; empty = everywhere).
+  std::vector<std::array<real_t, 2>> evaporationExcludePolygon;
+};
+
+/// groundwater.evaporation: bulk-aerodynamic soil evaporation (v2 Q4
+/// §3.2). Potential rate from the atmosphere block; actual rate limited
+/// through the surface-layer soil relative humidity alpha_1 (Geng &
+/// Boufadel Eq. 6), applied as the top-face flux over the region.
+/// Uncoupled groundwater runs only in v2.0 (schema-enforced): the coupled
+/// top exchange is owned by the coupler and no gate exercises the coupled
+/// combination yet.
+struct GwEvaporationConfig {
+  bool enabled = false;                        ///< bulk mode configured
+  std::vector<std::array<real_t, 2>> polygon;  ///< evaporation zone (x, y)
 };
 
 /// groundwater.timestep: adaptive dtg controller (legacy semantics, §3.1).
@@ -160,6 +200,7 @@ struct GroundwaterConfig {
   /// Surplus handling in the post-allocation step (legacy default: drop).
   ReallocationSurplus reallocationSurplus = ReallocationSurplus::Drop;
   DensityCouplingConfig densityCoupling;  ///< baroclinic feedback switch
+  GwEvaporationConfig evaporation;        ///< bulk soil evaporation (v2 Q4)
 };
 
 /// soil.types[]: van Genuchten–Mualem soil parameters.
@@ -232,7 +273,12 @@ enum class BcTarget { Surface, GroundwaterTop, GroundwaterBottom, GroundwaterSid
 /// Outflow is the free (transmissive) outflow decided by the P1 b4 gate
 /// (plan §5.6 amendment): the prescribed-stage sink mapping kept the outlet
 /// column dry, so SERGHEI's bctype-9 free outflow gets its own kind.
-enum class BcKind { Eta, Discharge, Velocity, Outflow, Head, Flux, ScalarValue };
+/// ScalarCauchy is the v2 Q4 zero-total-scalar-flux top condition (v2 plan
+/// §3.2, Geng & Boufadel 2015 Eq. (7)): water crosses the subsurface top
+/// face, scalar mass does not, and the top-cell limiter admits the exact
+/// evaporative concentration/dilution the water loss implies. Homogeneous
+/// (takes no value); target groundwater_top in groundwater-only runs.
+enum class BcKind { Eta, Discharge, Velocity, Outflow, Head, Flux, ScalarValue, ScalarCauchy };
 
 /// boundary_conditions[].value — exactly one form.
 struct BcValueConfig {
@@ -276,6 +322,11 @@ struct TransportConfig {
   real_t boundMin = 0.0;                 ///< lower scalar bound (plan §3.2)
   bool hasBoundMax = false;              ///< true if an upper bound is set
   real_t boundMax = 0.0;                 ///< upper scalar bound when present
+  /// v2 Q4 (plan §3.2): keep the legacy hardcoded +0.01 evaporative-
+  /// concentration limiter allowance on coupled dry evaporating columns
+  /// instead of the exact in-step concentration factor. Off by default;
+  /// exists so a b6-class golden can be pinned to the legacy behavior.
+  bool legacyEvapAllowance = false;
 };
 
 /// output.monitors[]: point-probe time series.
@@ -348,6 +399,7 @@ struct FrehgConfig {
   DomainConfig domain;            ///< grid extents and bathymetry
   TimeConfig time;                ///< stepping and cadence
   ModulesConfig modules;          ///< enabled physics
+  AtmosphereConfig atmosphere;    ///< met forcing (v2 Q4)
   SurfaceWaterConfig surfaceWater;///< SWE parameters
   GroundwaterConfig groundwater;  ///< Richards parameters
   SoilConfig soil;                ///< soil table and map

@@ -76,8 +76,26 @@ At least one of `surface_water`/`groundwater` must be true.
 | `surface_water.rainfall.constant` | real | one of | 0 | rain rate [m/s] |
 | `surface_water.rainfall.series.file` | path | one of | — | rain series |
 | `surface_water.rainfall.exclude.polygon` | [x, y] list ≥ 3 | no | — | region receiving no rainfall. Expresses the legacy hardcoded skip of the last global row (`shallowwater.c:596`), which the b1 goldens embed for their outlet row; omit it for uniform rain |
-| `surface_water.evaporation.constant` | real | one of | 0 | evaporation rate [m/s] |
-| `surface_water.evaporation.series.file` | path | one of | — | evaporation series |
+| `surface_water.evaporation.constant` | real | one of | 0 | prescribed evaporation rate [m/s]; subtracted unconditionally over the non-excluded cells with the legacy dry clamp (b1 golden fidelity) |
+| `surface_water.evaporation.series.file` | path | one of | — | prescribed evaporation series |
+| `surface_water.evaporation.exclude.polygon` | [x, y] list ≥ 3 | no | — | region receiving no evaporation (prescribed mode; the rainfall-exclude symmetry, v2 Q4) |
+| `surface_water.evaporation.mode` | `bulk` | no | — | v2 Q4 bulk-aerodynamic open-water evaporation: rate per step from the `atmosphere` block with water-surface q_g = q_sat(T_s), applied to wet cells only, at most the available depth per cell (no volume creation). Excludes `constant`/`series`/`exclude`; requires `atmosphere` |
+
+## atmosphere (v2 Q4, plan §3.2)
+
+Met forcing for the bulk-aerodynamic module (one vapor-physics module,
+several consumers: open-water and soil evaporation now, the Q5 surface heat
+exchange later). Every value is a `{constant: x}` or `{series: {file: p}}`
+choice.
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `atmosphere.air_temperature` | series/constant | yes | — | [°C] |
+| `atmosphere.surface_temperature` | series/constant | yes | — | T_s [°C]; prescribed until Q5 transports temperature |
+| `atmosphere.pressure` | series/constant | yes | — | P₀ [kPa] |
+| `atmosphere.specific_humidity` | series/constant | one of | — | q_a [−]; exactly one humidity form |
+| `atmosphere.relative_humidity` | series/constant | one of | — | [−] of q_sat(air temperature) |
+| `atmosphere.wind_speed` | series/constant | yes | — | U [m/s] (shared with the Q6 wind block) |
 
 ## groundwater (required section when the module is on)
 
@@ -94,6 +112,8 @@ At least one of `surface_water`/`groundwater` must be true.
 | `groundwater.specific_storage` | real ≥ 0 | yes | — | Ss [1/m] |
 | `groundwater.reallocation_surplus` | `drop` \| `redistribute` | no | `drop` | post-allocation surplus of saturation-adjacent cells: discard (legacy sweep, groundwater.c:1026 disabled the transfer; the b2 golden embeds it) or redistribute vertically into pore room (mass-conserving; b3 uses it) |
 | `groundwater.density_coupling.enabled` | bool | no | false | baroclinic feedback (requires transport) |
+| `groundwater.evaporation.mode` | `bulk` | yes (in block) | — | v2 Q4 bulk-aerodynamic soil evaporation: potential rate from the `atmosphere` block, actual rate limited by the surface-layer soil relative humidity α₁ = min(1, 1.8·w_g/(w_g + 0.30)) (Geng & Boufadel Eq. 6; condensation passes through), applied as the top-face flux over the region. Requires `atmosphere`; uncoupled groundwater runs only; the region must not overlap a `groundwater_top` condition. Adds the cumulative `evaporation` column to `/monitor/gw_mass_audit` |
+| `groundwater.evaporation.region.polygon` | [x, y] list ≥ 3 | yes (in block) | — | the evaporation zone |
 
 ## soil (required section when groundwater is on)
 
@@ -137,7 +157,7 @@ At least one of `surface_water`/`groundwater` must be true.
 | `boundary_conditions[].name` | string | yes | — | unique name |
 | `boundary_conditions[].region.polygon` | list of [x, y], ≥ 3 | yes | — | region vertices [m]; on-edge counts inside |
 | `boundary_conditions[].target` | `surface` \| `groundwater_top` \| `groundwater_bottom` \| `groundwater_side` | yes | — | where the condition applies |
-| `boundary_conditions[].kind` | `eta` \| `discharge` \| `velocity` \| `outflow` \| `head` \| `flux` \| `scalar_value` | yes | — | eta/discharge/velocity/outflow: surface only; head/flux: groundwater only; scalar_value needs transport. `outflow` is free (transmissive) outflow at domain-edge faces — the stage is extrapolated down the continued bed slope — and takes no `value`. `scalar_value` semantics (P4): target `surface` — members covered by a `discharge` condition inject that inflow's concentration (legacy `s_inflow`); every other member is a wet-cell Dirichlet (the legacy tide salinity, generalized to any region — dry cells stay at 0); target `groundwater_side` — the ghost concentration along the member edge (legacy `s_yp`/`s_ym`), feeding upwinded inflow, the limiter bound, and the baroclinic boundary face |
+| `boundary_conditions[].kind` | `eta` \| `discharge` \| `velocity` \| `outflow` \| `head` \| `flux` \| `scalar_value` \| `scalar_cauchy` | yes | — | eta/discharge/velocity/outflow: surface only; head/flux: groundwater only; scalar_value and scalar_cauchy need transport. `outflow` is free (transmissive) outflow at domain-edge faces — the stage is extrapolated down the continued bed slope — and takes no `value`. `scalar_value` semantics (P4): target `surface` — members covered by a `discharge` condition inject that inflow's concentration (legacy `s_inflow`); every other member is a wet-cell Dirichlet (the legacy tide salinity, generalized to any region — dry cells stay at 0); target `groundwater_side` — the ghost concentration along the member edge (legacy `s_yp`/`s_ym`), feeding upwinded inflow, the limiter bound, and the baroclinic boundary face. `scalar_cauchy` (v2 Q4): zero-total-scalar-flux top condition (Geng & Boufadel 2015 Eq. 7) — water crosses the subsurface top face (whatever the flow-side top condition sends), scalar mass does not, and the top-cell limiter admits the exact evaporative concentration / infiltration dilution; homogeneous (takes no `value`), target `groundwater_top` in uncoupled groundwater runs only |
 | `boundary_conditions[].value.constant` | real | one of | — | fixed value |
 | `boundary_conditions[].value.series.file` | path | one of | — | time series |
 | `boundary_conditions[].value.gravity` | `true` | one of | — | free drainage (kind flux; legacy `bctype_GW` code 3) |
@@ -155,6 +175,7 @@ At least one of `surface_water`/`groundwater` must be true.
 | `transport.dispersion.molecular` | real ≥ 0 | no | 1e-10 | [m²/s] |
 | `transport.bounds.min` | real | no | 0 | scalar lower bound (replaces the legacy [0, 200] clamp; plan §3.2) |
 | `transport.bounds.max` | real | no | unbounded | scalar upper bound |
+| `transport.legacy_evap_allowance` | bool | no | false | v2 Q4: keep the legacy hardcoded +0.01/step limiter allowance on coupled dry evaporating columns instead of the exact in-step concentration factor (golden pinning) |
 
 ## output
 

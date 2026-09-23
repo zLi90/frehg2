@@ -253,6 +253,10 @@ class ScalarSolver {
   real_t boundMax_ = 0.0;                 ///< transport.bounds.max (or the
                                           ///< open-bound sentinel)
   bool hasBoundMax_ = false;
+  /// transport.legacy_evap_allowance (v2 Q4 §3.2): keep the hardcoded
+  /// +0.01 coupled evaporative-concentration allowance instead of the
+  /// exact in-step factor.
+  bool legacyEvapAllowance_ = false;
 
   // Surface fields (halo layout).
   Field2<real_t> sSurf_, smSurf_, sSurfKp_, sseepage_;
@@ -271,6 +275,11 @@ class ScalarSolver {
   /// nz planes; kzF has nz+1).
   Field3<real_t> kzLower_;
   Field2<int> kTop_;  ///< per-column first active layer (device scratch)
+  /// Columns under a scalar_cauchy top condition (v2 §3.2, Geng & Boufadel
+  /// Eq. (7)): 1 where the top face passes water but no scalar mass and the
+  /// top-cell limiter admits the exact evaporative concentration/dilution
+  /// factor Vgn/Vgflux; 0 elsewhere.
+  Field2<int> cauchyTop_;
 
   // Boundary lists.
   std::vector<ScalarBcList> surfaceDirichlet_;  ///< eta-paired (tide) cells

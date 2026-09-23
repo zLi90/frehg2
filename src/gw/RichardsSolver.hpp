@@ -34,6 +34,7 @@
 #ifndef FREHG_GW_RICHARDSSOLVER_HPP
 #define FREHG_GW_RICHARDSSOLVER_HPP
 
+#include "atm/MetForcing.hpp"
 #include "bc/BoundarySet.hpp"
 #include "core/Config.hpp"
 #include "core/Grid.hpp"
@@ -91,6 +92,11 @@ struct GwStepAudit {
   /// and tests can see pure losses.
   real_t reallocDropped = 0.0;
   real_t vloss = 0.0;          ///< volume removed (+) or created (-) by the final clamp
+  /// Actual evaporated volume through bulk-soil-evaporation top faces this
+  /// step [m^3, positive out; negative = condensation deposit] — read off
+  /// the realized top-face Darcy flux, so the Corrector's moisture guard
+  /// is already applied (v2 Q4, plan §3.2; the g5(i) observable).
+  real_t evap = 0.0;
   /// \name Coupled-run terms (zero in groundwater-only runs; plan §10 P3)
   ///@{
   /// Net upward volume through coupled top faces this step [m^3], the
@@ -307,6 +313,17 @@ class RichardsSolver {
   /// scalar and their face means (legacy update_rhovisc + baroclinic_face).
   void updateBaroclinicFaces();
 
+  // Bulk soil evaporation (v2 Q4, plan §3.2; RichardsSolver.cpp).
+  /// Stage the evaporation-zone mask from the configured region, mark the
+  /// member columns' top faces as flux boundaries (fatal on overlap with a
+  /// configured groundwater_top condition), and load the met series.
+  void setupBulkEvaporation(const FrehgConfig& config);
+  /// Refresh the per-column actual evaporation rate for the substep at
+  /// time \p t: potential rate from the met sample, limited by the
+  /// surface-layer soil relative humidity alpha_1(theta_top) (Geng &
+  /// Boufadel Eq. 6). Negative rates (condensation) pass through (V2-A13).
+  void updateBulkEvaporation(real_t t);
+
   // Corrector (Corrector.cpp).
   /// Classify each coupled top face for step \p dtg (the capacity/supply
   /// split the exchange budget is booked against; plan §10 P3).
@@ -378,6 +395,11 @@ class RichardsSolver {
   // as int; values are the current prescribed value per column/edge cell.
   Field2<int> topCode_, botCode_;
   Field2<real_t> topValue_, botValue_;
+  // Bulk soil evaporation (v2 Q4): zone mask, device ktop, met forcing.
+  bool bulkEvap_ = false;
+  Field2<int> evapMask_;
+  Field2<int> evapKtop_;
+  atm::MetForcing met_;
   /// Coupled top-exchange mode per column, refreshed each substep
   /// (amendment A13; SERGHEI GwBC.h:277-288): 0 = dry seepage face,
   /// 1 = wet Dirichlet (capacity-limited), 2 = wet supply-limited flux.

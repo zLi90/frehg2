@@ -463,6 +463,223 @@ TEST_F(ConfigTest, RejectsOutflowOnGroundwaterTarget) {
   EXPECT_TRUE(hasError(result, "kind outflow applies to target surface only")) << joined(result);
 }
 
+// ---------------------------------------------------------------------------
+// scalar_cauchy (v2 Q4, plan §3.2): the zero-total-scalar-flux top condition.
+// §8.2 matrix discipline: the one accepted cell (groundwater_top ×
+// uncoupled) validates; every other combination is rejected with a loud
+// message, each rejection asserted here.
+// ---------------------------------------------------------------------------
+
+namespace {
+/// Groundwater+transport-only base for the scalar_cauchy schema battery.
+const char* kGwTransportConfig = R"(simulation: {id: unit-test-cauchy}
+domain:
+  nx: 1
+  ny: 1
+  nz: 4
+  dx: 1.0
+  dy: 1.0
+  dz: 0.25
+  bottom_elevation: {constant: 0.0}
+time: {dt: 1.0, t_end: 10.0, output_interval: 10.0}
+modules: {groundwater: true, transport: true}
+groundwater:
+  timestep: {dt_init: 1.0, dt_min: 1.0, dt_max: 1.0}
+  specific_storage: 1.0e-5
+soil:
+  types:
+    - {name: loam, ksx: 1.0e-5, ksy: 1.0e-5, ksz: 1.0e-5,
+       theta_s: 0.4, theta_r: 0.08, vg_alpha: 6.0, vg_n: 2.0}
+  map: {constant: loam}
+transport:
+  scheme: {advection: upwind}
+initial_conditions:
+  groundwater: {moisture: {constant: 0.3}}
+  transport: {groundwater: {constant: 25.0}}
+output: {filename: out/output.h5}
+)";
+
+const char* kCauchyBc = R"(boundary_conditions:
+  - name: salt-cauchy
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: scalar_cauchy
+)";
+}  // namespace
+
+TEST_F(ConfigTest, AcceptsScalarCauchyOnUncoupledGroundwaterTop) {
+  std::string text = kGwTransportConfig;
+  text += kCauchyBc;
+  const ValidationResult result = validate(text);
+  EXPECT_TRUE(result.ok()) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsScalarCauchyWithValue) {
+  std::string text = kGwTransportConfig;
+  text += kCauchyBc;
+  text += "    value: {constant: 0.0}\n";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "kind scalar_cauchy takes no value")) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsScalarCauchyOffTheTop) {
+  // All three non-top targets ride the same rejection (the §8.2 matrix rows
+  // groundwater_side / groundwater_bottom / surface).
+  for (const char* target : {"groundwater_side", "groundwater_bottom", "surface"}) {
+    std::string text = kGwTransportConfig;
+    std::string bc = kCauchyBc;
+    const std::string needle = "target: groundwater_top";
+    bc.replace(bc.find(needle), needle.size(), std::string("target: ") + target);
+    text += bc;
+    const ValidationResult result = validate(text);
+    ASSERT_FALSE(result.ok()) << target;
+    EXPECT_TRUE(hasError(result, "kind scalar_cauchy applies to target groundwater_top only"))
+        << target << "\n"
+        << joined(result);
+  }
+}
+
+TEST_F(ConfigTest, RejectsScalarCauchyInCoupledRuns) {
+  std::string text = kGwTransportConfig;
+  const std::string needle = "modules: {groundwater: true, transport: true}";
+  text.replace(text.find(needle), needle.size(),
+               "modules: {surface_water: true, groundwater: true, transport: true}\n"
+               "surface_water:\n"
+               "  friction: {coefficient: {constant: 0.02}}\n"
+               "  min_depth: 1.0e-6\n"
+               "  wetting_face_depth: 1.0e-6");
+  const std::string icNeedle = "initial_conditions:";
+  text.replace(text.find(icNeedle), icNeedle.size(),
+               "initial_conditions:\n  surface: {eta: {constant: 0.0}}");
+  text += kCauchyBc;
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "kind scalar_cauchy applies to uncoupled groundwater runs only"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsScalarCauchyWithoutTransport) {
+  std::string text = kGwTransportConfig;
+  const std::string needle = "modules: {groundwater: true, transport: true}";
+  text.replace(text.find(needle), needle.size(), "modules: {groundwater: true}");
+  const std::string icNeedle = "\n  transport: {groundwater: {constant: 25.0}}";
+  text.replace(text.find(icNeedle), icNeedle.size(), "");
+  text += kCauchyBc;
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "kind scalar_cauchy requires modules.transport: true"))
+      << joined(result);
+}
+
+// ---------------------------------------------------------------------------
+// v2 Q4 atmosphere / evaporation cross-field rules (plan §3.2).
+// ---------------------------------------------------------------------------
+
+namespace {
+const char* kAtmosphereBlock = R"(atmosphere:
+  air_temperature: {constant: 20.0}
+  surface_temperature: {constant: 20.0}
+  pressure: {constant: 101.325}
+  specific_humidity: {constant: 2.9e-3}
+  wind_speed: {constant: 1.0}
+)";
+}  // namespace
+
+TEST_F(ConfigTest, AcceptsBulkSurfaceEvaporationWithAtmosphere) {
+  std::string text = kBaseConfig;
+  const std::string needle = "  wetting_face_depth: 1.0e-6";
+  text.replace(text.find(needle), needle.size(),
+               "  wetting_face_depth: 1.0e-6\n  evaporation: {mode: bulk}");
+  text += kAtmosphereBlock;
+  const ValidationResult result = validate(text);
+  EXPECT_TRUE(result.ok()) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsBulkSurfaceEvaporationWithoutAtmosphere) {
+  std::string text = kBaseConfig;
+  const std::string needle = "  wetting_face_depth: 1.0e-6";
+  text.replace(text.find(needle), needle.size(),
+               "  wetting_face_depth: 1.0e-6\n  evaporation: {mode: bulk}");
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "mode: bulk requires the atmosphere block")) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsBulkSurfaceEvaporationWithValue) {
+  std::string text = kBaseConfig;
+  const std::string needle = "  wetting_face_depth: 1.0e-6";
+  text.replace(text.find(needle), needle.size(),
+               "  wetting_face_depth: 1.0e-6\n"
+               "  evaporation: {mode: bulk, constant: 1.0e-6}");
+  text += kAtmosphereBlock;
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "mode: bulk takes no constant/series/exclude"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsAtmosphereWithBothHumidityForms) {
+  std::string text = kBaseConfig;
+  std::string atm = kAtmosphereBlock;
+  const std::string needle = "  specific_humidity: {constant: 2.9e-3}";
+  atm.replace(atm.find(needle), needle.size(),
+              "  specific_humidity: {constant: 2.9e-3}\n"
+              "  relative_humidity: {constant: 0.2}");
+  text += atm;
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "exactly one of {specific_humidity, relative_humidity}"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, AcceptsBulkSoilEvaporationUncoupled) {
+  std::string text = kGwTransportConfig;
+  const std::string needle = "  specific_storage: 1.0e-5";
+  text.replace(text.find(needle), needle.size(),
+               "  specific_storage: 1.0e-5\n"
+               "  evaporation:\n"
+               "    mode: bulk\n"
+               "    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}");
+  text += kAtmosphereBlock;
+  const ValidationResult result = validate(text);
+  EXPECT_TRUE(result.ok()) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsBulkSoilEvaporationWhenCoupledOrWithoutAtmosphere) {
+  std::string base = kGwTransportConfig;
+  const std::string needle = "  specific_storage: 1.0e-5";
+  base.replace(base.find(needle), needle.size(),
+               "  specific_storage: 1.0e-5\n"
+               "  evaporation:\n"
+               "    mode: bulk\n"
+               "    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}");
+  {
+    const ValidationResult result = validate(base);  // no atmosphere block
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(hasError(result, "bulk soil evaporation requires the atmosphere block"))
+        << joined(result);
+  }
+  {
+    std::string text = base;
+    const std::string mods = "modules: {groundwater: true, transport: true}";
+    text.replace(text.find(mods), mods.size(),
+                 "modules: {surface_water: true, groundwater: true, transport: true}\n"
+                 "surface_water:\n"
+                 "  friction: {coefficient: {constant: 0.02}}\n"
+                 "  min_depth: 1.0e-6\n"
+                 "  wetting_face_depth: 1.0e-6");
+    const std::string ic = "initial_conditions:";
+    text.replace(text.find(ic), ic.size(),
+                 "initial_conditions:\n  surface: {eta: {constant: 0.0}}");
+    text += kAtmosphereBlock;
+    const ValidationResult result = validate(text);
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(hasError(result, "applies to uncoupled groundwater runs only"))
+        << joined(result);
+  }
+}
+
 TEST_F(ConfigTest, RejectsSeepageOutputWithoutGroundwater) {
   std::string text = kBaseConfig;
   const std::string needle = "output: {filename: out/output.h5}";

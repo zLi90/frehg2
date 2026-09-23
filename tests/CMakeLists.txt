@@ -28,7 +28,8 @@ add_executable(frehg_unit_tests
   unit/test_vangenuchten.cpp
   unit/test_gw.cpp
   unit/test_coupling.cpp
-  unit/test_transport.cpp)
+  unit/test_transport.cpp
+  unit/test_atm.cpp)
 target_link_libraries(frehg_unit_tests PRIVATE frehg::core frehg::swe frehg::gw
                                                frehg::transport frehg::coupling GTest::gtest
                                                frehg::compiler_flags)
@@ -142,6 +143,14 @@ add_test(NAME unit.p_gates.negative
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_p_gates.py)
 set_tests_properties(unit.p_gates.negative PROPERTIES LABELS "unit")
 
+# g4/g5 gate-logic battery (v2 plan §6.3, Q4): closed-form spot checks, the
+# digitized references passing their own criteria, and every criterion
+# provably able to fail on corrupted synthetic inputs. Green while the g4/g5
+# gates themselves are red (gate-first, §6.1).
+add_test(NAME unit.g45_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_g45_gates.py)
+set_tests_properties(unit.g45_gates.negative PROPERTIES LABELS "unit")
+
 # ---------------------------------------------------------------------------
 # Benchmark configuration validation (part of the P0 exit criteria)
 # ---------------------------------------------------------------------------
@@ -153,7 +162,14 @@ foreach(case
     b5-vcatchment/b5-vcatchment
     b5-vcatchment/b5-vcatchment-norain
     b6-kuan/b6-kuan-ss
-    b6-kuan/b6-kuan-td)
+    b6-kuan/b6-kuan-td
+    g4-evap/g4a-drawdown
+    g4-evap/g4b-concentration
+    g4-evap/g4d-drain)
+  # g4c-bulk and the two g5 configurations are deliberately NOT in this
+  # list: they are written to the Q4 target schema (atmosphere block /
+  # bulk evaporation) and fail --validate until the capability lands —
+  # their gate scripts own that probe ("capability absent", plan §6.1).
   get_filename_component(case_name ${case} NAME)
   add_test(NAME validate.${case_name}
     COMMAND $<TARGET_FILE:frehg> --validate
@@ -288,6 +304,35 @@ foreach(variant ss td)
   set_tests_properties(regression.b6.${variant} PROPERTIES
     LABELS "regression_nightly" ENVIRONMENT "${_regress_env}" TIMEOUT 43200)
 endforeach()
+
+# ---------------------------------------------------------------------------
+# v2 Q4 gates (plan §3.3, V2-A13/V2-A14; authored FAILING per §6.1 — the
+# Q2 "gates (red)" precedent). g4 is per-PR: sub-criteria (a)/(b) gate the
+# existing prescribed-evaporation behavior, (c) fails "capability absent"
+# (the schema rejects the Q4 atmosphere/bulk keys), (d) fails on the
+# unaudited dry-out shortfall. g5 is nightly-class and fails "capability
+# absent" outright. Both turn green with the Q4 capability PRs; their
+# criteria are already proven able to fail by unit.g45_gates.negative.
+# ---------------------------------------------------------------------------
+add_test(NAME regression.g4
+  COMMAND ${_regress} g4 ${_regress_args} --work ${CMAKE_BINARY_DIR}/regression/g4)
+set_tests_properties(regression.g4 PROPERTIES LABELS "regression"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+add_test(NAME regression.g5.geng2015
+  COMMAND ${_regress} g5 ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/g5-geng2015)
+set_tests_properties(regression.g5.geng2015 PROPERTIES
+  LABELS "regression_nightly" ENVIRONMENT "${_regress_env}" TIMEOUT 43200)
+
+# The §9 Q4 x-battery row "transposed g5 slice": the same case and criteria
+# as the y-z slice. Finger positions are instability-set and not compared
+# (plan §3.4); the gate metrics are orientation-agnostic.
+add_test(NAME regression.g5.transposed
+  COMMAND ${_regress} g5 --transposed ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/g5-transposed)
+set_tests_properties(regression.g5.transposed PROPERTIES
+  LABELS "regression_nightly" ENVIRONMENT "${_regress_env}" TIMEOUT 43200)
 
 # ---------------------------------------------------------------------------
 # Sanitized builds run 3-10x slower than the timeouts above assume; the

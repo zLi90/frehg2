@@ -1,0 +1,20 @@
+# BC-kind x target coverage matrix (v2 plan §8.2). One row per (kind, target,
+# coupling-mode) cell; every row's disposition is exactly one of:
+#   tested          — the named test exercises the cell
+#   schema-rejected — the schema rejects the combination loudly; the named
+#                     test asserts the rejection and its message
+#   limitation      — accepted but unverified, with a pointer to the record
+#                     (this category must be empty at the Q7 release)
+# The v1 backfill (every pre-v2 kind x target cell) is the x-gate work's
+# deliverable and is NOT yet done — this file is seeded by the v2 Q4
+# scalar_cauchy landing (the first new kind under the matrix rule) plus the
+# two cells V2-A11 found defective ahead of the backfill.
+kind,target,coupled,disposition,test_or_record
+scalar_cauchy,groundwater_top,uncoupled,tested,TransportModule.CauchyTopConcentratesUnderEvaporationWithoutClipping
+scalar_cauchy,groundwater_top,uncoupled,tested,TransportModule.CauchyTopDilutesUnderInfiltrationWithoutClipping
+scalar_cauchy,groundwater_top,coupled,schema-rejected,ConfigTest.RejectsScalarCauchyInCoupledRuns
+scalar_cauchy,groundwater_side,any,schema-rejected,ConfigTest.RejectsScalarCauchyOffTheTop
+scalar_cauchy,groundwater_bottom,any,schema-rejected,ConfigTest.RejectsScalarCauchyOffTheTop
+scalar_cauchy,surface,any,schema-rejected,ConfigTest.RejectsScalarCauchyOffTheTop
+outflow,surface-west-edge,any,limitation,V2-A11 (WetDry.cpp:144,158 ghost face area; reproducer validation/swe-outflow-staircase; fix deferred behind this matrix's gate)
+outflow,surface-south-edge,any,limitation,V2-A11 (same defect, y-direction twin)

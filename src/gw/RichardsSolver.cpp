@@ -152,6 +152,7 @@ RichardsSolver::RichardsSolver(const Grid& grid, const FrehgConfig& config,
 
   stageSoil(config);
   buildBoundaryLists(boundaries, config);
+  setupBulkEvaporation(config);
   updateBoundaryValues(config.time.tStart);
   applyInitialConditions(config);
 
@@ -385,8 +386,8 @@ void RichardsSolver::buildBoundaryLists(const BoundarySet& boundaries,
         bc.target() != BcTarget::GroundwaterSide) {
       continue;
     }
-    if (bc.kind() == BcKind::ScalarValue) {
-      continue;  // consumed by the transport module (plan §10 P4)
+    if (bc.kind() == BcKind::ScalarValue || bc.kind() == BcKind::ScalarCauchy) {
+      continue;  // consumed by the transport module (plan §10 P4 / v2 §3.2)
     }
     GwBcCode code = GwBcCode::NoFlux;
     if (bc.kind() == BcKind::Head) {
@@ -502,6 +503,118 @@ void RichardsSolver::updateBoundaryValues(real_t t) {
   }
 }
 
+void RichardsSolver::setupBulkEvaporation(const FrehgConfig& config) {
+  const GwEvaporationConfig& evap = config.groundwater.evaporation;
+  if (!evap.enabled) {
+    return;
+  }
+  bulkEvap_ = true;
+  met_ = atm::MetForcing(config.atmosphere, config);
+
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const std::size_t ny2 = static_cast<std::size_t>(nyl) + 2;
+  const std::size_t nx2 = static_cast<std::size_t>(nxl) + 2;
+  evapMask_ = Field2<int>("gw_evap_mask", ny2, nx2);
+  evapKtop_ = Field2<int>("gw_evap_ktop", ny2, nx2);
+
+  const Polygon poly(evap.polygon);
+  auto hostMask = Kokkos::create_mirror_view(evapMask_);
+  auto hostKtop = Kokkos::create_mirror_view(evapKtop_);
+  auto hostCode = Kokkos::create_mirror_view(topCode_);
+  Kokkos::deep_copy(hostMask, 0);
+  Kokkos::deep_copy(hostKtop, 0);
+  Kokkos::deep_copy(hostCode, topCode_);
+  const HostField2<int>& ktop = mesh_.ktop();
+  long members = 0;
+  for (int j = 1; j <= nyl; ++j) {
+    for (int i = 1; i <= nxl; ++i) {
+      const real_t xc = grid_.xCenter(grid_.i0() + i - 1);
+      const real_t yc = grid_.yCenter(grid_.j0() + j - 1);
+      if (!poly.contains(xc, yc)) {
+        continue;
+      }
+      const auto ju = static_cast<std::size_t>(j);
+      const auto iu = static_cast<std::size_t>(i);
+      if (hostCode(ju, iu) != static_cast<int>(GwBcCode::NoFlux)) {
+        log::fatal(log::msg()
+                   << "groundwater.evaporation: the zone overlaps a configured "
+                      "groundwater_top boundary condition at cell (" << grid_.j0() + j - 1
+                   << ", " << grid_.i0() + i - 1 << "); the two prescribe the same face");
+      }
+      hostMask(ju, iu) = 1;
+      hostKtop(ju, iu) = ktop(ju - 1, iu - 1);
+      hostCode(ju, iu) = static_cast<int>(GwBcCode::Flux);
+      ++members;
+    }
+  }
+  Kokkos::deep_copy(evapMask_, hostMask);
+  Kokkos::deep_copy(evapKtop_, hostKtop);
+  Kokkos::deep_copy(topCode_, hostCode);
+
+  long global = 0;
+  MPI_Allreduce(&members, &global, 1, MPI_LONG, MPI_SUM, grid_.comm());
+  if (global == 0) {
+    log::fatal(log::msg() << "groundwater.evaporation: the region selects no cell "
+                             "anywhere in the domain; check the polygon against "
+                             "cell centers");
+  }
+}
+
+void RichardsSolver::updateBulkEvaporation(real_t t) {
+  if (!bulkEvap_) {
+    return;
+  }
+  // Host met sample once per substep; the alpha_1 limiting reads the top
+  // cell's theta from the end of the previous substep (an explicit lag,
+  // like every other boundary value refreshed here).
+  const atm::MetSample met = met_.sample(t);
+  const real_t qsat =
+      atm::saturatedSpecificHumidity(met.surfaceTemperatureC, met.pressureKpa);
+  const real_t qa = met.airSpecificHumidity;
+  const real_t prefactor = atm::airDensity(met.surfaceTemperatureC, met.pressureKpa) /
+                           (atm::aerodynamicResistance(met.windSpeed) *
+                            atm::kWaterDensity);
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const int nz = grid_.nz();
+  Field2<int> mask = evapMask_;
+  Field2<int> ktop = evapKtop_;
+  Field2<real_t> topValue = topValue_;
+  Field3<real_t> wc = wc_;
+  Field3<real_t> wcr = wcr_;
+  Field3<real_t> wcs = wcs_;
+  Kokkos::parallel_for(
+      "gw_bulk_evap_rate",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i) {
+        if (mask(j, i) == 0) {
+          return;
+        }
+        // alpha_1's argument is the water content AT the ground surface
+        // (the paper's w_g; their FEM evaluates it at the surface node).
+        // A cell-centred value sits half a cell below the surface and, in
+        // a steep drying front, overstates the surface moisture — measured
+        // during g5 bring-up as a ~3-4x overprediction of the evaporation
+        // rate at 10 h. Linear extrapolation of the top two cell values to
+        // the surface face, clamped to the physical range, is the
+        // face-consistent evaluation.
+        const int k0 = ktop(j, i);
+        const real_t w0 = wc(j, i, k0);
+        const real_t w1 = (k0 + 1 < nz) ? wc(j, i, k0 + 1) : w0;
+        real_t wSurf = 1.5 * w0 - 0.5 * w1;
+        if (wSurf < wcr(j, i, k0)) {
+          wSurf = wcr(j, i, k0);
+        }
+        if (wSurf > wcs(j, i, k0)) {
+          wSurf = wcs(j, i, k0);
+        }
+        const real_t alpha1 = atm::soilRelativeHumidity(wSurf);
+        topValue(j, i) = prefactor * (alpha1 * qsat - qa);
+      });
+}
+
 void RichardsSolver::buildCooPattern() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
@@ -556,6 +669,7 @@ void RichardsSolver::step(real_t t, real_t dtg) {
   audit_ = GwStepAudit{};
   dtgCurrent_ = dtg;
   updateBoundaryValues(t);
+  updateBulkEvaporation(t);
 
   // Step-start state refresh (legacy groundwater.c:68-82): interior h/wc
   // changed after the last exchange (reallocation, clamp), so halos and
@@ -730,6 +844,26 @@ void RichardsSolver::accumulateBoundaryFlux(real_t dtg) {
       },
       inflow);
   audit_.boundaryIn = inflow;
+
+  if (bulkEvap_) {
+    // The realized evaporated volume this substep (the g5(i) observable):
+    // the top-face Darcy flux already includes the qtop source with the
+    // Corrector's moisture guard, so this is actual, not potential.
+    Field2<int> emask = evapMask_;
+    Field2<int> ektop = evapKtop_;
+    real_t evaporated = 0.0;
+    Kokkos::parallel_reduce(
+        "gw_bulk_evap_volume",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {1, 1}, {nyl + 1, nxl + 1}),
+        KOKKOS_LAMBDA(const int j, const int i, real_t& sum) {
+          if (emask(j, i) != 0) {
+            sum += qzF(j, i, ektop(j, i)) * dtg;
+          }
+        },
+        evaporated);
+    audit_.evap = evaporated;
+  }
 }
 
 }  // namespace frehg::gw

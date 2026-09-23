@@ -156,3 +156,40 @@ golden held every wet surface cell at exactly 35 psu at every output —
 the legacy wet-cell salinity override (`scalar.c:258-262`, the commented
 "Kuan 2019" block) was active in the golden run — expressed in Frehg2 as
 an explicit whole-tank condition (amendment A20; b6 README).
+
+## The scalar_cauchy top condition (v2 Q4, plan §3.2)
+
+`kind: scalar_cauchy` on `target: groundwater_top` implements the
+zero-total-scalar-flux relation of Geng & Boufadel (2015) Eq. (7),
+`(q c − β φ S D ∇c) · n = 0`: water crosses the subsurface top face at
+whatever rate the flow-side top condition sends (typically a `flux`
+evaporation or infiltration), and scalar mass does not. Discretely, both
+the advective scalar value and the dispersive flux at the member columns'
+top faces are zero — the total flux is exactly zero, which is all the
+continuous relation asserts.
+
+The load-bearing part is the limiter. The subsurface update divides the
+transported mass by the flux volume `Vgflux`, so a salt-free water loss
+through the top face raises the top-cell concentration by exactly
+`f = (Vgflux + dtg·q_top)/Vgflux` (q_top > 0 upward; the plan's
+`V/(V − E·A·dt)`, generalized to include dilution under infiltration).
+Interior advective exchange moves water and scalar together at the donor
+concentration and is concentration-neutral on the flux volume, so the top
+face is the only term in `f`. Without an allowance the local-extrema
+limiter clips the concentrated value back to the neighbor extrema every
+step — the pre-v2 throttle the hardcoded coupled-only `hi += 0.01`
+partially papered over (plan §3.1). On `scalar_cauchy` columns the
+limiter window (a) anchors on the cell's own previous value — under zero
+total flux the top cell must not be clipped toward a fresher neighbor —
+and (b) is widened (never shrunk) by `f`: the ceiling scales by `f > 1`
+under evaporation, the floor by `f < 1` under infiltration. On a pure
+column this admits the update exactly (`subsAdjust = 0` to rounding;
+`TransportModule.CauchyTop*` both directions), while lateral transport
+remains limited as before.
+
+Scope (schema-enforced, §8.2 matrix rows in `tests/coverage/bc_matrix.csv`):
+uncoupled groundwater runs only — in coupled runs the coupler owns the top
+scalar exchange through the seepage term — and the kind takes no `value`
+(the condition is the homogeneous relation itself). This is the g5
+(Geng & Boufadel bare-soil salinization) boundary physics, landed complete
+and unit-gated ahead of the Q4 capability PRs per §3.4 caveat 4.

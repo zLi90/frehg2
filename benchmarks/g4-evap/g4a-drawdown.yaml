@@ -1,0 +1,54 @@
+# g4(a) — analytic evaporative drawdown (v2 plan §3.3, per-PR gate).
+# Closed flat frictionless basin, uniform prescribed evaporation, no rain,
+# no boundary conditions: the exact solution is eta(t) = eta0 - E*t until
+# the dry threshold. Gate: |eta(t) - (eta0 - E*t)| <= 1e-6 of the total
+# drawdown at every output time, every cell, plus mass-audit closure.
+simulation:
+  id: g4a-drawdown
+  title: g4(a) closed-basin evaporative drawdown (analytic)
+
+domain:
+  nx: 4
+  ny: 3
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 0.5
+  bottom_elevation: {constant: -0.1}
+
+time:
+  dt: 10.0
+  t_end: 50000.0        # drawdown 0.05 m of the 0.1 m initial depth
+  output_interval: 5000.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.0}
+  min_depth: 1.0e-8
+  wetting_face_depth: 1.0e-8
+  evaporation: {constant: 1.0e-6}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+
+boundary_conditions:
+  - name: walls
+    # An explicit closed basin: the default domain edge keeps the legacy
+    # transmissive behavior (the b1 drain), which would flow water back IN
+    # as evaporation draws the interior below the outside stage — measured
+    # during gate bring-up as unbounded volume growth. Zero normal edge
+    # velocity closes every edge face.
+    region: {polygon: [[-1.0, -1.0], [5.0, -1.0], [5.0, 4.0], [-1.0, 4.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]

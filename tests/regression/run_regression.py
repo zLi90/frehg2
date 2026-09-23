@@ -40,6 +40,14 @@ Subcommands:
                     the plan §9 metrics are not applied
   smoke-b6          sanitizer path-coverage run of a b6 variant on a
                     shortened horizon (same purpose as smoke-b5)
+  g4                v2 Q4 analytic drawdown + evaporative concentration
+                    (plan §3.3, four sub-criteria (a)-(d); per-PR;
+                    authored failing per §6.1 — (c)/(d) turn green with
+                    the Q4 capability)
+  g5                v2 Q4 Geng & Boufadel (2015) bare-soil salinization,
+                    code-to-code vs the digitized MARUN figures
+                    (nightly-class; V2-A13/V2-A14 criteria; authored
+                    failing per §6.1)
 
 Every run happens in a copy of the benchmark case directory so relative
 input paths keep working and the repository stays clean.
@@ -1218,6 +1226,335 @@ def gate_rank_invariance_b5(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------------
+# v2 Q4 gates (plan §3.3, V2-A13/V2-A14): g4 analytic drawdown + evaporative
+# concentration (per-PR), g5 Geng & Boufadel 2015 bare-soil salinization
+# (nightly-class). Authored gate-first per §6.1: g4(c)/(d) and all of g5
+# FAIL against pre-Q4 code — (c)/g5 because the schema rejects the Q4
+# target keys ("capability absent"), (d) because the pre-Q4 evaporation
+# ledger books the potential rate after dry-out. The pure check functions
+# live in gate_evap.py so the §6.3 negative battery
+# (scripts/test_g45_gates.py) can prove each criterion able to fail.
+# ---------------------------------------------------------------------------
+import gate_evap  # noqa: E402
+
+
+def output_times(handle, group: str) -> list[int]:
+    """Sorted integer-second output times of an HDF5 field group."""
+    return sorted(int(k) for k in handle[group].keys())
+
+
+def validate_config(frehg: Path, config: Path) -> bool:
+    """True when `frehg --validate` accepts the configuration."""
+    result = subprocess.run([str(frehg), "--validate", str(config)],
+                            cwd=config.parent, capture_output=True, text=True,
+                            check=False)
+    return result.returncode == 0
+
+
+def g4_closure_error(output: Path) -> float:
+    """The full surface closure identity including the audited clamp column
+    (v2 Q4: the evaprain clamp's signed volume is measured into 'clamped',
+    so dV + outflow - rain + evap - bc - clamped closes to rounding)."""
+    with h5py.File(output, "r") as handle:
+        table = handle["/monitor/mass_audit"][:]
+    volume, rain, evap, outflow, bc = (table[:, k] for k in range(1, 6))
+    clamped = table[:, 6] if table.shape[1] > 6 else np.zeros_like(rain)
+    return float((volume[-1] - volume[0]) + outflow[-1] - rain[-1] + evap[-1] -
+                 bc[-1] - clamped[-1])
+
+
+def g4_drawdown_errors(output: Path, eta0: float, rate: float):
+    """(times, max-over-cells |eta - (eta0 - rate t)| per time)."""
+    times, errs = [], []
+    with h5py.File(output, "r") as handle:
+        for t in output_times(handle, "/surface/eta"):
+            field = handle[f"/surface/eta/{t}"][:]
+            errs.append(float(np.max(np.abs(field - (eta0 - rate * t)))))
+            times.append(t)
+    return times, errs
+
+
+def g4_concentration_series(output: Path):
+    """(times, max-cell concentration, max-cell depth) per output, plus the
+    per-step surf_mass column of the transport audit."""
+    times, s_vals, depths = [], [], []
+    with h5py.File(output, "r") as handle:
+        for t in output_times(handle, "/transport/concentration_surface"):
+            s = handle[f"/transport/concentration_surface/{t}"][:]
+            d = handle[f"/surface/depth/{t}"][:]
+            times.append(t)
+            s_vals.append(float(np.max(s)))
+            depths.append(float(np.max(d)))
+        mass = handle["/monitor/transport_audit"][:, 1]
+    return times, s_vals, depths, mass
+
+
+def run_and_rename(args: argparse.Namespace, case_dir: Path, config: str) -> Path:
+    """Run one g4 sub-case and move its output aside (the sub-cases share
+    out/output.h5)."""
+    run_case(args.frehg, case_dir / config, case_dir, args.mpiexec, args.ranks)
+    src = case_dir / "out" / "output.h5"
+    dst = case_dir / "out" / (Path(config).stem + ".h5")
+    shutil.move(src, dst)
+    return dst
+
+
+def gate_g4(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "g4-evap", args.work)
+    with open(HERE / "tolerances" / "g4-evap.yaml", encoding="utf-8") as handle:
+        tol = yaml.safe_load(handle)
+    ok = True
+
+    def report(sub: str, sub_ok: bool, msgs: list[str]) -> bool:
+        for msg in msgs:
+            print(f"  {msg}")
+        print(f"g4({sub}):", "ok" if sub_ok else "FAIL")
+        return sub_ok
+
+    # (a) prescribed-rate drawdown against the closed form.
+    out_a = run_and_rename(args, case_dir, "g4a-drawdown.yaml")
+    rate = 1.0e-6
+    total = rate * 50000.0
+    times, errs = g4_drawdown_errors(out_a, 0.0, rate)
+    sub_ok, msgs = gate_evap.check_drawdown(
+        times, errs, 0.0, rate, total, tol["drawdown"]["tol_fraction_of_total"])
+    # Closure via the audit identity (reference: total evaporated volume).
+    error = g4_closure_error(out_a)
+    c_ok = abs(error) <= tol["closure"]["tol_fraction"] * (total * 12.0)
+    c_msgs = [f"closure: |{error:.4e}| m^3 of {total * 12.0:.3f} m^3 evaporated "
+              f"{'ok' if c_ok else 'FAIL'}"]
+    ok &= report("a", sub_ok and c_ok, msgs + c_msgs)
+
+    # (b) evaporative concentration against s0 V0 / V(t).
+    out_b = run_and_rename(args, case_dir, "g4b-concentration.yaml")
+    times, s_vals, depths, mass = g4_concentration_series(out_b)
+    sub_ok, msgs = gate_evap.check_concentration(
+        times, s_vals, depths, 10.0, 0.1, tol["concentration"]["tol_rel"],
+        mass, tol["concentration"]["tol_mass_rel"])
+    ok &= report("b", sub_ok, msgs)
+
+    # (c) bulk mode under constant met forcing: E computable offline.
+    config_c = case_dir / "g4c-bulk.yaml"
+    if not validate_config(args.frehg, config_c):
+        ok &= report("c", False,
+                     ["capability absent: the schema rejects the Q4 "
+                      "atmosphere/bulk keys (expected until the Q4 "
+                      "capability PRs land — plan §6.1)"])
+    else:
+        with open(config_c, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        atm = doc["atmosphere"]
+        e_bulk = gate_evap.bulk_evaporation_rate(
+            atm["surface_temperature"]["constant"], atm["pressure"]["constant"],
+            atm["wind_speed"]["constant"], atm["specific_humidity"]["constant"])
+        print(f"  offline bulk rate E = {e_bulk:.4e} m/s")
+        out_c = run_and_rename(args, case_dir, "g4c-bulk.yaml")
+        t_end = doc["time"]["t_end"]
+        times, errs = g4_drawdown_errors(out_c, 0.0, e_bulk)
+        d_ok, d_msgs = gate_evap.check_drawdown(
+            times, errs, 0.0, e_bulk, e_bulk * t_end,
+            tol["drawdown"]["tol_fraction_of_total"])
+        times, s_vals, depths, mass = g4_concentration_series(out_c)
+        s_ok, s_msgs = gate_evap.check_concentration(
+            times, s_vals, depths, 10.0, 0.1, tol["concentration"]["tol_rel"],
+            mass, tol["concentration"]["tol_mass_rel"])
+        ok &= report("c", d_ok and s_ok, d_msgs + s_msgs)
+
+    # (d) drain-to-dry: positivity + the audited shortfall.
+    out_d = run_and_rename(args, case_dir, "g4d-drain.yaml")
+    with h5py.File(out_d, "r") as handle:
+        d_times = output_times(handle, "/surface/depth")
+        depth_min = [float(np.min(handle[f"/surface/depth/{t}"][:])) for t in d_times]
+        depth_final = float(np.max(handle[f"/surface/depth/{d_times[-1]}"][:]))
+    p_ok, p_msgs = gate_evap.check_positivity_and_dry(depth_min, depth_final, 1.0e-8)
+    error = g4_closure_error(out_d)
+    v0 = 0.02 * 12.0  # initial volume [m^3]
+    c_ok = abs(error) <= tol["closure"]["tol_fraction"] * v0
+    if c_ok:
+        c_msgs = [f"closure: |{error:.4e}| m^3 of the {v0:.2f} m^3 initial volume ok"]
+    else:
+        c_msgs = [f"closure: |{error:.4e}| m^3 of the {v0:.2f} m^3 initial volume "
+                  "FAIL (pre-Q4: the evaporation ledger books the potential "
+                  "rate after dry-out)"]
+    ok &= report("d", p_ok and c_ok, p_msgs + c_msgs)
+
+    print("g4 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def read_reference_csv(path: Path) -> dict[str, np.ndarray]:
+    """Column-name -> array from a digitized-reference CSV (comments '#';
+    empty cells -> NaN)."""
+    with open(path, encoding="utf-8") as handle:
+        rows = [line.strip() for line in handle
+                if line.strip() and not line.startswith("#")]
+    header = rows[0].split(",")
+    data = np.array([[float(v) if v else np.nan for v in line.split(",")]
+                     for line in rows[1:]])
+    return {name: data[:, k] for k, name in enumerate(header)}
+
+
+def g5_mean_profile(handle, group: str, t: int, nz: int) -> np.ndarray:
+    """Horizontal (whole-domain) average of a 3D field at time t -> (nz,)."""
+    field = handle[f"{group}/{t}"][:].reshape(-1, nz)
+    return field.mean(axis=0)
+
+
+def transpose_g5_case(case_dir: Path) -> None:
+    """Rewrite the staged g5 YAMLs as the y-z slice (the §8.1/§9 'transposed
+    g5 slice' x-battery row): swap nx/ny (square cells) and every polygon's
+    (x, y). The gate metrics are orientation-agnostic; finger positions are
+    instability-set and deliberately not compared (plan §3.4)."""
+    for config in sorted(case_dir.glob("*.yaml")):
+        with open(config, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        dom = doc["domain"]
+        dom["nx"], dom["ny"] = dom["ny"], dom["nx"]
+        dom["dx"], dom["dy"] = dom["dy"], dom["dx"]
+
+        def swap(polygon):
+            return [[pt[1], pt[0]] for pt in polygon]
+
+        if "evaporation" in doc.get("groundwater", {}):
+            region = doc["groundwater"]["evaporation"]["region"]
+            region["polygon"] = swap(region["polygon"])
+        for bc in doc.get("boundary_conditions", []):
+            bc["region"]["polygon"] = swap(bc["region"]["polygon"])
+        doc["simulation"]["id"] += "-transposed"
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        print(f"  transposed: {config.name}")
+
+
+def gate_g5(args: argparse.Namespace) -> int:
+    reuse = args.reuse_output and (args.work / "g5-geng2015" / "out").exists()
+    if reuse:
+        case_dir = args.work / "g5-geng2015"
+        print("g5 gate: --reuse-output — re-applying the metrics to the "
+              "existing runs")
+    else:
+        case_dir = stage_case(args.repo, "g5-geng2015", args.work)
+        if args.transposed:
+            transpose_g5_case(case_dir)
+    with open(HERE / "tolerances" / "g5-geng2015.yaml", encoding="utf-8") as handle:
+        tol = yaml.safe_load(handle)
+    config = case_dir / "g5-geng2015.yaml"
+    if not validate_config(args.frehg, config):
+        print("g5 gate: capability absent — the schema rejects the Q4 "
+              "atmosphere/evaporation keys (expected until the Q4 capability "
+              "PRs land — plan §6.1)")
+        print("g5 gate: FAIL")
+        return 1
+
+    ok = True
+    outputs = {}
+    for name in ("g5-geng2015", "g5-geng2015-nodensity"):
+        outputs[name] = case_dir / "out" / f"{name}.h5"
+        if reuse and outputs[name].exists():
+            continue
+        run_case(args.frehg, case_dir / f"{name}.yaml", case_dir, args.mpiexec,
+                 args.ranks)
+        shutil.move(case_dir / "out" / "output.h5", outputs[name])
+
+    ref_dir = args.repo / "benchmarks" / "g5-geng2015" / "reference"
+    fig3 = read_reference_csv(ref_dir / "fig3_evaporation_rate.csv")
+    fig4 = read_reference_csv(ref_dir / "fig4_moisture_ratio.csv")
+    fig9 = read_reference_csv(ref_dir / "fig9b_salinity.csv")
+    porosity = float(tol["porosity"])
+    zone_area = float(tol["evaporation_zone_area_m2"])
+    z_ref = fig4["elevation_m"]
+
+    with open(case_dir / "g5-geng2015.yaml", encoding="utf-8") as handle:
+        nz = int(yaml.safe_load(handle)["domain"]["nz"])
+
+    with h5py.File(outputs["g5-geng2015"], "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+        if audit.shape[1] < 8:
+            print("g5 gate: capability absent — gw_mass_audit has no "
+                  "evaporation column (Q4 audit extension pending)")
+            print("g5 gate: FAIL")
+            return 1
+        t_s = audit[:, 0]
+        cumulative = audit[:, 7]  # cumulative evaporated volume [m^3]
+        rate = np.diff(cumulative) / np.diff(t_s) / zone_area
+        t_mid_h = 0.5 * (t_s[1:] + t_s[:-1]) / 3600.0
+
+        # frehg's subsurface datum is the land surface at 0 (cells at
+        # negative z, the b2 convention); the paper's elevations put the
+        # surface at 2.0 m. 3D datasets are stored flat in the §7
+        # (j nx + i) nz + k order, so reshape(-1, nz) yields one row per
+        # column.
+        z_model = 2.0 + handle["/groundwater/zcell/0"][:].reshape(-1, nz)[0]
+        theta20 = g5_mean_profile(handle, "/groundwater/water_content", 72000, nz)
+        theta50 = g5_mean_profile(handle, "/groundwater/water_content", 180000, nz)
+        salt20 = g5_mean_profile(handle, "/transport/concentration", 72000, nz)
+        salt50 = g5_mean_profile(handle, "/transport/concentration", 180000, nz)
+        # Extrapolated surface saturation over the evaporation zone (the
+        # V2-A15 anchor): 1.5 theta0 - 0.5 theta1 at the surface face,
+        # columns x in [1, 49] m -> global i in [10, 490).
+        wc50 = handle["/groundwater/water_content/180000"][:].reshape(-1, nz)
+        w_face = 1.5 * wc50[10:490, 0] - 0.5 * wc50[10:490, 1]
+        s_surf_50h = float(np.mean(np.clip(w_face, 0.0, porosity))) / porosity
+        salt_mass = handle["/monitor/transport_audit"][:, 2]
+        s50_full = handle["/transport/concentration/180000"][:].reshape(-1, nz)
+
+    # (i) rate criteria (V2-A13).
+    sub_ok, msgs = gate_evap.check_rate_series(
+        t_mid_h, rate, float(tol["rate"]["e0_closed_form"]),
+        float(tol["rate"]["e10_reference"]), s_surf_50h,
+        decay_bound=float(tol["rate"]["decay_bound"]),
+        saturation_band=(float(tol["rate"]["saturation_min"]),
+                         float(tol["rate"]["saturation_max"])))
+    for msg in msgs:
+        print(f"  {msg}")
+    ok &= sub_ok
+
+    # (ii) profiles vs the digitized references (model interpolated onto
+    # the reference elevation grid; zcell descends with k, so re-sort).
+    order = np.argsort(z_model)
+
+    def on_ref(profile: np.ndarray) -> np.ndarray:
+        return np.interp(z_ref, z_model[order], profile[order])
+
+    sub_ok, msgs = gate_evap.record_moisture_profiles(
+        z_ref, on_ref(theta20) / porosity, on_ref(theta50) / porosity,
+        fig4["moisture_20h"], fig4["moisture_50h"])
+    for msg in msgs:
+        print(f"  {msg}")
+    ok &= sub_ok
+    sub_ok, msgs = gate_evap.check_salinity_profiles(
+        z_ref, on_ref(salt20), on_ref(salt50),
+        fig9["salinity_20h_gL"], fig9["salinity_50h_gL"],
+        float(tol["salinity"]["peak_min_g_l"]),
+        float(tol["salinity"]["peak_above_z"]))
+    for msg in msgs:
+        print(f"  {msg}")
+    ok &= sub_ok
+
+    # (iii) salt-mass conservation (the paper's own 4 % bound).
+    sub_ok, msgs = gate_evap.check_salt_mass(salt_mass,
+                                             float(tol["salt_mass"]["tol_fraction"]))
+    for msg in msgs:
+        print(f"  {msg}")
+    ok &= sub_ok
+
+    # (iv) density contrast at 50 h (V2-A14 direction).
+    with h5py.File(outputs["g5-geng2015-nodensity"], "r") as handle:
+        s50_control = handle["/transport/concentration/180000"][:].reshape(-1, nz)
+    edge = float(tol["density"]["edge_g_l"])
+    zmin_beta = gate_evap.plume_edge_min_elevation(z_model, s50_full, edge)
+    zmin_ctrl = gate_evap.plume_edge_min_elevation(z_model, s50_control, edge)
+    sub_ok, msgs = gate_evap.check_density_contrast(
+        zmin_beta, zmin_ctrl, float(tol["density"]["min_margin_m"]))
+    for msg in msgs:
+        print(f"  {msg}")
+    ok &= sub_ok
+
+    print("g5 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def gate_b1_restart(args: argparse.Namespace) -> int:
     # Uninterrupted run with a checkpoint at half time.
     case_dir = stage_case(args.repo, "b1-sw", args.work)
@@ -1299,7 +1636,7 @@ def main() -> int:
                                          "b2-restart", "b5-restart", "b6-restart",
                                          "rank-invariance", "rank-invariance-b2",
                                          "rank-invariance-b5", "b6-gw-smoke",
-                                         "smoke-b5", "smoke-b6"])
+                                         "smoke-b5", "smoke-b6", "g4", "g5"])
     parser.add_argument("--frehg", type=Path, required=True)
     parser.add_argument("--mpiexec", type=Path, required=True)
     parser.add_argument("--repo", type=Path, required=True)
@@ -1325,6 +1662,9 @@ def main() -> int:
                         help="g1 solver-invariance gate (v2 plan §2.3): run the gate "
                              "with this preconditioner selected via the solver YAML "
                              "block for both systems; pass/fail criteria unchanged")
+    parser.add_argument("--transposed", action="store_true",
+                        help="g5 gate: run the case as the y-z slice (the §9 Q4 "
+                             "'transposed g5 slice' x-battery row); same criteria")
     parser.add_argument("--mat-type", choices=["aij", "aijkokkos"], default=None,
                         help="p1 backend-invariance gate (v2 plan §2B.3): run the "
                              "gate with this PETSc matrix/vector backend selected "
@@ -1375,6 +1715,10 @@ def main() -> int:
         return gate_smoke_b5(args)
     if args.gate == "smoke-b6":
         return gate_smoke_b6(args)
+    if args.gate == "g4":
+        return gate_g4(args)
+    if args.gate == "g5":
+        return gate_g5(args)
     return gate_rank_invariance(args)
 
 

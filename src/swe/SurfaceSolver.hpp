@@ -28,6 +28,7 @@
 #ifndef FREHG_SWE_SURFACESOLVER_HPP
 #define FREHG_SWE_SURFACESOLVER_HPP
 
+#include "atm/MetForcing.hpp"
 #include "bc/BoundarySet.hpp"
 #include "core/Config.hpp"
 #include "core/Grid.hpp"
@@ -203,6 +204,9 @@ class SurfaceSolver {
   void readBathymetry(const FrehgConfig& config);
   /// Stage the rain coverage mask (whole domain or rain polygon) on device.
   void buildRainMask(const FrehgConfig& config);
+  /// Stage the evaporation application mask (v2 Q4: the prescribed-mode
+  /// exclude region; all-ones without one — bitwise the unmasked legacy).
+  void buildEvapMask(const FrehgConfig& config);
   /// Set the initial eta/velocity state from the config and derive the
   /// consistent depth and face geometry.
   void applyInitialConditions(const FrehgConfig& config);
@@ -301,6 +305,9 @@ class SurfaceSolver {
   TimeSeries rainSeries_, evapSeries_;
   TimeSeries windSpeedSeries_, windDirectionSeries_;
   bool hasRainExclusion_ = false;
+  /// Open-water evaporation mode and its met forcing (v2 Q4, plan §3.2).
+  SurfaceWaterConfig::EvapMode evapMode_ = SurfaceWaterConfig::EvapMode::Prescribed;
+  atm::MetForcing met_;
 
   // Current-step forcing values.
   real_t rain_ = 0.0, evap_ = 0.0;
@@ -318,6 +325,7 @@ class SurfaceSolver {
   Field2<real_t> etaBcValue_;
   Field2<real_t> isEtaBc_;      ///< 1.0 on eta-condition cells (halo-exchanged once)
   Field2<real_t> rainMask_;     ///< 1.0 where rain applies (exclusion region = 0)
+  Field2<real_t> evapMask_;     ///< 1.0 where evaporation applies (v2 Q4 mask)
   Field2<real_t> frictionCoef_; ///< Manning n or Chezy C per cell
   Field2<real_t> etaOut_;       ///< scratch for offset-corrected eta output
 

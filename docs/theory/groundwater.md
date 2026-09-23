@@ -171,3 +171,24 @@ of the θ update), `realloc` (net θ change by the post-allocation step),
 closes to rounding every step by construction (`GwModule.AuditIdentity…`
 asserts ≤ 1e-12), and a fully closed domain conserves volume to better than
 1e-8 relative per step (plan §10 P2; `GwModule.ClosedColumnConservesMass`).
+
+## Bulk soil evaporation (v2 Q4, plan §3.2)
+
+`groundwater.evaporation` (mode `bulk`, uncoupled runs only) marks the
+region's columns as flux tops and refreshes their `topValue` every
+substep: the potential bulk-aerodynamic rate from the `atmosphere` block,
+limited through the surface-layer soil relative humidity
+α₁ = min(1, 1.8·w_g/(w_g + 0.30)) (Geng & Boufadel 2015 Eq. 6, with
+w_g = θ of the column's top cell from the end of the previous substep —
+the same explicit lag as every boundary value). The flux rides the
+existing prescribed-top path unchanged (`Corrector.cpp`'s qtop source and
+its moisture guard), so evaporation shuts down smoothly as the surface
+dries toward the α₁ equilibrium (S = q_a/q_sat inverted; 0.0915 for the
+Table-1 forcing — reached far above the residual-moisture cutoff, which
+this mode therefore never exercises). Condensation (negative rate) passes
+through per V2-A13. The realized evaporated volume — read off the actual
+top-face Darcy flux, not the potential — accumulates into the
+`evaporation` column of `/monitor/gw_mass_audit` (the g5(i) observable).
+The salt side is the `scalar_cauchy` condition
+([transport theory](transport.md)); pairing both over the same region is
+the g5 configuration.

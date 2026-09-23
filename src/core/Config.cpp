@@ -136,8 +136,37 @@ SurfaceWaterConfig extractSurfaceWater(const YAML::Node& node) {
     }
   }
   if (node["evaporation"].IsDefined()) {
-    out.evaporation = extractSeriesOrConstant(node["evaporation"]);
+    const YAML::Node evap = node["evaporation"];
+    if (valueOr<std::string>(evap["mode"], "prescribed") == "bulk") {
+      out.evapMode = SurfaceWaterConfig::EvapMode::Bulk;
+    } else {
+      out.evaporation = extractSeriesOrConstant(evap);
+      const YAML::Node exclude = evap["exclude"];
+      if (exclude.IsDefined()) {
+        const YAML::Node polygon = exclude["polygon"];
+        for (std::size_t n = 0; n < polygon.size(); ++n) {
+          out.evaporationExcludePolygon.push_back(
+              {polygon[n][0].as<real_t>(), polygon[n][1].as<real_t>()});
+        }
+      }
+    }
   }
+  return out;
+}
+
+AtmosphereConfig extractAtmosphere(const YAML::Node& node) {
+  AtmosphereConfig out;
+  out.present = true;
+  out.airTemperature = extractSeriesOrConstant(node["air_temperature"]);
+  out.surfaceTemperature = extractSeriesOrConstant(node["surface_temperature"]);
+  out.pressure = extractSeriesOrConstant(node["pressure"]);
+  if (node["relative_humidity"].IsDefined()) {
+    out.humidityIsRelative = true;
+    out.relativeHumidity = extractSeriesOrConstant(node["relative_humidity"]);
+  } else {
+    out.specificHumidity = extractSeriesOrConstant(node["specific_humidity"]);
+  }
+  out.windSpeed = extractSeriesOrConstant(node["wind_speed"]);
   return out;
 }
 
@@ -160,6 +189,14 @@ GroundwaterConfig extractGroundwater(const YAML::Node& node) {
                                 : GroundwaterConfig::ReallocationSurplus::Drop;
   if (node["density_coupling"].IsDefined()) {
     out.densityCoupling.enabled = valueOr<bool>(node["density_coupling"]["enabled"], false);
+  }
+  if (node["evaporation"].IsDefined()) {
+    out.evaporation.enabled = true;  // mode "bulk" is the sole schema value
+    const YAML::Node polygon = node["evaporation"]["region"]["polygon"];
+    for (std::size_t n = 0; n < polygon.size(); ++n) {
+      out.evaporation.polygon.push_back(
+          {polygon[n][0].as<real_t>(), polygon[n][1].as<real_t>()});
+    }
   }
   return out;
 }
@@ -260,6 +297,9 @@ BcKind kindFromString(const std::string& s) {
   if (s == "flux") {
     return BcKind::Flux;
   }
+  if (s == "scalar_cauchy") {
+    return BcKind::ScalarCauchy;
+  }
   return BcKind::ScalarValue;
 }
 
@@ -278,7 +318,8 @@ std::vector<BoundaryConditionConfig> extractBoundaryConditions(const YAML::Node&
     bc.kind = kindFromString(bcNode["kind"].as<std::string>());
     const YAML::Node value = bcNode["value"];
     if (!value.IsDefined()) {
-      // Only the outflow kind takes no value (schema cross-check).
+      // Only the outflow and scalar_cauchy kinds take no value (schema
+      // cross-check).
       bc.value.form = BcValueConfig::Form::Constant;
     } else if (value["constant"].IsDefined()) {
       bc.value.form = BcValueConfig::Form::Constant;
@@ -320,6 +361,7 @@ TransportConfig extractTransport(const YAML::Node& node) {
       out.boundMax = node["bounds"]["max"].as<real_t>();
     }
   }
+  out.legacyEvapAllowance = valueOr<bool>(node["legacy_evap_allowance"], false);
   return out;
 }
 
@@ -423,6 +465,9 @@ FrehgConfig loadConfig(const std::string& path) {
   cfg.domain = extractDomain(root["domain"]);
   cfg.time = extractTime(root["time"]);
   cfg.modules = extractModules(root["modules"]);
+  if (root["atmosphere"].IsDefined()) {
+    cfg.atmosphere = extractAtmosphere(root["atmosphere"]);
+  }
   if (root["surface_water"].IsDefined()) {
     cfg.surfaceWater = extractSurfaceWater(root["surface_water"]);
   }
@@ -664,8 +709,30 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
       rainfall["exclude"]["polygon"] = emitPolygon(sw.rainfallExcludePolygon);
     }
     node["rainfall"] = rainfall;
-    node["evaporation"] = emitSeriesOrConstant(sw.evaporation);
+    if (sw.evapMode == SurfaceWaterConfig::EvapMode::Bulk) {
+      node["evaporation"]["mode"] = "bulk";
+    } else {
+      YAML::Node evap = emitSeriesOrConstant(sw.evaporation);
+      if (!sw.evaporationExcludePolygon.empty()) {
+        evap["exclude"]["polygon"] = emitPolygon(sw.evaporationExcludePolygon);
+      }
+      node["evaporation"] = evap;
+    }
     root["surface_water"] = node;
+  }
+
+  if (cfg.atmosphere.present) {
+    YAML::Node atm;
+    atm["air_temperature"] = emitSeriesOrConstant(cfg.atmosphere.airTemperature);
+    atm["surface_temperature"] = emitSeriesOrConstant(cfg.atmosphere.surfaceTemperature);
+    atm["pressure"] = emitSeriesOrConstant(cfg.atmosphere.pressure);
+    if (cfg.atmosphere.humidityIsRelative) {
+      atm["relative_humidity"] = emitSeriesOrConstant(cfg.atmosphere.relativeHumidity);
+    } else {
+      atm["specific_humidity"] = emitSeriesOrConstant(cfg.atmosphere.specificHumidity);
+    }
+    atm["wind_speed"] = emitSeriesOrConstant(cfg.atmosphere.windSpeed);
+    root["atmosphere"] = atm;
   }
 
   if (cfg.modules.groundwater) {
@@ -685,6 +752,10 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
             ? "redistribute"
             : "drop";
     node["density_coupling"]["enabled"] = gw.densityCoupling.enabled;
+    if (gw.evaporation.enabled) {
+      node["evaporation"]["mode"] = "bulk";
+      node["evaporation"]["region"]["polygon"] = emitPolygon(gw.evaporation.polygon);
+    }
     root["groundwater"] = node;
 
     YAML::Node soil;
@@ -754,15 +825,17 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
                     : bc.target == BcTarget::GroundwaterTop    ? "groundwater_top"
                     : bc.target == BcTarget::GroundwaterBottom ? "groundwater_bottom"
                                                                : "groundwater_side";
-      b["kind"] = bc.kind == BcKind::Eta         ? "eta"
-                  : bc.kind == BcKind::Discharge ? "discharge"
-                  : bc.kind == BcKind::Velocity  ? "velocity"
-                  : bc.kind == BcKind::Outflow   ? "outflow"
-                  : bc.kind == BcKind::Head      ? "head"
-                  : bc.kind == BcKind::Flux      ? "flux"
-                                                 : "scalar_value";
-      // Outflow takes no value (schema cross-check: transmissive).
-      if (bc.kind != BcKind::Outflow) {
+      b["kind"] = bc.kind == BcKind::Eta          ? "eta"
+                  : bc.kind == BcKind::Discharge  ? "discharge"
+                  : bc.kind == BcKind::Velocity   ? "velocity"
+                  : bc.kind == BcKind::Outflow    ? "outflow"
+                  : bc.kind == BcKind::Head       ? "head"
+                  : bc.kind == BcKind::Flux       ? "flux"
+                  : bc.kind == BcKind::ScalarCauchy ? "scalar_cauchy"
+                                                  : "scalar_value";
+      // Outflow and scalar_cauchy take no value (schema cross-check:
+      // transmissive / homogeneous zero-total-flux).
+      if (bc.kind != BcKind::Outflow && bc.kind != BcKind::ScalarCauchy) {
         switch (bc.value.form) {
           case BcValueConfig::Form::Constant:
             b["value"]["constant"] = bc.value.constant;
@@ -797,6 +870,7 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     if (tr.hasBoundMax) {
       node["bounds"]["max"] = tr.boundMax;
     }
+    node["legacy_evap_allowance"] = tr.legacyEvapAllowance;
     root["transport"] = node;
   }
 

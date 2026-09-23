@@ -24,7 +24,7 @@ void SurfaceSolver::evapRain() {
   const real_t evap = evap_;
   const real_t minDepth = minDepth_;
   const real_t cellArea = grid_.dx() * grid_.dy();
-  Field2<real_t> eta = eta_, bottom = bottom_, mask = rainMask_;
+  Field2<real_t> eta = eta_, bottom = bottom_, mask = rainMask_, emask = evapMask_;
 
   // Rain lands on every non-excluded cell, wet or dry
   // (shallowwater.c:583-601).
@@ -40,31 +40,60 @@ void SurfaceSolver::evapRain() {
       rainAdded);
   audit_.rainVolume += rainAdded;
 
-  // Evaporation is subtracted unconditionally; the clamp below absorbs
-  // over-drying (shallowwater.c:614-626).
   real_t evapRemoved = 0.0;
-  Kokkos::parallel_reduce(
-      "swe_evap",
-      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
-          {1, 1}, {nyl + 1, nxl + 1}),
-      KOKKOS_LAMBDA(const int j, const int i, real_t& sum) {
-        eta(j, i) -= evap * dt;
-        sum += evap * dt * cellArea;
-      },
-      evapRemoved);
+  if (evapMode_ == SurfaceWaterConfig::EvapMode::Bulk) {
+    // v2 Q4 bulk mode (plan §3.2): wet cells only, at most the available
+    // depth per cell — no volume creation, so the audited value IS the
+    // actual removal. A negative rate (condensation, V2-A13) deposits.
+    Kokkos::parallel_reduce(
+        "swe_evap_bulk",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {1, 1}, {nyl + 1, nxl + 1}),
+        KOKKOS_LAMBDA(const int j, const int i, real_t& sum) {
+          const real_t depth = eta(j, i) - bottom(j, i);
+          if (depth > 0.0) {
+            const real_t removed = Kokkos::fmin(evap * dt, depth);
+            eta(j, i) -= removed;
+            sum += removed * cellArea;
+          }
+        },
+        evapRemoved);
+  } else {
+    // Prescribed mode: subtracted unconditionally over the non-excluded
+    // cells; the clamp below absorbs over-drying (shallowwater.c:614-626;
+    // no exclude region -> the mask is 1.0 everywhere and the arithmetic
+    // is bitwise the legacy form).
+    Kokkos::parallel_reduce(
+        "swe_evap",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {1, 1}, {nyl + 1, nxl + 1}),
+        KOKKOS_LAMBDA(const int j, const int i, real_t& sum) {
+          eta(j, i) -= evap * dt * emask(j, i);
+          sum += evap * dt * emask(j, i) * cellArea;
+        },
+        evapRemoved);
+  }
   audit_.evapVolume += evapRemoved;
 
   // Negative and sub-threshold depths are dried (shallowwater.c:628-635).
-  Kokkos::parallel_for(
+  // v2 Q4: the clamp's signed volume change is measured into the clamp
+  // audit (positive = created) instead of silently entering the closure
+  // residual — the g4(d) audited-shortfall requirement. The eta arithmetic
+  // is unchanged.
+  real_t clamped = 0.0;
+  Kokkos::parallel_reduce(
       "swe_evaprain_clamp",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
           {1, 1}, {nyl + 1, nxl + 1}),
-      KOKKOS_LAMBDA(const int j, const int i) {
+      KOKKOS_LAMBDA(const int j, const int i, real_t& acc) {
         const real_t diff = eta(j, i) - bottom(j, i);
         if (diff < minDepth) {
+          acc += (bottom(j, i) - eta(j, i)) * cellArea;
           eta(j, i) = bottom(j, i);
         }
-      });
+      },
+      clamped);
+  audit_.clampVolume += clamped;
 }
 
 }  // namespace frehg::swe

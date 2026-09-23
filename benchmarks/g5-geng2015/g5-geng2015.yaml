@@ -1,0 +1,114 @@
+# g5 — Geng & Boufadel (2015) bare-soil salinization (v2 plan §3.3/§3.4,
+# nightly-class, code-to-code vs MARUN). All parameters from the paper's
+# Table 1; domain/mesh/horizon from §2.3.1 and §2.4 (50 x 2 m, medium
+# mesh: dx = 0.1 m, dz = 0.025 m at the surface — expressed here as the
+# geometric profile nz=27 / dz=0.025 / stretch=1.074506, which sums to
+# 2.000 m and puts 4 cell centres above z = 1.9 m; dt = 10 s, 50 h).
+# Frehg2 runs the MARUN vertical plane as an x-z slice (ny = 1, the
+# b2/b3 pattern). Initial state: saturated, 25 g/L everywhere.
+#
+# THE EVAPORATION FORCING IS THE Q4 TARGET SCHEMA (plan §3.2, authored
+# gate-first per §6.1): the `atmosphere:` block and
+# `groundwater.evaporation` bulk mode do not exist yet, so
+# `frehg --validate` rejects this file and the gate FAILS as
+# "capability absent" until the capability PRs land. The salt side —
+# `kind: scalar_cauchy` (Eq. 7: water leaves, salt stays) — is already
+# implemented and unit-gated (commit 03827ff).
+#
+# The evaporation zone is x in [1, 49] m (§2.3.2: insetting it keeps the
+# problem 2D); all other boundaries no-flow (the uncoupled default).
+simulation:
+  id: g5-geng2015
+  title: Geng & Boufadel (2015) bare-soil evaporation and salinization
+
+domain:
+  nx: 500
+  ny: 1
+  nz: 27
+  dx: 0.1
+  dy: 0.1
+  dz: 0.025
+  dz_stretch: 1.074506
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 10.0
+  t_end: 180000.0        # 50 h
+  output_interval: 3600.0
+
+modules:
+  groundwater: true
+  transport: true
+
+atmosphere:
+  air_temperature: {constant: 20.0}     # [C]
+  surface_temperature: {constant: 20.0} # [C] T_s, prescribed until Q5
+  pressure: {constant: 101.325}         # [kPa] P0
+  specific_humidity: {constant: 2.9e-3} # [-] q_a = 20% of q_sat(T_s)
+  wind_speed: {constant: 1.0}           # [m/s] U_z
+
+groundwater:
+  scheme: pca
+  timestep:
+    dt_init: 10.0
+    dt_min: 10.0
+    dt_max: 10.0
+  specific_storage: 1.0e-5              # S0 [1/m]
+  # Mass-conserving reallocation (the b3 physics-gate mode, amendment A7):
+  # the legacy 'drop' default discards the surplus of saturation-adjacent
+  # cells — measured during g5 bring-up as 24 mm of water lost in 20 h,
+  # 5x the evaporation itself.
+  reallocation_surplus: redistribute
+  density_coupling: {enabled: true}     # beta = 7.44e-4 L/g (hardwired)
+  # Q4 target schema: potential rate from the atmosphere block's bulk-
+  # aerodynamic module, actual rate limited by the surface-layer soil
+  # relative humidity alpha_1 = min(1, 1.8 w_g / (w_g + 0.30)) (paper
+  # Eq. 6), applied as the top-face flux over the region.
+  evaporation:
+    mode: bulk
+    region:
+      polygon: [[1.0, -0.1], [49.0, -0.1], [49.0, 0.2], [1.0, 0.2]]
+
+soil:
+  types:
+    - name: sand
+      ksx: 9.0e-4                       # K0 [m/s]
+      ksy: 9.0e-4
+      ksz: 9.0e-4
+      theta_s: 0.41                     # porosity phi
+      theta_r: 0.0082                   # S_r = 0.02 -> theta_r = 0.02*phi
+      vg_alpha: 4.75                    # [1/m]
+      vg_n: 8.5
+      aev: -0.02
+  map: {constant: sand}
+
+transport:
+  scheme: {advection: upwind}
+  dispersion:
+    longitudinal: 0.1                   # alpha_L [m]
+    transverse: 0.01                    # alpha_T [m]
+    molecular: 1.0e-10                  # tau*Dm [m^2/s]
+  bounds: {min: 0.0}
+
+initial_conditions:
+  groundwater:
+    # Hydrostatic saturated column (water table at the land surface, the
+    # datum 0): the paper's "initially fully saturated". A moisture IC
+    # would set a uniform (non-equilibrium) pressure head and launch a
+    # spurious drainage transient.
+    water_table: {constant: 0.0}
+  transport:
+    groundwater: {constant: 25.0}       # [g/L]
+
+boundary_conditions:
+  - name: salt-cauchy-top
+    region:
+      polygon: [[1.0, -0.1], [49.0, -0.1], [49.0, 0.2], [1.0, 0.2]]
+    target: groundwater_top
+    kind: scalar_cauchy
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [water_content, hydraulic_head]
+    transport: [concentration]

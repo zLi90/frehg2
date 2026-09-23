@@ -1,0 +1,8 @@
+# g4 — analytic drawdown + evaporative concentration (v2 plan §3.3).
+drawdown:
+  tol_fraction_of_total: 1.0e-6   # |eta - analytic| vs total drawdown
+concentration:
+  tol_rel: 1.0e-4                 # s(t) vs s0*V0/V(t)
+  tol_mass_rel: 1.0e-10           # salt-mass drift vs initial
+closure:
+  tol_fraction: 1.0e-8            # |audit error| vs the sub-case reference

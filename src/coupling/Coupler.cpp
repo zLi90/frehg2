@@ -74,6 +74,7 @@ void Coupler::step(real_t t, real_t dt) {
     audit_.gw.cplBounce += a.cplBounce;
     audit_.gw.cplVent += a.cplVent;
     audit_.gw.cplEvap += a.cplEvap;
+    audit_.gw.evap += a.evap;
     ++audit_.substeps;
   };
 

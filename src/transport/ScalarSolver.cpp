@@ -127,6 +127,7 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
   // limiter guards compare against it exactly as legacy compared against
   // s_lim_hi, and the final clamp only applies with a configured maximum.
   boundMax_ = hasBoundMax_ ? tr.boundMax : 1.0e30;
+  legacyEvapAllowance_ = tr.legacyEvapAllowance;
 
   const std::size_t ny2 = static_cast<std::size_t>(grid_.nyLocal()) + 2;
   const std::size_t nx2 = static_cast<std::size_t>(grid_.nxLocal()) + 2;
@@ -173,6 +174,7 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
     sFarYp3_ = Field3<real_t>("s_far_yp_3d", ny2, nx2, nz);
     kzLower_ = Field3<real_t>("s_kz_lower", ny2, nx2, nz);
     kTop_ = Field2<int>("s_ktop", ny2, nx2);
+    cauchyTop_ = Field2<int>("s_cauchy_top", ny2, nx2);
     halo_.add("s_subs", sSubs_);
     halo_.add("s_dxx", dxx_);
     halo_.add("s_dyy", dyy_);
@@ -237,6 +239,24 @@ void ScalarSolver::buildBoundaryLists(const BoundarySet& boundaries) {
   };
 
   for (const BoundaryCondition& bc : boundaries.all()) {
+    if (bc.kind() == BcKind::ScalarCauchy) {
+      // The v2 §3.2 zero-total-scalar-flux top condition (Geng & Boufadel
+      // Eq. (7)): mark the member columns; the subsurface step reads the
+      // mask at the top face (no scalar crosses) and in the limiter update
+      // (the exact concentration/dilution allowance). Schema restricts the
+      // kind to target groundwater_top in uncoupled groundwater runs.
+      if (!subs_.active) {
+        log::fatal(log::msg() << "scalar condition '" << bc.name()
+                              << "': scalar_cauchy requires the groundwater module");
+      }
+      auto host = Kokkos::create_mirror_view(cauchyTop_);
+      Kokkos::deep_copy(host, cauchyTop_);
+      for (const BcCell& cell : bc.cells()) {
+        host(static_cast<std::size_t>(cell.j), static_cast<std::size_t>(cell.i)) = 1;
+      }
+      Kokkos::deep_copy(cauchyTop_, host);
+      continue;
+    }
     if (bc.kind() != BcKind::ScalarValue) {
       continue;
     }

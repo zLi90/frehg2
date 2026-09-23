@@ -220,6 +220,12 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
     auditConfig.j = 0;
     auditConfig.variables = {"volume", "boundary_in", "ss_storage", "realloc",
                              "realloc_dropped", "vloss"};
+    if (config_.groundwater.evaporation.enabled) {
+      // v2 Q4: cumulative actual evaporated volume through the bulk-soil-
+      // evaporation zone (appended so earlier columns keep their indices;
+      // the g5 gate reads it as column 7).
+      auditConfig.variables.push_back("evaporation");
+    }
     gwMassAudit_ = std::make_unique<io::Monitor>(*output_, auditConfig);
   }
   if (transport_) {
@@ -520,18 +526,24 @@ void Simulation::recordGwMassAudit(real_t t) {
   // Coupled runs report the window aggregate (all subcycled substeps of the
   // surface step); groundwater-only runs report the single step.
   const gw::GwStepAudit& audit = coupler_ ? coupler_->audit().gw : gw_->audit();
-  const real_t local[6] = {gw_->ownedVolume(), audit.boundaryIn, audit.ssStorage,
-                           audit.reallocAdjust, audit.reallocDropped, audit.vloss};
-  real_t global[6] = {0, 0, 0, 0, 0, 0};
-  MPI_Reduce(local, global, 6, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+  const real_t local[7] = {gw_->ownedVolume(), audit.boundaryIn, audit.ssStorage,
+                           audit.reallocAdjust, audit.reallocDropped, audit.vloss,
+                           audit.evap};
+  real_t global[7] = {0, 0, 0, 0, 0, 0, 0};
+  MPI_Reduce(local, global, 7, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
   if (grid_.rank() == 0) {
     cumGwBoundary_ += global[1];
     cumGwStorage_ += global[2];
     cumGwRealloc_ += global[3];
     cumGwDropped_ += global[4];
     cumGwVloss_ += global[5];
-    gwMassAudit_->record(t, {global[0], cumGwBoundary_, cumGwStorage_, cumGwRealloc_,
-                             cumGwDropped_, cumGwVloss_});
+    cumGwEvap_ += global[6];
+    std::vector<real_t> row = {global[0], cumGwBoundary_, cumGwStorage_, cumGwRealloc_,
+                               cumGwDropped_, cumGwVloss_};
+    if (config_.groundwater.evaporation.enabled) {
+      row.push_back(cumGwEvap_);
+    }
+    gwMassAudit_->record(t, row);
   } else {
     gwMassAudit_->record(t, {});
   }

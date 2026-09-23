@@ -643,6 +643,148 @@ TEST(TransportModule, SideScalarValueSetsSubsurfaceGhosts) {
 }
 
 // ---------------------------------------------------------------------------
+// scalar_cauchy top condition (v2 Q4, plan §3.2 — Geng & Boufadel Eq. (7)):
+// water crosses the subsurface top face, scalar mass does not, and the
+// top-cell limiter admits the exact concentration/dilution the water
+// loss/gain implies. The negative twin pins the pre-v2 throttle so the new
+// kind demonstrably changes behavior (§6.3-style sensitivity at unit level).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Unsaturated 1D column with a prescribed top water flux (positive up =
+/// evaporation), uniform initial salinity 25, dispersion off — the pure
+/// evaporative-concentration configuration.
+frehg::FrehgConfig cauchyColumnConfig(real_t topFlux) {
+  frehg::FrehgConfig cfg;
+  cfg.simulation.id = "transport-cauchy";
+  cfg.domain.nx = 1;
+  cfg.domain.ny = 1;
+  cfg.domain.nz = 8;
+  cfg.domain.dx = 1.0;
+  cfg.domain.dy = 1.0;
+  cfg.domain.dz = 0.05;
+  cfg.domain.bottomElevation.constant = 0.0;
+  cfg.time.dt = 2.0;
+  cfg.time.tEnd = 1.0e4;
+  cfg.time.outputInterval = 1.0e4;
+  cfg.modules.groundwater = true;
+  cfg.modules.transport = true;
+  cfg.groundwater.timestep.dtInit = 2.0;
+  cfg.groundwater.timestep.dtMin = 2.0;
+  cfg.groundwater.timestep.dtMax = 2.0;
+  cfg.groundwater.specificStorage = 0.0;
+  cfg.soil.types = {testSoil(1.0e-5)};
+  cfg.soil.map.constantName = "test";
+  cfg.initialConditions.groundwater.form = frehg::GroundwaterInitialConfig::Form::Moisture;
+  cfg.initialConditions.groundwater.value.constant = 0.3;
+  cfg.transport.scheme.advection = frehg::TransportSchemeConfig::Advection::Upwind;
+  cfg.transport.dispersionLongitudinal = 0.0;
+  cfg.transport.dispersionTransverse = 0.0;
+  cfg.transport.dispersionMolecular = 0.0;
+  cfg.initialConditions.transport.groundwater.constant = 25.0;
+
+  frehg::BoundaryConditionConfig flux;
+  flux.name = "top-water-flux";
+  flux.polygon = {{-0.1, -0.1}, {1.1, -0.1}, {1.1, 1.1}, {-0.1, 1.1}};
+  flux.target = frehg::BcTarget::GroundwaterTop;
+  flux.kind = frehg::BcKind::Flux;
+  flux.value.form = frehg::BcValueConfig::Form::Constant;
+  flux.value.constant = topFlux;
+  frehg::BoundaryConditionConfig cauchy = flux;
+  cauchy.name = "salt-cauchy";
+  cauchy.kind = frehg::BcKind::ScalarCauchy;
+  cauchy.value = frehg::BcValueConfig{};
+  cfg.boundaryConditions = {flux, cauchy};
+  return cfg;
+}
+
+}  // namespace
+
+TEST(TransportModule, CauchyTopConcentratesUnderEvaporationWithoutClipping) {
+  // Evaporation extracts water through the top face; the scalar stays and
+  // concentrates. With the exact limiter allowance the clip delta is zero,
+  // the boundary scalar flux is zero, and the closure identity holds.
+  MiniTransport mini;
+  mini.cfg = cauchyColumnConfig(1.0e-5);  // positive up: evaporation
+  mini.build();
+
+  const real_t saltBefore = mini.transport->ownedSubsurfaceMass();
+  real_t waterBefore = 0.0;
+  for (int k = 0; k < 8; ++k) {
+    waterBefore += interior3(mini.gw->waterContent(), 1, 1, k);
+  }
+  real_t before = saltBefore;
+  for (int n = 0; n < 40; ++n) {
+    mini.step();
+    const real_t after = mini.transport->ownedSubsurfaceMass();
+    const frehg::transport::TransportAudit& a = mini.transport->audit();
+    const real_t residual =
+        (after - before) - (a.subsBoundary + a.subsAdjust + a.subsAnchor - a.exchange);
+    EXPECT_NEAR(residual, 0.0, 1.0e-8 * saltBefore) << "step " << n;
+    // No scalar mass crosses any boundary, and the limiter does not clip
+    // the evaporative concentration (the pre-v2 throttle is gone).
+    EXPECT_NEAR(a.subsBoundary, 0.0, 1.0e-12 * saltBefore) << "step " << n;
+    EXPECT_NEAR(a.subsAdjust, 0.0, 1.0e-10 * saltBefore) << "step " << n;
+    before = after;
+  }
+
+  real_t waterAfter = 0.0;
+  for (int k = 0; k < 8; ++k) {
+    waterAfter += interior3(mini.gw->waterContent(), 1, 1, k);
+  }
+  ASSERT_LT(waterAfter, waterBefore - 1.0e-4);  // evaporation really ran
+  // Water left, salt did not: the top cell is measurably concentrated.
+  EXPECT_GT(interior3(mini.transport->subsurfaceScalar(), 1, 1, 0), 25.0 + 0.1);
+}
+
+TEST(TransportModule, WithoutCauchyTheLimiterThrottlesEvaporativeConcentration) {
+  // The negative twin: identical evaporation, no scalar_cauchy condition.
+  // The uncoupled flux top already passes no scalar (the legacy zero
+  // flux-face value), but the limiter clips the top cell back to its
+  // neighbor extrema — the plan §3.1 throttle — deleting scalar mass into
+  // subsAdjust. This pins the pre-v2 behavior the new kind exists to fix.
+  MiniTransport mini;
+  mini.cfg = cauchyColumnConfig(1.0e-5);
+  mini.cfg.boundaryConditions.pop_back();  // drop the scalar_cauchy entry
+  mini.build();
+
+  const real_t saltBefore = mini.transport->ownedSubsurfaceMass();
+  real_t clipped = 0.0;
+  for (int n = 0; n < 40; ++n) {
+    mini.step();
+    clipped += mini.transport->audit().subsAdjust;
+  }
+  EXPECT_LT(clipped, -1.0e-10 * saltBefore);  // the limiter deleted mass
+  // The top cell stays pinned near the initial concentration.
+  EXPECT_LT(interior3(mini.transport->subsurfaceScalar(), 1, 1, 0), 25.0 + 1.0e-6);
+}
+
+TEST(TransportModule, CauchyTopDilutesUnderInfiltrationWithoutClipping) {
+  // The f < 1 branch: fresh water enters through the top face (negative
+  // flux), no scalar comes with it, and the top cell dilutes below the
+  // initial concentration instead of being clipped up to its neighbors.
+  MiniTransport mini;
+  mini.cfg = cauchyColumnConfig(-1.0e-5);  // negative: infiltration
+  mini.build();
+
+  const real_t saltBefore = mini.transport->ownedSubsurfaceMass();
+  real_t before = saltBefore;
+  for (int n = 0; n < 40; ++n) {
+    mini.step();
+    const real_t after = mini.transport->ownedSubsurfaceMass();
+    const frehg::transport::TransportAudit& a = mini.transport->audit();
+    const real_t residual =
+        (after - before) - (a.subsBoundary + a.subsAdjust + a.subsAnchor - a.exchange);
+    EXPECT_NEAR(residual, 0.0, 1.0e-8 * saltBefore) << "step " << n;
+    EXPECT_NEAR(a.subsBoundary, 0.0, 1.0e-12 * saltBefore) << "step " << n;
+    EXPECT_NEAR(a.subsAdjust, 0.0, 1.0e-10 * saltBefore) << "step " << n;
+    before = after;
+  }
+  EXPECT_LT(interior3(mini.transport->subsurfaceScalar(), 1, 1, 0), 25.0 - 0.1);
+}
+
+// ---------------------------------------------------------------------------
 // Dispersion tensor diagonal (through the carried top-cell snapshot).
 // ---------------------------------------------------------------------------
 

@@ -107,6 +107,7 @@ class Simulation {
   real_t cumGwRealloc_ = 0.0;
   real_t cumGwDropped_ = 0.0;
   real_t cumGwVloss_ = 0.0;
+  real_t cumGwEvap_ = 0.0;
   real_t cumTrExchange_ = 0.0;
   real_t cumTrSurfSource_ = 0.0;
   real_t cumTrSurfBoundary_ = 0.0;

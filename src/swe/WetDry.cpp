@@ -299,35 +299,49 @@ void SurfaceSolver::enforceVeloBc(VeloBcApply apply) {
       });
 
   // Prescribed-face velocities of velocity conditions, applied after the
-  // limiters like the legacy stage-boundary correction.
-  for (const DeviceBcList& list : velocityBcs_) {
-    auto lj = list.j;
-    auto li = list.i;
-    auto lface = list.face;
-    const real_t u = list.current;
-    Kokkos::parallel_for(
-        "swe_velocity_bc_faces",
-        Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
-        KOKKOS_LAMBDA(const std::size_t m) {
-          const int j = lj(m);
-          const int i = li(m);
-          switch (static_cast<BcFace>(lface(m))) {
-            case BcFace::XMinus:
-              uu(j, 0) = u;
-              break;
-            case BcFace::XPlus:
-              uu(j, i) = u;
-              break;
-            case BcFace::YMinus:
-              vv(0, i) = u;
-              break;
-            case BcFace::YPlus:
-              vv(j, i) = u;
-              break;
-            default:
-              break;
-          }
-        });
+  // limiters like the legacy stage-boundary correction. The face FLOW
+  // RATES are corrected with the velocities (v2 Q4): applyVelocityLimiters
+  // computed Fu/Fv before this correction ran, so a prescribed face (e.g.
+  // a zero-velocity wall) used to keep its pre-correction flow rate — the
+  // water obeyed the condition but the transport step's flux snapshot did
+  // not, advecting scalar across closed walls (measured by the g4(b)
+  // bring-up: an evaporation-induced edge salt leak, zero at rest).
+  {
+    Field2<real_t> Fu = Fu_, Fv = Fv_;
+    Field2<real_t> Asx = Asx_, Asy = Asy_;
+    for (const DeviceBcList& list : velocityBcs_) {
+      auto lj = list.j;
+      auto li = list.i;
+      auto lface = list.face;
+      const real_t u = list.current;
+      Kokkos::parallel_for(
+          "swe_velocity_bc_faces",
+          Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
+          KOKKOS_LAMBDA(const std::size_t m) {
+            const int j = lj(m);
+            const int i = li(m);
+            switch (static_cast<BcFace>(lface(m))) {
+              case BcFace::XMinus:
+                uu(j, 0) = u;
+                Fu(j, 0) = u * Asx(j, 0);
+                break;
+              case BcFace::XPlus:
+                uu(j, i) = u;
+                Fu(j, i) = u * Asx(j, i);
+                break;
+              case BcFace::YMinus:
+                vv(0, i) = u;
+                Fv(0, i) = u * Asy(0, i);
+                break;
+              case BcFace::YPlus:
+                vv(j, i) = u;
+                Fv(j, i) = u * Asy(j, i);
+                break;
+              default:
+                break;
+            }
+          });
+    }
   }
 
   // Mass-consistent boundary-face velocity at prescribed-stage cells on the

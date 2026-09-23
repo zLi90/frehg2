@@ -72,10 +72,16 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
   if (rainIsSeries_) {
     rainSeries_ = TimeSeries::fromFile(config.resolvePath(sw.rainfall.file));
   }
+  evapMode_ = sw.evapMode;
   evapIsSeries_ = sw.evaporation.fromSeries;
   evapConstant_ = sw.evaporation.constant;
   if (evapIsSeries_) {
     evapSeries_ = TimeSeries::fromFile(config.resolvePath(sw.evaporation.file));
+  }
+  if (evapMode_ == SurfaceWaterConfig::EvapMode::Bulk) {
+    // v2 Q4 (plan §3.2): the rate comes from the bulk-aerodynamic module
+    // per step; the schema guarantees the atmosphere block is present.
+    met_ = atm::MetForcing(config.atmosphere, config);
   }
   if (windCfg_.enabled) {
     if (windCfg_.speed.fromSeries) {
@@ -127,6 +133,7 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
   etaBcValue_ = alloc("swe_eta_bc_value");
   isEtaBc_ = alloc("swe_is_eta_bc");
   rainMask_ = alloc("swe_rain_mask");
+  evapMask_ = alloc("swe_evap_mask");
   frictionCoef_ = alloc("swe_friction_coef");
 
   halo_.add("swe_eta", eta_);
@@ -147,6 +154,7 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
   readBathymetry(config);
   buildBoundaryLists(boundaries);
   buildRainMask(config);
+  buildEvapMask(config);
   assignFileOrConstant(grid_, frictionCoef_, sw.friction.coefficient, config);
 
   // Solver selection from the v2 solver block (v2 plan §2.2): the fs_
@@ -254,6 +262,32 @@ void SurfaceSolver::buildRainMask(const FrehgConfig& config) {
     }
   }
   Kokkos::deep_copy(rainMask_, host);
+}
+
+void SurfaceSolver::buildEvapMask(const FrehgConfig& config) {
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const auto& exclude = config.surfaceWater.evaporationExcludePolygon;
+  auto host = Kokkos::create_mirror_view(evapMask_);
+  Kokkos::deep_copy(host, 0.0);
+  if (!exclude.empty()) {
+    const Polygon poly(exclude);
+    for (int j = 1; j <= nyl; ++j) {
+      for (int i = 1; i <= nxl; ++i) {
+        const real_t xc = grid_.xCenter(grid_.i0() + i - 1);
+        const real_t yc = grid_.yCenter(grid_.j0() + j - 1);
+        host(static_cast<std::size_t>(j), static_cast<std::size_t>(i)) =
+            poly.contains(xc, yc) ? 0.0 : 1.0;
+      }
+    }
+  } else {
+    for (int j = 1; j <= nyl; ++j) {
+      for (int i = 1; i <= nxl; ++i) {
+        host(static_cast<std::size_t>(j), static_cast<std::size_t>(i)) = 1.0;
+      }
+    }
+  }
+  Kokkos::deep_copy(evapMask_, host);
 }
 
 void SurfaceSolver::buildBoundaryLists(const BoundarySet& boundaries) {
@@ -469,7 +503,16 @@ void SurfaceSolver::beginStep(real_t t) {
   audit_ = SurfaceStepAudit{};
 
   rain_ = rainIsSeries_ ? rainSeries_.value(t) : rainConstant_;
-  evap_ = evapIsSeries_ ? evapSeries_.value(t) : evapConstant_;
+  if (evapMode_ == SurfaceWaterConfig::EvapMode::Bulk) {
+    // Open-water potential rate: q_g = q_sat(T_s) (plan §3.2 mode 2). T_s
+    // is spatially uniform until Q5 transports temperature, so one rate
+    // serves every cell (and the transport dilution's scalar path).
+    const atm::MetSample met = met_.sample(t);
+    evap_ = atm::evaporationRate(met.surfaceTemperatureC, met.pressureKpa,
+                                 met.windSpeed, met.airSpecificHumidity);
+  } else {
+    evap_ = evapIsSeries_ ? evapSeries_.value(t) : evapConstant_;
+  }
   if (windCfg_.enabled) {
     windSpeed_ = windCfg_.speed.fromSeries ? windSpeedSeries_.value(t) : windCfg_.speed.constant;
     windDirection_ = windCfg_.direction.fromSeries ? windDirectionSeries_.value(t)

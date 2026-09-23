@@ -200,6 +200,7 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   const real_t limHi = boundMax_;
   const real_t limLo = boundMin_;
   const bool hasMax = hasBoundMax_;
+  const bool legacyAllowance = legacyEvapAllowance_;
 
   stageSubsurfaceFarNeighbors();
   updateDispersionTensor();
@@ -240,6 +241,7 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   Field2<int> sideYp = subs_.sideCodeYp;
   Field2<int> topCode = subs_.topCode;
   Field2<real_t> topValue = subs_.topValue;
+  Field2<int> cauchy = cauchyTop_;
   Field2<real_t> ssee = coupled ? sseepage_ : Field2<real_t>();
   Field2<real_t> dept = coupled ? surf_.dept : Field2<real_t>();
   Field2<real_t> sSurf = coupled ? sSurf_ : Field2<real_t>();
@@ -389,8 +391,13 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           // instead (scalar.c:700-702); uncoupled runs keep the legacy
           // head-condition donor value and zero flux-condition faces
           // (:672-697 with the branch outcomes derived in the file comment).
+          // A scalar_cauchy column (v2 §3.2, Geng & Boufadel Eq. (7))
+          // passes no scalar mass through the top face regardless of the
+          // flow-side top code: water leaves, salt stays.
           const bool topFlux = (topCode(j, i) == kBcFlux);
-          if (coupled) {
+          if (cauchy(j, i) != 0) {
+            skm = 0.0;
+          } else if (coupled) {
             skm = 0.0;
           } else if (superbee) {
             skm = topFlux ? 0.0 : s(j, i, k);
@@ -434,6 +441,10 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           // surface. The ghost coefficient is the legacy tensor at the kM
           // ghost, whose only nonzero flux slot is the top exchange face —
           // molecular part plus the longitudinal term of |q_top|.
+          // scalar_cauchy columns are uncoupled by schema, so this branch
+          // leaves their top dispersive flux at zero — together with the
+          // zero advective value above, the total scalar flux through the
+          // face is exactly zero (the Eq. (7) relation, discretized).
           if (coupled && dept(j, i) > 0.0) {
             const real_t dzzGhost =
                 molecular * wcs(j, i, k) + lon * Kokkos::fabs(qzF(j, i, k));
@@ -554,14 +565,54 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         const real_t raw = value;
 
         real_t hi = sMax(j, i, k);
-        if (coupled && k == kTop(j, i) && topCode(j, i) == kBcFlux &&
-            topValue(j, i) > 0.0 && dept(j, i) <= 0.0) {
+        real_t lo = sMin(j, i, k);
+        // Coupled dry evaporating top (scalar.c:452-458): the legacy
+        // allowance is the hardcoded +0.01 per step; v2 Q4 replaces it
+        // with the same exact in-step factor the scalar_cauchy path uses,
+        // behind transport.legacy_evap_allowance for golden pinning.
+        const bool coupledEvapTop = coupled && k == kTop(j, i) &&
+                                    topCode(j, i) == kBcFlux &&
+                                    topValue(j, i) > 0.0 && dept(j, i) <= 0.0;
+        if (coupledEvapTop && legacyAllowance) {
           hi += 0.01;  // evaporative-concentration allowance (scalar.c:452-458)
+        }
+        if ((cauchy(j, i) != 0 || (coupledEvapTop && !legacyAllowance)) &&
+            k == kTop(j, i) && vgflux > 0.0) {
+          // scalar_cauchy top cell (v2 §3.2): the limiter window admits the
+          // exact concentration/dilution the top-face water flux implies.
+          // Interior advective exchange moves water and scalar together at
+          // the donor concentration (concentration-neutral on the flux
+          // volume), so only the top face — which passes water but no
+          // scalar — changes concentration: removing its contribution from
+          // the flux volume gives the exact factor
+          //   f = (Vgflux + dtg q_top) / Vgflux
+          // (q_top > 0 up: evaporation, f > 1 concentrates; infiltration
+          // f < 1 dilutes — the plan's V/(V − E·A·dt), generalized). The
+          // window anchors on the cell's own previous value as well as the
+          // neighbor extrema — under zero total scalar flux the top cell
+          // must not be clipped to a fresher neighbor — and the allowance
+          // only ever widens it.
+          const real_t interior = vgflux + dtgLast * qzF(j, i, k);
+          const real_t sOld = s(j, i, k);
+          if (sOld < lo) {
+            lo = sOld;
+          }
+          if (sOld > hi) {
+            hi = sOld;
+          }
+          if (interior > 0.0) {
+            const real_t f = interior / vgflux;
+            if (f > 1.0) {
+              hi *= f;
+            } else {
+              lo *= f;
+            }
+          }
         }
         if (value > hi && hi < limHi) {
           value = hi;
-        } else if (value < sMin(j, i, k) && sMin(j, i, k) > limLo) {
-          value = sMin(j, i, k);
+        } else if (value < lo && lo > limLo) {
+          value = lo;
         }
         if (hasMax && value > limHi) {
           value = limHi;

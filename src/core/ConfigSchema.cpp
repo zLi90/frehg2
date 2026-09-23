@@ -214,9 +214,10 @@ Spec buildRootSchema() {
        {"target", enumeration(true, {"surface", "groundwater_top", "groundwater_bottom",
                                      "groundwater_side"})},
        {"kind",
-        enumeration(true,
-                    {"eta", "discharge", "velocity", "outflow", "head", "flux", "scalar_value"})},
-       // value is required for every kind except outflow (cross-field check).
+        enumeration(true, {"eta", "discharge", "velocity", "outflow", "head", "flux",
+                           "scalar_value", "scalar_cauchy"})},
+       // value is required for every kind except outflow and scalar_cauchy
+       // (cross-field check).
        {"value", oneOf({{"constant", real(false)},
                         {"series", map({{"file", path(true)}})},
                         {"gravity", boolean(false)},
@@ -273,7 +274,23 @@ Spec buildRootSchema() {
             {"rainfall", map({{"constant", real(false)},
                               {"series", map({{"file", path(true)}})},
                               {"exclude", map({{"polygon", sequence(point2(), true, 3)}})}})},
-            {"evaporation", seriesOrConstant(false)}})},
+            // evaporation (v2 Q4 §3.2): prescribed rate (constant/series,
+            // optional exclusion region — the rain symmetry) or the
+            // bulk-aerodynamic mode; mode/value exclusivity and the
+            // atmosphere-block dependency are cross-field checks.
+            {"evaporation", map({{"mode", enumeration(false, {"bulk"})},
+                                 {"constant", real(false)},
+                                 {"series", map({{"file", path(true)}})},
+                                 {"exclude", map({{"polygon", sequence(point2(), true, 3)}})}})}})},
+      {"atmosphere",
+       // Met forcing for the bulk-aerodynamic module (v2 Q4 §3.2); exactly
+       // one humidity form (cross-field check).
+       map({{"air_temperature", seriesOrConstant(true)},
+            {"surface_temperature", seriesOrConstant(true)},
+            {"pressure", seriesOrConstant(true)},
+            {"specific_humidity", seriesOrConstant(false)},
+            {"relative_humidity", seriesOrConstant(false)},
+            {"wind_speed", seriesOrConstant(true)}})},
       {"groundwater",
        map({{"scheme", enumeration(false, {"pca"})},
             {"use_full3d", boolean(false)},
@@ -286,7 +303,13 @@ Spec buildRootSchema() {
                              true)},
             {"specific_storage", realNonNegative(true)},
             {"reallocation_surplus", enumeration(false, {"drop", "redistribute"})},
-            {"density_coupling", map({{"enabled", boolean(false)}})}})},
+            {"density_coupling", map({{"enabled", boolean(false)}})},
+            // Bulk-aerodynamic soil evaporation over a region (v2 Q4
+            // §3.2); dependencies (atmosphere block, uncoupled runs) are
+            // cross-field checks.
+            {"evaporation",
+             map({{"mode", enumeration(true, {"bulk"})},
+                  {"region", map({{"polygon", sequence(point2(), true, 3)}}, true)}})}})},
       {"soil", map({{"types", sequence(soilType, true, 1)},
                     {"map", oneOf({{"constant", text(false)}, {"file", path(false)}}, true)}})},
       {"coupling", map({{"mode", enumeration(false, {"sync", "subcycled"})}})},
@@ -307,7 +330,8 @@ Spec buildRootSchema() {
             {"dispersion", map({{"longitudinal", realNonNegative(false)},
                                 {"transverse", realNonNegative(false)},
                                 {"molecular", realNonNegative(false)}})},
-            {"bounds", map({{"min", real(false)}, {"max", real(false)}})}})},
+            {"bounds", map({{"min", real(false)}, {"max", real(false)}})},
+            {"legacy_evap_allowance", boolean(false)}})},
       {"output",
        map({{"filename", text(true)},
             {"variables",
@@ -671,6 +695,56 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
     }
   }
 
+  // v2 Q4 evaporation / atmosphere cross-field rules (plan §3.2).
+  {
+    const YAML::Node atm = root["atmosphere"];
+    const bool atmPresent = atm.IsDefined();
+    if (atmPresent && atm.IsMap()) {
+      const int humid = (atm["specific_humidity"].IsDefined() ? 1 : 0) +
+                        (atm["relative_humidity"].IsDefined() ? 1 : 0);
+      if (humid != 1) {
+        ctx.addError("atmosphere",
+                     "exactly one of {specific_humidity, relative_humidity} must be "
+                     "given (found " + std::to_string(humid) + ")");
+      }
+    }
+    const YAML::Node evap = sub(root, "surface_water", "evaporation");
+    if (evap.IsDefined() && evap.IsMap()) {
+      const bool bulk = evap["mode"].IsDefined();
+      const int present = (evap["constant"].IsDefined() ? 1 : 0) +
+                          (evap["series"].IsDefined() ? 1 : 0);
+      if (bulk && (present > 0 || evap["exclude"].IsDefined())) {
+        ctx.addError("surface_water.evaporation",
+                     "mode: bulk takes no constant/series/exclude (the rate comes "
+                     "from the atmosphere block, wet cells only)");
+      }
+      if (!bulk && present != 1) {
+        ctx.addError("surface_water.evaporation",
+                     "exactly one of {constant, series} must be given (found " +
+                         std::to_string(present) + ")");
+      }
+      if (bulk && !atmPresent) {
+        ctx.addError("surface_water.evaporation",
+                     "mode: bulk requires the atmosphere block");
+      }
+    }
+    const YAML::Node gwEvap = sub(root, "groundwater", "evaporation");
+    if (gwEvap.IsDefined()) {
+      if (!atmPresent) {
+        ctx.addError("groundwater.evaporation",
+                     "bulk soil evaporation requires the atmosphere block");
+      }
+      if (sw && gw) {
+        // Same restriction (and reason) as scalar_cauchy: the coupled top
+        // exchange is owned by the coupler, and no gate exercises the
+        // coupled combination — §8.3 forbids shipping it unexercised.
+        ctx.addError("groundwater.evaporation",
+                     "bulk soil evaporation applies to uncoupled groundwater runs "
+                     "only (the coupler owns the top exchange)");
+      }
+    }
+  }
+
   // density coupling requires transport.
   {
     const YAML::Node dc = sub(sub(root, "groundwater", "density_coupling"), "enabled");
@@ -812,12 +886,38 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
         if (kind == "scalar_value" && !tr) {
           ctx.addError(where, "kind scalar_value requires modules.transport: true");
         }
+        if (kind == "scalar_cauchy") {
+          // The v2 Q4 zero-total-scalar-flux top condition (Geng & Boufadel
+          // 2015 Eq. (7)). §8.2 matrix: groundwater_top × uncoupled is the
+          // one verified cell; every other target/mode is rejected loudly
+          // rather than accepted unverified.
+          if (!tr) {
+            ctx.addError(where, "kind scalar_cauchy requires modules.transport: true");
+          }
+          if (target != "groundwater_top") {
+            ctx.addError(where, "kind scalar_cauchy applies to target groundwater_top only "
+                                "(the zero-total-flux salt condition rides the top-face "
+                                "water flux)");
+          }
+          if (sw && gw) {
+            // In coupled runs the coupler owns the top scalar exchange (the
+            // sseepage path); a Cauchy top has no coupled meaning yet.
+            ctx.addError(where, "kind scalar_cauchy applies to uncoupled groundwater runs "
+                                "only (the coupler owns the top scalar exchange)");
+          }
+        }
         const YAML::Node value = bc["value"];
         if (kind == "outflow" && value.IsDefined()) {
           ctx.addError(where + ".value",
                        "kind outflow takes no value (free outflow is transmissive)");
         }
-        if (kind != "outflow" && !kind.empty() && !value.IsDefined()) {
+        if (kind == "scalar_cauchy" && value.IsDefined()) {
+          ctx.addError(where + ".value",
+                       "kind scalar_cauchy takes no value (the condition is the homogeneous "
+                       "zero-total-flux relation)");
+        }
+        if (kind != "outflow" && kind != "scalar_cauchy" && !kind.empty() &&
+            !value.IsDefined()) {
           ctx.addError(where, "missing required key 'value'");
         }
         if (value.IsDefined() && value.IsMap()) {

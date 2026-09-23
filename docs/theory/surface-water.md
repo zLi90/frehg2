@@ -164,3 +164,34 @@ of the algorithm, not defects.
 
 Dead legacy code found during the port is recorded in
 [removed-features.md](removed-features.md).
+
+## Evaporation modes (v2 Q4, plan §3.2)
+
+`surface_water.evaporation` grew two capabilities in v2 Q4 while keeping
+the legacy path bitwise (b1 golden fidelity):
+
+- **Prescribed** (constant/series) subtracts the rate unconditionally and
+  lets the dry clamp absorb over-drying, exactly as legacy — but the
+  clamp's signed volume is now measured into the `clamped` audit column
+  instead of silently entering the closure residual (the g4(d) audited
+  shortfall), and an optional `exclude` region masks cells (the rainfall
+  symmetry; without one the mask is 1.0 and the arithmetic is unchanged).
+- **Bulk** (`mode: bulk`) evaluates the bulk-aerodynamic rate per step
+  from the `atmosphere` block (`src/atm/`; water-surface q_g = q_sat(T_s),
+  spatially uniform until Q5 transports temperature) and removes at most
+  the available depth per wet cell — no volume creation, so the audited
+  evaporation IS the actual removal. Negative rates (condensation)
+  deposit; clamping them to zero would hide a humidity-gradient sign
+  error from the audits (V2-A13).
+
+Two v2 Q4 findings recorded here because no golden pinned them
+(prescribed evaporation was authored-unexercised in v1 — b1 sets it to 0):
+a "closed" basin must close its edges with an explicit `kind: velocity`
+value-0 condition, because the default edge keeps the legacy transmissive
+behavior and refills an evaporating basin from the stale-ghost stage
+without bound; and a velocity condition now corrects the face **flow
+rates** with the velocities (`WetDry.cpp::enforceVeloBc`) —
+`applyVelocityLimiters` computes Fu/Fv before the condition applies, so a
+wall used to hold the water while the transport step's flux snapshot kept
+the pre-correction rate and advected scalar across it (the g4(b) leak:
+6.6e-3 of the salt mass per 50 000 s, zero at rest).

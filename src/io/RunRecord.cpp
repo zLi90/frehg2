@@ -182,6 +182,7 @@ const char* kindName(BcKind k) {
     case BcKind::Outflow: return "outflow";
     case BcKind::Head: return "head";
     case BcKind::Flux: return "flux";
+    case BcKind::ScalarCauchy: return "scalar_cauchy";
     default: return "scalar_value";
   }
 }

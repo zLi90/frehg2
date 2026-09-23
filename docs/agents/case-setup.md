@@ -139,12 +139,27 @@ Generate these files with small Python snippets in the case directory
    (not directly the physical dispersivity).
 10. Surface `scalar_value` conditions: on a `discharge`-covered region
     they set the inflow concentration; elsewhere they hold the region's
-    wet cells at the value (tide/stage salinity).
-11. Shallow steady flows inside `friction.thin_layer_depth` (default
+    wet cells at the value (tide/stage salinity). For bare-soil
+    evaporation/salinization cases (uncoupled groundwater + transport),
+    pair `groundwater.evaporation: {mode: bulk, region: ...}` (needs the
+    `atmosphere:` block) with a `scalar_cauchy` condition on the same
+    `groundwater_top` region: water leaves, salt stays and concentrates
+    exactly (no `value`; uncoupled runs only). A prescribed soil-evap
+    flux works too (top `flux` condition, positive value).
+11. Evaporation setup rules learned the hard way (v2 Q4 bring-up): a
+    "closed" surface basin must close its edges with a `kind: velocity`
+    value-0 condition (the default edge is legacy-transmissive and
+    refills an evaporating basin); an initially saturated column needs
+    `initial_conditions.groundwater.water_table`, not a saturated
+    `moisture` value (which sets a uniform, non-hydrostatic head and
+    launches a drainage transient); and physics cases should set
+    `groundwater.reallocation_surplus: redistribute` (the legacy `drop`
+    default discards water under strong drying).
+12. Shallow steady flows inside `friction.thin_layer_depth` (default
     0.1 m) sit in the legacy drag-regularization band — cm-scale normal
     depths can offset ~20 % from Manning theory; set `thin_layer_depth`
     below the expected depths when that matters.
-12. Model scope limits — do not try to configure around them: no
+13. Model scope limits — do not try to configure around them: no
     periodic boundaries, no Darcy–Weisbach friction, no
     surface-infiltration source term other than the groundwater coupling
     itself, one scalar, groundwater scheme is PCA only, no adaptive

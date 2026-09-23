@@ -1,0 +1,78 @@
+# g4(c) — bulk-aerodynamic evaporation, constant met forcing (v2 plan
+# §3.3, per-PR gate). THIS CONFIGURATION IS THE Q4 TARGET SCHEMA (plan
+# §3.2, authored gate-first per §6.1): the `atmosphere:` block and
+# `surface_water.evaporation: bulk` do not exist in the schema yet, so
+# `frehg --validate` rejects this file — the gate script reports that as
+# "capability absent" and the g4 gate FAILS until the Q4 capability PR
+# lands. The pass criteria are the g4(a)/(b) criteria with E computed
+# offline from the constant forcing:
+#   E = (rho_a / R_air) * (q_sat(T_s) - q_a)
+#   q_sat via Tetens e_sat(T) and q = 0.622 e / (P - 0.376 e) (paper Eq. 4);
+#   R_air = 94.909 * U^-0.9036 (Liu et al. 2006); rho_a ideal-gas dry air.
+# With T_s = 20 C, P = 101.325 kPa, U = 1 m/s, q_a = 2.9e-3:
+#   E = 1.469e-7 m/s (the gate script recomputes this from the values
+#   below rather than trusting this comment).
+simulation:
+  id: g4c-bulk
+  title: g4(c) bulk-aerodynamic evaporation under constant met forcing
+
+domain:
+  nx: 4
+  ny: 3
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 0.5
+  bottom_elevation: {constant: -0.1}
+
+time:
+  dt: 10.0
+  t_end: 200000.0       # drawdown ~0.029 m at E ~ 1.47e-7 m/s
+  output_interval: 20000.0
+
+modules:
+  surface_water: true
+  transport: true
+
+atmosphere:
+  air_temperature: {constant: 20.0}     # [C]
+  surface_temperature: {constant: 20.0} # [C] prescribed until Q5
+  pressure: {constant: 101.325}         # [kPa]
+  specific_humidity: {constant: 2.9e-3} # [-] (or relative_humidity)
+  wind_speed: {constant: 1.0}           # [m/s] shared with the Q6 wind block
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.0}
+  min_depth: 1.0e-8
+  wetting_face_depth: 1.0e-8
+  evaporation: {mode: bulk}
+
+transport:
+  scheme: {advection: upwind}
+  surface_diffusivity: {x: 0.0, y: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+  transport:
+    surface: {constant: 10.0}
+
+boundary_conditions:
+  - name: walls
+    # An explicit closed basin: the default domain edge keeps the legacy
+    # transmissive behavior (the b1 drain), which would flow water back IN
+    # as evaporation draws the interior below the outside stage — measured
+    # during gate bring-up as unbounded volume growth. Zero normal edge
+    # velocity closes every edge face.
+    region: {polygon: [[-1.0, -1.0], [5.0, -1.0], [5.0, 4.0], [-1.0, 4.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+    transport: [concentration_surface]

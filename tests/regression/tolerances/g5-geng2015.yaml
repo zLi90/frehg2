@@ -1,0 +1,22 @@
+# g5 — Geng & Boufadel (2015) bare-soil salinization (v2 plan §3.3, as
+# amended by V2-A13 (rate criteria), V2-A14 (density direction) and
+# V2-A15 (re-anchored to the self-consistent reference subset after the
+# paper's figures were found mutually inconsistent — see the amendment).
+# References: benchmarks/g5-geng2015/reference/*.csv (DIGITIZATION.md).
+rate:                              # g5(i), V2-A15
+  e0_closed_form: 1.470e-7        # Table-1 bulk value [m/s]; gate at +/- 5%
+  e10_reference: 3.317e-8         # digitized Fig. 3 at 10 h [m/s]; RECORDED
+  decay_bound: 0.5                # E(50h)/E(0) bound (measured 0.27; a
+                                  # missing alpha_1 limiter gives ~1)
+  saturation_min: 0.0915          # closed-form alpha_1 equilibrium floor
+  saturation_max: 0.5             # extrapolated surface S(50h) ceiling
+salinity:                          # g5(ii), V2-A15: the peak is gated,
+  peak_min_g_l: 60.0              # the profile RMS is recorded
+  peak_above_z: 1.9               # [m]
+salt_mass:                         # g5(iii): the paper's own MARUN bound
+  tol_fraction: 0.04
+density:                           # g5(iv), V2-A14 direction
+  edge_g_l: 30.0
+  min_margin_m: 0.05
+porosity: 0.41                     # moisture ratio = theta / porosity
+evaporation_zone_area_m2: 4.8     # 48 m x 0.1 m (the x in [1,49] inset)

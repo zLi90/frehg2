@@ -43,16 +43,23 @@ SWE module runs. Its columns (`columns` attribute:
 — `seepage` only in coupled runs) are the running water-volume budget,
 reduced across all ranks. `clamped` measures the volume the legacy
 below-bed clamp creates (a scheme defect reported as data; ~1.6 % of rain
-in the b5 regime, effectively zero elsewhere). The table is the
+in the b5 regime, effectively zero elsewhere) plus, since v2 Q4, the
+signed volume of the rain/evaporation dry clamp — so the surface identity
+`Δvolume = rain − evaporation − boundary_outflow + bc_inflow + clamped`
+closes to rounding through evaporative dry-out (the g4(d) gate). The table is the
 mass-consistent source of boundary discharge — prefer it over
 `uu·depth` when you need conserved outflow, because stored velocities carry a
 legacy scaling that under-reads instantaneous flux.
 
 `/monitor/gw_mass_audit` (subsurface) is written whenever the groundwater
 module runs, with columns
-`time,volume,boundary_in,ss_storage,realloc,realloc_dropped,vloss` — the
+`time,volume,boundary_in,ss_storage,realloc,realloc_dropped,vloss[,evaporation]`
+(`evaporation` only with `groundwater.evaporation` configured: the
+cumulative actual evaporated volume through the bulk-soil zone, read off
+the realized top-face flux — the g5(i) observable) — the
 subsurface identity closes to rounding
-(`Δvolume = boundary_in − ss_storage + realloc − vloss`). In coupled runs
+(`Δvolume = boundary_in − ss_storage + realloc − vloss`; the evaporation
+column is a sub-account of `boundary_in`, not an extra term). In coupled runs
 the exchanged volume appears symmetrically: positive `seepage` in the
 surface table is water the subsurface gave up.
 
