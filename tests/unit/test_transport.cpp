@@ -181,7 +181,8 @@ struct MiniTransport {
       cw.qss = coupler->seepageRate();
     }
     transport = std::make_unique<frehg::transport::ScalarSolver>(*grid, cfg, *boundaries, *halo,
-                                                                 sw, gwW, cw);
+                                                                 sw, gwW, cw,
+                                                                 frehg::transport::ScalarSpec::salinity(cfg));
     if (gw) {
       gw->attachScalar(transport->subsurfaceScalar(),
                        surface ? transport->surfaceScalar() : frehg::Field2<real_t>(),

@@ -171,6 +171,24 @@ class RichardsSolver {
     baroclinic_ = baroclinic;
   }
 
+  /// Wire the temperature instance's state in (v2 Q5): with the density
+  /// coupling enabled, the r_rho cells gain the thermal expansion term
+  /// -beta_T (T - T0). Pass empty views to leave the thermal term off.
+  void attachTemperature(const Field3<real_t>& tSubs, const Field2<real_t>& tSurf) {
+    tSubs_ = tSubs;
+    tSurfGhost_ = tSurf;
+  }
+
+  /// Configure the density-coupling coefficients (v2 Q5: they moved from
+  /// compile-time constants to configuration with the legacy values as
+  /// defaults; kBaroclinicBeta* remain as the documented defaults).
+  void setDensityCoefficients(const DensityCouplingConfig& dc) {
+    betaSaline_ = dc.betaSaline;
+    betaSalineVisc_ = dc.betaSalineViscosity;
+    betaThermal_ = dc.thermalExpansion;
+    referenceT_ = dc.referenceTemperature;
+  }
+
   /// Advance the subsurface state by \p dtg, evaluating series-valued
   /// boundary conditions at time \p t (the end-of-step time, matching the
   /// legacy call order, solve.c:43-49).
@@ -240,6 +258,10 @@ class RichardsSolver {
   const Field2<int>& sideBcCodeYp() const { return sideCodeYp_; }
   /// \copydoc sideBcCodeYp
   const Field2<int>& sideBcCodeYm() const { return sideCodeYm_; }
+  /// \copydoc sideBcCodeYp
+  const Field2<int>& sideBcCodeXm() const { return sideCodeXm_; }
+  /// \copydoc sideBcCodeYp
+  const Field2<int>& sideBcCodeXp() const { return sideCodeXp_; }
   /// The dtg of the last executed step (the legacy Vgflux step,
   /// groundwater.c:1639).
   real_t lastDtg() const { return dtgCurrent_; }
@@ -367,6 +389,14 @@ class RichardsSolver {
   Field3<real_t> sSubs_;      ///< subsurface scalar with ghosts
   Field2<real_t> sSurfGhost_; ///< surface scalar (coupled top ghost value)
   bool baroclinic_ = false;   ///< groundwater.density_coupling.enabled
+  /// Temperature views (empty until attachTemperature; v2 Q5).
+  Field3<real_t> tSubs_;      ///< subsurface temperature with ghosts
+  Field2<real_t> tSurfGhost_; ///< surface temperature (coupled top ghost)
+  // Density-coupling coefficients (v2 Q5; defaults = the legacy constants).
+  real_t betaSaline_ = kBaroclinicBetaRho;
+  real_t betaSalineVisc_ = kBaroclinicBetaVisc;
+  real_t betaThermal_ = 0.0;
+  real_t referenceT_ = 20.0;
 
   // Configuration extracts.
   real_t ss_ = 0.0;              ///< specific storage [1/m]

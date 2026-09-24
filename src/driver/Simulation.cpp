@@ -68,6 +68,17 @@ io::VarMeta transportVarMeta(const std::string& var) {
   return {"", var};
 }
 
+/// Attributes for the §7 temperature datasets (v2 Q5).
+io::VarMeta temperatureVarMeta(const std::string& var) {
+  if (var == "temperature") {
+    return {"degC", "subsurface temperature"};
+  }
+  if (var == "temperature_surface") {
+    return {"degC", "surface temperature"};
+  }
+  return {"", var};
+}
+
 bool resolveGpuAware(const RuntimeConfig& runtime) {
   switch (runtime.gpuAwareMpi) {
     case RuntimeConfig::GpuAwareMpi::On:
@@ -152,7 +163,7 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
   if (coupled) {
     coupler_ = std::make_unique<coupling::Coupler>(grid_, config_, *surface_, *gw_);
   }
-  if (config_.modules.transport) {
+  if (config_.modules.transport || config_.modules.temperature) {
     buildTransport();
   }
 
@@ -242,6 +253,21 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
                              "subs_anchor"};
     transportAudit_ = std::make_unique<io::Monitor>(*output_, auditConfig);
   }
+  if (temperature_) {
+    // The heat ledger (v2 Q5): the transport-audit identity on the
+    // temperature scalar, with the atmospheric exchange in its own
+    // surf_atmos column (the g7(a) closure criterion). Masses are
+    // K m^3 (surface) and K m^3 on the theta + kappa basis (subsurface).
+    MonitorConfig auditConfig;
+    auditConfig.name = "temperature_audit";
+    auditConfig.i = 0;
+    auditConfig.j = 0;
+    auditConfig.variables = {"surf_heat",     "subs_heat",     "exchange",
+                             "surf_source",   "surf_boundary", "surf_adjust",
+                             "surf_anchor",   "surf_atmos",    "subs_boundary",
+                             "subs_adjust",   "subs_anchor"};
+    temperatureAudit_ = std::make_unique<io::Monitor>(*output_, auditConfig);
+  }
 }
 
 void Simulation::buildTransport() {
@@ -283,30 +309,57 @@ void Simulation::buildTransport() {
     subsWiring.topValue = gw_->topBcValue();
     subsWiring.sideCodeYp = gw_->sideBcCodeYp();
     subsWiring.sideCodeYm = gw_->sideBcCodeYm();
+    subsWiring.sideCodeXm = gw_->sideBcCodeXm();
+    subsWiring.sideCodeXp = gw_->sideBcCodeXp();
   }
   transport::CouplingWiring cplWiring;
   if (coupler_) {
     cplWiring.active = true;
     cplWiring.qss = coupler_->seepageRate();
   }
-  transport_ = std::make_unique<transport::ScalarSolver>(grid_, config_, *boundaries_, *halo_,
-                                                         surfWiring, subsWiring, cplWiring);
+  if (config_.modules.transport) {
+    transport_ = std::make_unique<transport::ScalarSolver>(
+        grid_, config_, *boundaries_, *halo_, surfWiring, subsWiring, cplWiring,
+        transport::ScalarSpec::salinity(config_));
+  }
+  if (config_.modules.temperature) {
+    temperature_ = std::make_unique<transport::ScalarSolver>(
+        grid_, config_, *boundaries_, *halo_, surfWiring, subsWiring, cplWiring,
+        transport::ScalarSpec::temperature(config_));
+  }
   if (gw_) {
-    // Baroclinic activation (plan §10 P4): the density/viscosity ratios read
-    // the transport scalar at every subsurface step.
-    gw_->attachScalar(transport_->subsurfaceScalar(),
-                      surface_ ? transport_->surfaceScalar() : Field2<real_t>(),
-                      config_.groundwater.densityCoupling.enabled);
+    // Baroclinic activation (plan §10 P4; thermal term v2 Q5): the
+    // density/viscosity ratios read the registered scalars at every
+    // subsurface step.
+    gw_->attachScalar(
+        transport_ ? transport_->subsurfaceScalar() : Field3<real_t>(),
+        (transport_ && surface_) ? transport_->surfaceScalar() : Field2<real_t>(),
+        config_.groundwater.densityCoupling.enabled);
+    if (temperature_) {
+      gw_->attachTemperature(
+          temperature_->subsurfaceScalar(),
+          surface_ ? temperature_->surfaceScalar() : Field2<real_t>());
+    }
+    gw_->setDensityCoefficients(config_.groundwater.densityCoupling);
   }
 }
 
 void Simulation::stepTransport(real_t t, real_t dt, real_t dtgLast) {
-  if (!transport_) {
+  if (!transport_ && !temperature_) {
     return;
   }
   const real_t rain = surface_ ? surface_->currentRain() : 0.0;
   const real_t evap = surface_ ? surface_->currentEvaporation() : 0.0;
-  transport_->step(t, dt, dtgLast, rain, evap);
+  // Salinity first, temperature second (the legacy scalar block order
+  // generalized; the baroclinic ratios read both AFTER the transport
+  // block, inside the next flow step, so the order only affects which
+  // scalar sees the other's pre-step ghosts — neither does).
+  if (transport_) {
+    transport_->step(t, dt, dtgLast, rain, evap);
+  }
+  if (temperature_) {
+    temperature_->step(t, dt, dtgLast, rain, evap);
+  }
 }
 
 io::Checkpoint::Fields2 Simulation::checkpointFields2() const {
@@ -340,6 +393,19 @@ io::Checkpoint::Fields2 Simulation::checkpointFields2() const {
       fields.push_back({"s_dzz_top", transport_->dispersionTopSnapshot()});
     }
   }
+  if (temperature_) {
+    // The temperature instance's parallel restart state (v2 Q5): the
+    // "t_*" layout mirrors "s_*", so a salinity-only checkpoint stays
+    // byte-identical to v1 and a two-scalar checkpoint is the union.
+    if (surface_) {
+      fields.push_back({"t_surf", temperature_->surfaceScalar()});
+      fields.push_back({"t_fu_old", temperature_->flowRateSnapshotX()});
+      fields.push_back({"t_fv_old", temperature_->flowRateSnapshotY()});
+    }
+    if (gw_) {
+      fields.push_back({"t_dzz_top", temperature_->dispersionTopSnapshot()});
+    }
+  }
   return fields;
 }
 
@@ -349,6 +415,9 @@ io::Checkpoint::Fields3 Simulation::checkpointFields3() const {
     fields = {{"h", gw_->head()}, {"wc", gw_->waterContent()}};
     if (transport_) {
       fields.push_back({"s_subs", transport_->subsurfaceScalar()});
+    }
+    if (temperature_) {
+      fields.push_back({"t_subs", temperature_->subsurfaceScalar()});
     }
   }
   return fields;
@@ -378,6 +447,9 @@ real_t Simulation::restoreFromCheckpoint() {
     // Before the groundwater refresh: the baroclinic ratios and the coupled
     // hydrostatic ghosts read the restored scalar's ghosts.
     transport_->refreshDerivedState(header.t);
+  }
+  if (temperature_) {
+    temperature_->refreshDerivedState(header.t);
   }
   if (gw_) {
     gw_->refreshDerivedState();
@@ -455,6 +527,18 @@ void Simulation::writeOutputs(real_t t) {
                            transportVarMeta(var));
     }
   }
+  for (const std::string& var : config_.output.temperatureVariables) {
+    if (!temperature_) {
+      break;
+    }
+    if (var == "temperature" && gw_) {
+      output_->writeField3("temperature", var, t, temperature_->subsurfaceScalar(),
+                           temperatureVarMeta(var));
+    } else if (var == "temperature_surface" && surface_) {
+      output_->writeField2("temperature", var, t, temperature_->surfaceScalar(),
+                           temperatureVarMeta(var));
+    }
+  }
 }
 
 void Simulation::recordMonitors(real_t t) {
@@ -482,6 +566,12 @@ void Simulation::recordMonitors(real_t t) {
         } else if (var == "vv") {
           field = &surface_->vv();
         }
+      }
+      if (temperature_ && var == "temperature_surface") {
+        field = &temperature_->surfaceScalar();
+      }
+      if (transport_ && var == "concentration_surface") {
+        field = &transport_->surfaceScalar();
       }
       if (field == nullptr) {
         log::fatal(log::msg() << "monitor '" << mc.name << "': variable '" << var
@@ -574,6 +664,35 @@ void Simulation::recordTransportAudit(real_t t) {
   }
 }
 
+void Simulation::recordTemperatureAudit(real_t t) {
+  const transport::TransportAudit& audit = temperature_->audit();
+  const real_t local[11] = {temperature_->ownedSurfaceMass(),
+                            temperature_->ownedSubsurfaceMass(),
+                            audit.exchange,     audit.surfSource, audit.surfBoundary,
+                            audit.surfAdjust,   audit.surfAnchor, audit.surfAtmos,
+                            audit.subsBoundary, audit.subsAdjust, audit.subsAnchor};
+  real_t global[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  MPI_Reduce(local, global, 11, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+  if (grid_.rank() == 0) {
+    cumTpExchange_ += global[2];
+    cumTpSurfSource_ += global[3];
+    cumTpSurfBoundary_ += global[4];
+    cumTpSurfAdjust_ += global[5];
+    cumTpSurfAnchor_ += global[6];
+    cumTpSurfAtmos_ += global[7];
+    cumTpSubsBoundary_ += global[8];
+    cumTpSubsAdjust_ += global[9];
+    cumTpSubsAnchor_ += global[10];
+    temperatureAudit_->record(t, {global[0], global[1], cumTpExchange_,
+                                  cumTpSurfSource_, cumTpSurfBoundary_,
+                                  cumTpSurfAdjust_, cumTpSurfAnchor_, cumTpSurfAtmos_,
+                                  cumTpSubsBoundary_, cumTpSubsAdjust_,
+                                  cumTpSubsAnchor_});
+  } else {
+    temperatureAudit_->record(t, {});
+  }
+}
+
 void Simulation::writeCheckpoint(real_t t, long step, real_t labelTime) {
   Timer::Scoped timer("io/checkpoint");
   io::Checkpoint::Scalars scalars;
@@ -609,6 +728,9 @@ void Simulation::run() {
       }
       if (transport_) {
         recordTransportAudit(t0);
+      }
+      if (temperature_) {
+        recordTemperatureAudit(t0);
       }
     }
   }
@@ -744,6 +866,9 @@ void Simulation::runCoupledLoop(real_t t0) {
       if (transport_) {
         recordTransportAudit(t);
       }
+      if (temperature_) {
+        recordTemperatureAudit(t);
+      }
     }
 
     real_t cflLocal = surface_->maxCfl();
@@ -766,6 +891,9 @@ void Simulation::runCoupledLoop(real_t t0) {
       gwMassAudit_->flush();
       if (transportAudit_) {
         transportAudit_->flush();
+      }
+      if (temperatureAudit_) {
+        temperatureAudit_->flush();
       }
       output_->flush();
       flushRunRecord(false);
@@ -792,6 +920,9 @@ void Simulation::runCoupledLoop(real_t t0) {
   gwMassAudit_->flush();
   if (transportAudit_) {
     transportAudit_->flush();
+  }
+  if (temperatureAudit_) {
+    temperatureAudit_->flush();
   }
   output_->flush();
   flushRunRecord(false);
@@ -825,6 +956,9 @@ void Simulation::runSurfaceLoop(real_t t0) {
       if (transport_) {
         recordTransportAudit(t);
       }
+      if (temperature_) {
+        recordTemperatureAudit(t);
+      }
     }
 
     real_t cflLocal = surface_->maxCfl();
@@ -845,6 +979,9 @@ void Simulation::runSurfaceLoop(real_t t0) {
       massAudit_->flush();
       if (transportAudit_) {
         transportAudit_->flush();
+      }
+      if (temperatureAudit_) {
+        temperatureAudit_->flush();
       }
       output_->flush();
       flushRunRecord(false);
@@ -874,6 +1011,9 @@ void Simulation::runSurfaceLoop(real_t t0) {
   massAudit_->flush();
   if (transportAudit_) {
     transportAudit_->flush();
+  }
+  if (temperatureAudit_) {
+    temperatureAudit_->flush();
   }
   output_->flush();
   flushRunRecord(false);
@@ -917,6 +1057,9 @@ void Simulation::runGroundwaterLoop(real_t t0) {
       if (transport_) {
         recordTransportAudit(t);
       }
+      if (temperature_) {
+        recordTemperatureAudit(t);
+      }
     }
 
     if (t >= nextOutput - 1.0e-9) {
@@ -932,6 +1075,9 @@ void Simulation::runGroundwaterLoop(real_t t0) {
       gwMassAudit_->flush();
       if (transportAudit_) {
         transportAudit_->flush();
+      }
+      if (temperatureAudit_) {
+        temperatureAudit_->flush();
       }
       output_->flush();
       flushRunRecord(false);
@@ -957,6 +1103,9 @@ void Simulation::runGroundwaterLoop(real_t t0) {
   gwMassAudit_->flush();
   if (transportAudit_) {
     transportAudit_->flush();
+  }
+  if (temperatureAudit_) {
+    temperatureAudit_->flush();
   }
   output_->flush();
   flushRunRecord(false);

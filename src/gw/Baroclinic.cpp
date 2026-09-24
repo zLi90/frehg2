@@ -1,12 +1,18 @@
 /// \file Baroclinic.cpp
-/// \brief Density/viscosity ratios from the transport scalar and their face
-///        means (plan §10 P4).
+/// \brief Density/viscosity ratios from the registered scalars and their
+///        face means (plan §10 P4; thermal term v2 Q5).
 ///
 /// Provenance: update_rhovisc (scalar.c:921-955) and baroclinic_face
-/// (groundwater.c:338-415). The cell ratios are r_rho = 1 + kBaroclinicBetaRho
-/// s and r_visc = 1/(1 + kBaroclinicBetaVisc s) over every cell including
-/// ghosts (the ghost scalar carries the side Dirichlet values the transport
-/// module enforces, so a saline head boundary densifies its boundary face).
+/// (groundwater.c:338-415). The cell ratios are
+///   r_rho  = 1 + beta_s s - beta_T (T - T0)
+///   r_visc = 1 / (1 + beta_sv s)
+/// over every cell including ghosts (the ghost scalar carries the side
+/// Dirichlet values the transport module enforces, so a saline head
+/// boundary densifies its boundary face; the temperature ghosts carry the
+/// Q5 pins the same way). The coefficients are configuration since v2 Q5
+/// (defaults = the legacy compile-time constants; beta_T defaults 0, so a
+/// salinity-only run reproduces the P4 arithmetic bitwise). mu(T) is out
+/// of scope (plan V2-A17): r_visc stays salinity-only.
 /// Face ratios are arithmetic means between active flanks with the legacy
 /// edge rules preserved:
 ///  - minus-side domain-edge faces average the interior cell with the ghost
@@ -30,9 +36,6 @@ namespace frehg::gw {
 
 namespace {
 
-KOKKOS_INLINE_FUNCTION real_t rhoOf(real_t s) { return 1.0 + kBaroclinicBetaRho * s; }
-KOKKOS_INLINE_FUNCTION real_t viscOf(real_t s) { return 1.0 / (1.0 + kBaroclinicBetaVisc * s); }
-
 KOKKOS_INLINE_FUNCTION bool isHeadCode(int code) {
   return code == static_cast<int>(GwBcCode::Head) ||
          code == static_cast<int>(GwBcCode::HeadHydrostatic);
@@ -41,7 +44,9 @@ KOKKOS_INLINE_FUNCTION bool isHeadCode(int code) {
 }  // namespace
 
 void RichardsSolver::updateBaroclinicFaces() {
-  if (!baroclinic_ || sSubs_.size() == 0) {
+  const bool hasSaline = sSubs_.size() != 0;
+  const bool hasThermal = tSubs_.size() != 0;
+  if (!baroclinic_ || (!hasSaline && !hasThermal)) {
     return;
   }
   const int nyl = grid_.nyLocal();
@@ -55,6 +60,12 @@ void RichardsSolver::updateBaroclinicFaces() {
 
   Field3<real_t> s = sSubs_;
   Field2<real_t> sSurf = sSurfGhost_;
+  Field3<real_t> tf = tSubs_;
+  Field2<real_t> tSurf = tSurfGhost_;
+  const real_t betaS = betaSaline_;
+  const real_t betaSV = betaSalineVisc_;
+  const real_t betaT = betaThermal_;
+  const real_t refT = referenceT_;
   Field3<real_t> rRho = rRho_, rXp = rRhoXp_, rYp = rRhoYp_, rZp = rRhoZp_;
   Field3<real_t> rVisc = rVisc_, vXp = rViscXp_, vYp = rViscYp_, vZp = rViscZp_;
   Field3<PetscInt> gid = grid_.gid3();
@@ -67,8 +78,12 @@ void RichardsSolver::updateBaroclinicFaces() {
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
           {0, 0, 0}, {nyl + 2, nxl + 2, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
-        rRho(j, i, k) = rhoOf(s(j, i, k));
-        rVisc(j, i, k) = viscOf(s(j, i, k));
+        // A ternary evaluates only its chosen branch, so the absent
+        // scalar's (empty) view is never dereferenced.
+        const real_t sv = hasSaline ? s(j, i, k) : 0.0;
+        const real_t dtv = hasThermal ? tf(j, i, k) - refT : 0.0;
+        rRho(j, i, k) = 1.0 + betaS * sv - betaT * dtv;
+        rVisc(j, i, k) = 1.0 / (1.0 + betaSV * sv);
       });
 
   // x faces: slot (j, i, k) is the x+ face of cell i; slot i = 0 the west
@@ -157,10 +172,15 @@ void RichardsSolver::updateBaroclinicFaces() {
           rr = 0.5 * (rRho(j, i, k - 1) + rRho(j, i, k));
           rv = 0.5 * (rVisc(j, i, k - 1) + rVisc(j, i, k));
         } else if (belowActive) {
-          // Top face of the column (legacy istop branch, :387-389).
-          const real_t sGhost = coupled ? sSurf(j, i) : s(j, i, k);
-          rr = 0.5 * (rRho(j, i, k) + rhoOf(sGhost));
-          rv = 0.5 * (rVisc(j, i, k) + viscOf(sGhost));
+          // Top face of the column (legacy istop branch, :387-389): the
+          // ghost ratio from the surface scalars in coupled runs, the top
+          // cell's own values otherwise (the zero-gradient ghost).
+          const real_t sGhost =
+              hasSaline ? (coupled ? sSurf(j, i) : s(j, i, k)) : 0.0;
+          const real_t dtGhost =
+              hasThermal ? (coupled ? tSurf(j, i) : tf(j, i, k)) - refT : 0.0;
+          rr = 0.5 * (rRho(j, i, k) + 1.0 + betaS * sGhost - betaT * dtGhost);
+          rv = 0.5 * (rVisc(j, i, k) + 1.0 / (1.0 + betaSV * sGhost));
         }
         rZp(j, i, k) = rr;
         vZp(j, i, k) = rv;

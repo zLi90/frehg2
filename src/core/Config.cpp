@@ -93,6 +93,7 @@ ModulesConfig extractModules(const YAML::Node& node) {
   out.surfaceWater = valueOr<bool>(node["surface_water"], false);
   out.groundwater = valueOr<bool>(node["groundwater"], false);
   out.transport = valueOr<bool>(node["transport"], false);
+  out.temperature = valueOr<bool>(node["temperature"], false);
   return out;
 }
 
@@ -173,7 +174,10 @@ AtmosphereConfig extractAtmosphere(const YAML::Node& node) {
   AtmosphereConfig out;
   out.present = true;
   out.airTemperature = extractSeriesOrConstant(node["air_temperature"]);
-  out.surfaceTemperature = extractSeriesOrConstant(node["surface_temperature"]);
+  if (node["surface_temperature"].IsDefined()) {
+    out.hasSurfaceTemperature = true;
+    out.surfaceTemperature = extractSeriesOrConstant(node["surface_temperature"]);
+  }
   out.pressure = extractSeriesOrConstant(node["pressure"]);
   if (node["relative_humidity"].IsDefined()) {
     out.humidityIsRelative = true;
@@ -182,6 +186,13 @@ AtmosphereConfig extractAtmosphere(const YAML::Node& node) {
     out.specificHumidity = extractSeriesOrConstant(node["specific_humidity"]);
   }
   out.windSpeed = extractSeriesOrConstant(node["wind_speed"]);
+  if (node["shortwave"].IsDefined()) {
+    out.shortwave = extractSeriesOrConstant(node["shortwave"]);
+  }
+  if (node["longwave_in"].IsDefined()) {
+    out.longwaveIn = extractSeriesOrConstant(node["longwave_in"]);
+  }
+  out.windSpeedFloor = valueOr<real_t>(node["wind_speed_floor"], 0.5);
   return out;
 }
 
@@ -203,7 +214,14 @@ GroundwaterConfig extractGroundwater(const YAML::Node& node) {
                                 ? GroundwaterConfig::ReallocationSurplus::Redistribute
                                 : GroundwaterConfig::ReallocationSurplus::Drop;
   if (node["density_coupling"].IsDefined()) {
-    out.densityCoupling.enabled = valueOr<bool>(node["density_coupling"]["enabled"], false);
+    const YAML::Node dc = node["density_coupling"];
+    out.densityCoupling.enabled = valueOr<bool>(dc["enabled"], false);
+    out.densityCoupling.betaSaline = valueOr<real_t>(dc["beta_saline"], 0.000744);
+    out.densityCoupling.betaSalineViscosity =
+        valueOr<real_t>(dc["beta_saline_viscosity"], 0.0022);
+    out.densityCoupling.thermalExpansion = valueOr<real_t>(dc["thermal_expansion"], 0.0);
+    out.densityCoupling.referenceTemperature =
+        valueOr<real_t>(dc["reference_temperature"], 20.0);
   }
   if (node["evaporation"].IsDefined()) {
     out.evaporation.enabled = true;  // mode "bulk" is the sole schema value
@@ -277,6 +295,15 @@ InitialConditionsConfig extractInitialConditions(const YAML::Node& node, const M
       out.transport.groundwater = extractFileOrConstant(transport["groundwater"]);
     }
   }
+  const YAML::Node temperature = node["temperature"];
+  if (temperature.IsDefined()) {
+    if (temperature["surface"].IsDefined()) {
+      out.temperature.surface = extractFileOrConstant(temperature["surface"]);
+    }
+    if (temperature["groundwater"].IsDefined()) {
+      out.temperature.groundwater = extractFileOrConstant(temperature["groundwater"]);
+    }
+  }
   return out;
 }
 
@@ -331,6 +358,9 @@ std::vector<BoundaryConditionConfig> extractBoundaryConditions(const YAML::Node&
     }
     bc.target = targetFromString(bcNode["target"].as<std::string>());
     bc.kind = kindFromString(bcNode["kind"].as<std::string>());
+    bc.scalarField = valueOr<std::string>(bcNode["scalar"], "salinity") == "temperature"
+                         ? BcScalar::Temperature
+                         : BcScalar::Salinity;
     const YAML::Node value = bcNode["value"];
     if (!value.IsDefined()) {
       // Only the outflow and scalar_cauchy kinds take no value (schema
@@ -380,6 +410,52 @@ TransportConfig extractTransport(const YAML::Node& node) {
   return out;
 }
 
+TemperatureConfig extractTemperature(const YAML::Node& node) {
+  TemperatureConfig out;
+  if (node["scheme"].IsDefined()) {
+    out.scheme.advection =
+        valueOr<std::string>(node["scheme"]["advection"], "upwind") == "superbee"
+            ? TransportSchemeConfig::Advection::Superbee
+            : TransportSchemeConfig::Advection::Upwind;
+  }
+  if (node["surface_diffusivity"].IsDefined()) {
+    out.surfaceDiffusivityX = valueOr<real_t>(node["surface_diffusivity"]["x"], 1.0e-10);
+    out.surfaceDiffusivityY = valueOr<real_t>(node["surface_diffusivity"]["y"], 1.0e-10);
+  }
+  out.thermalConductivity = valueOr<real_t>(node["thermal_conductivity"], 0.0);
+  out.heatCapacityWater = valueOr<real_t>(node["heat_capacity_water"], 4.184e6);
+  out.heatCapacitySolid = valueOr<real_t>(node["heat_capacity_solid"], 0.0);
+  if (node["dispersivity"].IsDefined()) {
+    out.dispersivityLongitudinal =
+        valueOr<real_t>(node["dispersivity"]["longitudinal"], 0.0);
+    out.dispersivityTransverse = valueOr<real_t>(node["dispersivity"]["transverse"], 0.0);
+  }
+  if (node["bounds"].IsDefined()) {
+    if (node["bounds"]["min"].IsDefined()) {
+      out.hasBoundMin = true;
+      out.boundMin = node["bounds"]["min"].as<real_t>();
+    }
+    if (node["bounds"]["max"].IsDefined()) {
+      out.hasBoundMax = true;
+      out.boundMax = node["bounds"]["max"].as<real_t>();
+    }
+  }
+  const YAML::Node exchange = node["surface_exchange"];
+  if (exchange.IsDefined()) {
+    out.surfaceExchange.mode =
+        valueOr<std::string>(exchange["mode"], "equilibrium") == "bulk"
+            ? SurfaceExchangeConfig::Mode::Bulk
+            : SurfaceExchangeConfig::Mode::Equilibrium;
+    if (exchange["equilibrium"].IsDefined()) {
+      out.surfaceExchange.equilibriumTemperature =
+          valueOr<real_t>(exchange["equilibrium"]["temperature"], 0.0);
+      out.surfaceExchange.equilibriumCoefficient =
+          valueOr<real_t>(exchange["equilibrium"]["coefficient"], 0.0);
+    }
+  }
+  return out;
+}
+
 OutputConfig extractOutput(const YAML::Node& node) {
   OutputConfig out;
   out.filename = node["filename"].as<std::string>();
@@ -393,6 +469,9 @@ OutputConfig extractOutput(const YAML::Node& node) {
     }
     if (vars["transport"].IsDefined()) {
       out.transportVariables = vars["transport"].as<std::vector<std::string>>();
+    }
+    if (vars["temperature"].IsDefined()) {
+      out.temperatureVariables = vars["temperature"].as<std::vector<std::string>>();
     }
   }
   const YAML::Node monitors = node["monitors"];
@@ -504,6 +583,9 @@ FrehgConfig loadConfig(const std::string& path) {
   if (root["transport"].IsDefined()) {
     cfg.transport = extractTransport(root["transport"]);
   }
+  if (root["temperature"].IsDefined()) {
+    cfg.temperature = extractTemperature(root["temperature"]);
+  }
   cfg.output = extractOutput(root["output"]);
   cfg.restart = extractRestart(root["restart"]);
   if (root["solver"].IsDefined()) {
@@ -554,7 +636,8 @@ std::string describeConfig(const FrehgConfig& cfg) {
       << "] s, output every " << cfg.time.outputInterval << " s\n";
   out << "  modules: surface_water=" << (cfg.modules.surfaceWater ? "on" : "off")
       << " groundwater=" << (cfg.modules.groundwater ? "on" : "off")
-      << " transport=" << (cfg.modules.transport ? "on" : "off") << "\n";
+      << " transport=" << (cfg.modules.transport ? "on" : "off")
+      << " temperature=" << (cfg.modules.temperature ? "on" : "off") << "\n";
   if (cfg.modules.surfaceWater) {
     out << "  surface_water: gravity = " << cfg.surfaceWater.gravity << ", friction = "
         << (cfg.surfaceWater.friction.law == FrictionConfig::Law::Chezy ? "chezy" : "manning")
@@ -593,6 +676,25 @@ std::string describeConfig(const FrehgConfig& cfg) {
                 : "upwind")
         << ", dispersion l/t/m = " << cfg.transport.dispersionLongitudinal << "/"
         << cfg.transport.dispersionTransverse << "/" << cfg.transport.dispersionMolecular << "\n";
+  }
+  if (cfg.modules.temperature) {
+    out << "  temperature: advection = "
+        << (cfg.temperature.scheme.advection == TransportSchemeConfig::Advection::Superbee
+                ? "superbee"
+                : "upwind");
+    if (cfg.modules.groundwater) {
+      out << ", lambda_eff = " << cfg.temperature.thermalConductivity
+          << " W/m/K, (rho c)_w/s = " << cfg.temperature.heatCapacityWater << "/"
+          << cfg.temperature.heatCapacitySolid;
+    }
+    out << ", surface_exchange = "
+        << (cfg.temperature.surfaceExchange.mode == SurfaceExchangeConfig::Mode::Bulk
+                ? "bulk"
+                : cfg.temperature.surfaceExchange.mode ==
+                          SurfaceExchangeConfig::Mode::Equilibrium
+                      ? "equilibrium"
+                      : "none")
+        << "\n";
   }
   out << "  boundary_conditions: " << cfg.boundaryConditions.size() << "\n";
   out << "  output: " << cfg.output.filename << ", " << cfg.output.monitors.size()
@@ -698,6 +800,7 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
   root["modules"]["surface_water"] = cfg.modules.surfaceWater;
   root["modules"]["groundwater"] = cfg.modules.groundwater;
   root["modules"]["transport"] = cfg.modules.transport;
+  root["modules"]["temperature"] = cfg.modules.temperature;
 
   if (cfg.modules.surfaceWater) {
     const SurfaceWaterConfig& sw = cfg.surfaceWater;
@@ -756,7 +859,9 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
   if (cfg.atmosphere.present) {
     YAML::Node atm;
     atm["air_temperature"] = emitSeriesOrConstant(cfg.atmosphere.airTemperature);
-    atm["surface_temperature"] = emitSeriesOrConstant(cfg.atmosphere.surfaceTemperature);
+    if (cfg.atmosphere.hasSurfaceTemperature) {
+      atm["surface_temperature"] = emitSeriesOrConstant(cfg.atmosphere.surfaceTemperature);
+    }
     atm["pressure"] = emitSeriesOrConstant(cfg.atmosphere.pressure);
     if (cfg.atmosphere.humidityIsRelative) {
       atm["relative_humidity"] = emitSeriesOrConstant(cfg.atmosphere.relativeHumidity);
@@ -764,6 +869,9 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
       atm["specific_humidity"] = emitSeriesOrConstant(cfg.atmosphere.specificHumidity);
     }
     atm["wind_speed"] = emitSeriesOrConstant(cfg.atmosphere.windSpeed);
+    atm["shortwave"] = emitSeriesOrConstant(cfg.atmosphere.shortwave);
+    atm["longwave_in"] = emitSeriesOrConstant(cfg.atmosphere.longwaveIn);
+    atm["wind_speed_floor"] = cfg.atmosphere.windSpeedFloor;
     root["atmosphere"] = atm;
   }
 
@@ -784,6 +892,18 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
             ? "redistribute"
             : "drop";
     node["density_coupling"]["enabled"] = gw.densityCoupling.enabled;
+    // The per-term coefficients require their scalar's module (schema
+    // cross-check) — mirror it or the r1 round-trip fails.
+    if (cfg.modules.transport) {
+      node["density_coupling"]["beta_saline"] = gw.densityCoupling.betaSaline;
+      node["density_coupling"]["beta_saline_viscosity"] =
+          gw.densityCoupling.betaSalineViscosity;
+    }
+    if (cfg.modules.temperature) {
+      node["density_coupling"]["thermal_expansion"] = gw.densityCoupling.thermalExpansion;
+      node["density_coupling"]["reference_temperature"] =
+          gw.densityCoupling.referenceTemperature;
+    }
     if (gw.evaporation.enabled) {
       node["evaporation"]["mode"] = "bulk";
       node["evaporation"]["region"]["polygon"] = emitPolygon(gw.evaporation.polygon);
@@ -843,6 +963,16 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
           emitFileOrConstant(cfg.initialConditions.transport.groundwater);
     }
   }
+  if (cfg.modules.temperature) {
+    if (cfg.modules.surfaceWater) {
+      ic["temperature"]["surface"] =
+          emitFileOrConstant(cfg.initialConditions.temperature.surface);
+    }
+    if (cfg.modules.groundwater) {
+      ic["temperature"]["groundwater"] =
+          emitFileOrConstant(cfg.initialConditions.temperature.groundwater);
+    }
+  }
   if (ic.IsDefined() && ic.IsMap() && ic.size() > 0) {
     root["initial_conditions"] = ic;
   }
@@ -865,6 +995,14 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
                   : bc.kind == BcKind::Flux       ? "flux"
                   : bc.kind == BcKind::ScalarCauchy ? "scalar_cauchy"
                                                   : "scalar_value";
+      if (bc.kind == BcKind::ScalarValue) {
+        // Emit the selector only for temperature (salinity is the
+        // default; emitting it unconditionally would still revalidate,
+        // but the minimal form keeps hand-written configs fixed points).
+        if (bc.scalarField == BcScalar::Temperature) {
+          b["scalar"] = "temperature";
+        }
+      }
       // Outflow and scalar_cauchy take no value (schema cross-check:
       // transmissive / homogeneous zero-total-flux).
       if (bc.kind != BcKind::Outflow && bc.kind != BcKind::ScalarCauchy) {
@@ -906,6 +1044,42 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     root["transport"] = node;
   }
 
+  if (cfg.modules.temperature) {
+    const TemperatureConfig& tp = cfg.temperature;
+    YAML::Node node;
+    node["scheme"]["advection"] =
+        tp.scheme.advection == TransportSchemeConfig::Advection::Superbee ? "superbee" : "upwind";
+    // The thermal parameters carry module dependencies (schema
+    // cross-checks) — emit per enabled module so the output revalidates.
+    if (cfg.modules.surfaceWater) {
+      node["surface_diffusivity"]["x"] = tp.surfaceDiffusivityX;
+      node["surface_diffusivity"]["y"] = tp.surfaceDiffusivityY;
+    }
+    node["heat_capacity_water"] = tp.heatCapacityWater;
+    if (cfg.modules.groundwater) {
+      node["thermal_conductivity"] = tp.thermalConductivity;
+      node["heat_capacity_solid"] = tp.heatCapacitySolid;
+      node["dispersivity"]["longitudinal"] = tp.dispersivityLongitudinal;
+      node["dispersivity"]["transverse"] = tp.dispersivityTransverse;
+    }
+    if (tp.hasBoundMin) {
+      node["bounds"]["min"] = tp.boundMin;
+    }
+    if (tp.hasBoundMax) {
+      node["bounds"]["max"] = tp.boundMax;
+    }
+    if (tp.surfaceExchange.mode == SurfaceExchangeConfig::Mode::Equilibrium) {
+      node["surface_exchange"]["mode"] = "equilibrium";
+      node["surface_exchange"]["equilibrium"]["temperature"] =
+          tp.surfaceExchange.equilibriumTemperature;
+      node["surface_exchange"]["equilibrium"]["coefficient"] =
+          tp.surfaceExchange.equilibriumCoefficient;
+    } else if (tp.surfaceExchange.mode == SurfaceExchangeConfig::Mode::Bulk) {
+      node["surface_exchange"]["mode"] = "bulk";
+    }
+    root["temperature"] = node;
+  }
+
   YAML::Node output;
   output["filename"] = cfg.output.filename;
   if (!cfg.output.surfaceVariables.empty()) {
@@ -916,6 +1090,9 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
   }
   if (!cfg.output.transportVariables.empty()) {
     output["variables"]["transport"] = cfg.output.transportVariables;
+  }
+  if (!cfg.output.temperatureVariables.empty()) {
+    output["variables"]["temperature"] = cfg.output.temperatureVariables;
   }
   for (const MonitorConfig& mon : cfg.output.monitors) {
     YAML::Node m;

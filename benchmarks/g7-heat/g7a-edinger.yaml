@@ -1,0 +1,69 @@
+# g7(a) stage 1 — Edinger equilibrium-temperature relaxation (v2 plan
+# §4.2): still closed basin (velocity-0 walls, the g4 lesson), h = 1 m,
+# T0 = 30 C, equilibrium exchange dT/dt = -K_e (T - T_e)/(rho c_p h)
+# with T_e = 20 C, K_e = 30 W/m2/K (e-fold rho c h / K_e = 1.394e5 s =
+# 1.614 d), run 10 d. Gates: T(t) within 0.5 % of the initial excess vs
+# the exact exponential (explicit-Euler bias at dt = 600 s is ~0.008 K,
+# 16 % of the budget); the heat ledger (/monitor/temperature_audit,
+# with the exchange audited in the surf_atmos column) closes per step
+# to 1e-8 of the basin's heat content — the temperature analogue of the
+# scalar-mass audit identity.
+# Q5 target schema — red until the capability lands.
+simulation:
+  id: g7a-edinger
+  title: g7(a) Edinger equilibrium-temperature relaxation
+
+domain:
+  nx: 4
+  ny: 3
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 0.5
+  bottom_elevation: {constant: -1.0}
+
+time:
+  dt: 600.0
+  t_end: 864000.0
+  output_interval: 43200.0
+
+modules:
+  surface_water: true
+  temperature: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.0}
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+
+temperature:
+  scheme: {advection: upwind}
+  surface_diffusivity: {x: 0.0, y: 0.0}
+  heat_capacity_water: 4.184e6
+  surface_exchange:
+    mode: equilibrium
+    equilibrium:
+      temperature: 20.0             # T_e [C]
+      coefficient: 30.0             # K_e [W/m2/K]
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+  temperature:
+    surface: {constant: 30.0}
+
+boundary_conditions:
+  - name: walls
+    region: {polygon: [[-1.0, -1.0], [5.0, -1.0], [5.0, 4.0], [-1.0, 4.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    temperature: [temperature_surface]
+  monitors:
+    - {name: t_probe, i: 1, j: 1, variables: [temperature_surface]}

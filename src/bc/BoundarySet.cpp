@@ -62,6 +62,7 @@ BoundarySet::BoundarySet(const Grid& grid, const std::vector<BoundaryConditionCo
     bc.name_ = cfg.name;
     bc.target_ = cfg.target;
     bc.kind_ = cfg.kind;
+    bc.scalarField_ = cfg.scalarField;
     bc.form_ = cfg.value.form;
     bc.constant_ = cfg.value.constant;
     bc.hydrostaticEta_ = cfg.value.hydrostaticEta;

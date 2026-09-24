@@ -1,0 +1,36 @@
+# g6/g7/g8 — temperature gates (v2 plan §4.2, realization V2-A17).
+# Flux windows assert the head-driven columns achieved their target
+# Darcy flux before any closed form is evaluated at the MEASURED value.
+g6a:                               # B&P steady Peclet sweep
+  profile_tol_fraction: 0.01      # plan: 1% of dT, max-norm, per Pe
+  flux_window_rel: 0.02           # measured q within 2% of target
+  flux_floor_abs: 2.0e-9          # and the Pe=0 case within this of zero [m/s]
+g6b:                               # Ogata-Banks heat breakthrough (OGS params)
+  breakthrough_tol_rel: 0.01      # plan: 1% of the step, superbee (upwind recorded)
+  flux_window_rel: 0.02
+g6c:                               # Stallman diel damping
+  amplitude_tol_rel: 0.05         # plan: 2-5% on the amplitude ratio
+  phase_tol_s: 600.0              # plan: 10 min on the phase lag
+  flux_window_rel: 0.05           # |q| = 2e-6 m/s targets
+  flux_floor_abs: 1.0e-7          # the q = 0 sub-case bound [m/s]
+  spinup_cycles: 3
+g6c_coupled:                       # the composed surface-fed variant
+  amplitude_tol_rel: 0.05
+  phase_tol_s: 600.0
+  flux_window_rel: 0.05           # measured seepage vs the 2e-6 target
+  spinup_cycles: 3
+g7a:                               # Edinger relaxation + energy ledger
+  relaxation_tol_rel: 0.005       # plan: 0.5% of the initial excess
+  ledger_tol_per_step: 1.0e-8     # of the basin heat content, per step
+g7a2:                              # bulk-formula equilibrium consistency
+  equilibrium_tol_c: 0.05         # plan: 0.05 C vs the offline root
+  steady_tol_c: 1.0e-3            # trailing-10% span of the probe [C]
+g7b:                               # channel thermal plume
+  steady_l2_tol: 0.01             # plan: 1% of the inlet excess
+  transient_tol_rel: 0.02         # plan: 2% of the step, mid-channel
+  velocity_tol_rel: 0.01          # measured u within 1% of the nominal 0.5
+g8:                                # Horton-Rogers-Lapwood onset
+  decay_factor: 0.1               # subcritical mode amplitude end/seed
+  nusselt_min: 1.05               # plan: persistent Nu > 1.05 supercritical
+orient:
+  tol_abs: 1.0e-12                # dihedral field mapping [C] / [m]

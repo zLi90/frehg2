@@ -1,0 +1,97 @@
+# The Q5 heat x-battery base case (v2 plan §8.1/§9 + V2-A17): a square
+# 4 x 4 m, 1.5 m deep saturated block with lateral flow driven by
+# hydrostatic side reservoirs (west eta +0.06, east -0.06), a 25 C side
+# Dirichlet temperature on the inflow edge, an off-axis warm blob in
+# the initial temperature (harness-generated input/orient_ic.dat), and
+# the THERMAL density coupling active (beta_T = 2e-4) so the
+# temperature-baroclinic Darcy term is inside the battery. The harness
+# generates the 8 dihedral variants (transformed BC polygons + IC
+# rasters — the side Dirichlet visits all four sides, the §9 "thermal
+# BC on all sides" row) and asserts the final temperature and head
+# fields map onto the base run under the corresponding transforms.
+# The same case is the rank-invariance-heat decomposition lane.
+# Q5 target schema — red until the capability lands.
+simulation:
+  id: g6-orient
+  title: Q5 8-orientation subsurface-thermal symmetry battery
+
+domain:
+  nx: 8
+  ny: 8
+  nz: 6
+  dx: 0.5
+  dy: 0.5
+  dz: 0.25
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 500.0
+  t_end: 20000.0
+  output_interval: 20000.0
+
+modules:
+  groundwater: true
+  temperature: true
+
+groundwater:
+  timestep:
+    dt_init: 500.0
+    dt_min: 500.0
+    dt_max: 500.0
+  specific_storage: 1.0e-6
+  density_coupling:
+    enabled: true
+    thermal_expansion: 2.0e-4
+    reference_temperature: 20.0
+
+soil:
+  types:
+    - name: gravel
+      ksx: 1.0e-3
+      ksy: 1.0e-3
+      ksz: 1.0e-3
+      theta_s: 0.35
+      theta_r: 0.02
+      vg_alpha: 3.0
+      vg_n: 2.0
+  map: {constant: gravel}
+
+temperature:
+  scheme: {advection: superbee}
+  thermal_conductivity: 2.0
+  heat_capacity_water: 4.184e6
+  heat_capacity_solid: 2.0548e6
+  dispersivity: {longitudinal: 0.0, transverse: 0.0}
+
+initial_conditions:
+  groundwater:
+    water_table: {constant: 0.0}
+  temperature:
+    groundwater: {file: input/orient_ic.dat}
+
+boundary_conditions:
+  - name: head-in
+    # Side conditions select member CELLS (the polygon must contain the
+    # edge column's centres at x = 0.25); the staged face comes from
+    # domain-edge adjacency.
+    region: {polygon: [[-0.1, -0.1], [0.3, -0.1], [0.3, 4.1], [-0.1, 4.1]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 0.06}}
+  - name: head-out
+    region: {polygon: [[3.7, -0.1], [4.1, -0.1], [4.1, 4.1], [3.7, 4.1]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: -0.06}}
+  - name: temperature-in
+    region: {polygon: [[-0.1, -0.1], [0.3, -0.1], [0.3, 4.1], [-0.1, 4.1]]}
+    target: groundwater_side
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 25.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head]
+    temperature: [temperature]

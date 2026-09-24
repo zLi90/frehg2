@@ -1,0 +1,86 @@
+# g7(b) — channel thermal plume (v2 plan §4.2): uniform flow u = 0.5
+# m/s at h = 1 m in a frictionless 84 km channel (one relaxation
+# e-fold: u / k = u rho c_p h / K_e = 8.37e4 m), D_L = 5 m2/s,
+# K_e = 25 W/m2/K toward the 15 C ambient (= T_e, so the ambient never
+# decays and the wet-stencil floor is exact); a 25 C step enters with
+# the upstream discharge (the per-scalar inflow pairing). Inflow:
+# Q = u h W = 0.5 * 1 * 500 = 250 m3/s; outlet: bed-level prescribed
+# stage (kind outflow deadlocks on a flat bed). Gates: steady profile
+# L2 <= 1 % of the inlet excess vs exp(x (u - sqrt(u^2+4kD))/(2D));
+# mid-channel (x = 42 km, per-step monitor) transient breakthrough
+# <= 2 % of the step vs the van Genuchten ADE+decay solution; the
+# harness first asserts the measured channel velocity within 1 % of
+# the nominal 0.5 m/s. The K_e = 0 limit of the same machinery is the
+# g6(b) transport (one implementation, two configs — plan §4.2).
+# Q5 target schema — red until the capability lands.
+simulation:
+  id: g7b-channel
+  title: g7(b) channel thermal plume (ADE + relaxation)
+
+domain:
+  nx: 840
+  ny: 1
+  nz: 1
+  dx: 100.0
+  dy: 500.0
+  dz: 0.5
+  bottom_elevation: {constant: -1.0}
+
+time:
+  dt: 100.0
+  t_end: 400000.0
+  output_interval: 8000.0
+
+modules:
+  surface_water: true
+  temperature: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.0}
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+
+temperature:
+  scheme: {advection: superbee}
+  surface_diffusivity: {x: 5.0, y: 0.0}
+  heat_capacity_water: 4.184e6
+  surface_exchange:
+    mode: equilibrium
+    equilibrium:
+      temperature: 15.0
+      coefficient: 25.0
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+    uu: {constant: 0.5}
+  temperature:
+    surface: {constant: 15.0}
+
+boundary_conditions:
+  - name: inflow
+    region: {polygon: [[-1.0, -1.0], [110.0, -1.0], [110.0, 501.0], [-1.0, 501.0]]}
+    target: surface
+    kind: discharge
+    value: {constant: 250.0}
+  - name: inflow-temperature
+    region: {polygon: [[-1.0, -1.0], [110.0, -1.0], [110.0, 501.0], [-1.0, 501.0]]}
+    target: surface
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 25.0}
+  - name: outlet
+    region: {polygon: [[83900.0, -1.0], [84010.0, -1.0], [84010.0, 501.0], [83900.0, 501.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, uu]
+    temperature: [temperature_surface]
+  monitors:
+    - {name: t_mid, i: 420, j: 0, variables: [temperature_surface]}

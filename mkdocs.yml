@@ -49,6 +49,7 @@ nav:
       - Groundwater: theory/groundwater.md
       - Exchange flux: theory/exchange-flux.md
       - Transport: theory/transport.md
+      - Temperature: theory/temperature.md
       - Removed features: theory/removed-features.md
   - AI assistant guides:
       - Build guide: agents/build.md

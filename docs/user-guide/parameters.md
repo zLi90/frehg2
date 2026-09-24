@@ -48,7 +48,8 @@ configuration file; "one of" groups require exactly one member.
 |---|---|---|---|---|
 | `modules.surface_water` | bool | no | false | run the SWE module |
 | `modules.groundwater` | bool | no | false | run the Richards module |
-| `modules.transport` | bool | no | false | run scalar transport (needs a flow module) |
+| `modules.transport` | bool | no | false | run scalar (salinity) transport (needs a flow module) |
+| `modules.temperature` | bool | no | false | run temperature transport (v2 Q5; needs a flow module) |
 
 At least one of `surface_water`/`groundwater` must be true.
 
@@ -97,11 +98,14 @@ choice.
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `atmosphere.air_temperature` | series/constant | yes | — | [°C] |
-| `atmosphere.surface_temperature` | series/constant | yes | — | T_s [°C]; prescribed until Q5 transports temperature |
+| `atmosphere.surface_temperature` | series/constant | when a Q4 evap consumer is on | — | T_s [°C] for the evaporation consumers (surface bulk / soil bulk). The Q5 surface **heat** exchange never reads it — it evaluates the bulk chain at the local water temperature (V2-A17) |
 | `atmosphere.pressure` | series/constant | yes | — | P₀ [kPa] |
 | `atmosphere.specific_humidity` | series/constant | one of | — | q_a [−]; exactly one humidity form |
 | `atmosphere.relative_humidity` | series/constant | one of | — | [−] of q_sat(air temperature) |
-| `atmosphere.wind_speed` | series/constant | yes | — | U [m/s] (shared with the Q6 wind block) |
+| `atmosphere.wind_speed` | series/constant | yes | — | U [m/s] for the bulk transfer functions. Configured independently of `surface_water.wind` (the vector momentum forcing) — Q5 decided against unifying them (a scalar-vs-vector convention would couple two independent schema surfaces); point both at the same series when physical consistency matters |
+| `atmosphere.shortwave` | series/constant | no | 0 | absorbed shortwave radiation [W/m²] (Q5 bulk heat exchange; radiation *schemes* are out of scope, plan §10) |
+| `atmosphere.longwave_in` | series/constant | no | 0 | incident longwave radiation [W/m²] (Q5 bulk heat exchange; the emitted εσT⁴ term is computed) |
+| `atmosphere.wind_speed_floor` | real ≥ 0 | no | 0.5 | [m/s] still-air lower bound on the wind entering the bulk transfer functions (the GLM practice, plan §4.1) — applied to every bulk consumer at sampling |
 
 ## groundwater (required section when the module is on)
 
@@ -117,7 +121,11 @@ choice.
 | `groundwater.timestep.courant_max` | real > 0 | no | 2.0 | legacy `Co_max` |
 | `groundwater.specific_storage` | real ≥ 0 | yes | — | Ss [1/m] |
 | `groundwater.reallocation_surplus` | `drop` \| `redistribute` | no | `drop` | post-allocation surplus of saturation-adjacent cells: discard (legacy sweep, groundwater.c:1026 disabled the transfer; the b2 golden embeds it) or redistribute vertically into pore room (mass-conserving; b3 uses it) |
-| `groundwater.density_coupling.enabled` | bool | no | false | baroclinic feedback (requires transport) |
+| `groundwater.density_coupling.enabled` | bool | no | false | baroclinic feedback (requires transport and/or temperature): r_rho = 1 + β_s·s − β_T·(T − T₀), r_visc = 1/(1 + β_sv·s) |
+| `groundwater.density_coupling.beta_saline` | real ≥ 0 | no | 7.44e-4 | β_s [L/g] (v2 Q5: the legacy compile-time constant, now configurable; requires transport) |
+| `groundwater.density_coupling.beta_saline_viscosity` | real ≥ 0 | no | 2.2e-3 | β_sv [L/g] (requires transport) |
+| `groundwater.density_coupling.thermal_expansion` | real ≥ 0 | no | 0 | β_T [1/K] thermal expansion (v2 Q5; requires temperature; 0 = thermally passive) |
+| `groundwater.density_coupling.reference_temperature` | real | no | 20 | T₀ [°C] for the thermal term (requires temperature) |
 | `groundwater.evaporation.mode` | `bulk` | yes (in block) | — | v2 Q4 bulk-aerodynamic soil evaporation: potential rate from the `atmosphere` block, actual rate limited by the surface-layer soil relative humidity α₁ = min(1, 1.8·w_g/(w_g + 0.30)) (Geng & Boufadel Eq. 6; condensation passes through), applied as the top-face flux over the region. Requires `atmosphere`; uncoupled groundwater runs only; the region must not overlap a `groundwater_top` condition. Adds the cumulative `evaporation` column to `/monitor/gw_mass_audit` |
 | `groundwater.evaporation.region.polygon` | [x, y] list ≥ 3 | yes (in block) | — | the evaporation zone |
 
@@ -155,6 +163,8 @@ choice.
 | `initial_conditions.groundwater.moisture.{constant,file}` | one of three forms | when GW on | — | water content |
 | `initial_conditions.transport.surface.{constant,file}` | one of | when transport+SWE | — | surface concentration |
 | `initial_conditions.transport.groundwater.{constant,file}` | one of | when transport+GW | — | subsurface concentration |
+| `initial_conditions.temperature.surface.{constant,file}` | one of | when temperature+SWE | — | surface temperature [°C] |
+| `initial_conditions.temperature.groundwater.{constant,file}` | one of | when temperature+GW | — | subsurface temperature [°C] |
 
 ## boundary_conditions (list; plan §5.6)
 
@@ -164,6 +174,7 @@ choice.
 | `boundary_conditions[].region.polygon` | list of [x, y], ≥ 3 | yes | — | region vertices [m]; on-edge counts inside |
 | `boundary_conditions[].target` | `surface` \| `groundwater_top` \| `groundwater_bottom` \| `groundwater_side` | yes | — | where the condition applies |
 | `boundary_conditions[].kind` | `eta` \| `discharge` \| `velocity` \| `outflow` \| `head` \| `flux` \| `scalar_value` \| `scalar_cauchy` | yes | — | eta/discharge/velocity/outflow: surface only; head/flux: groundwater only; scalar_value and scalar_cauchy need transport. `outflow` is free (transmissive) outflow at domain-edge faces — the stage is extrapolated down the continued bed slope — and takes no `value`. `scalar_value` semantics (P4): target `surface` — members covered by a `discharge` condition inject that inflow's concentration (legacy `s_inflow`); every other member is a wet-cell Dirichlet (the legacy tide salinity, generalized to any region — dry cells stay at 0); target `groundwater_side` — the ghost concentration along the member edge (legacy `s_yp`/`s_ym`), feeding upwinded inflow, the limiter bound, and the baroclinic boundary face. `scalar_cauchy` (v2 Q4): zero-total-scalar-flux top condition (Geng & Boufadel 2015 Eq. 7) — water crosses the subsurface top face (whatever the flow-side top condition sends), scalar mass does not, and the top-cell limiter admits the exact evaporative concentration / infiltration dilution; homogeneous (takes no `value`), target `groundwater_top` in uncoupled groundwater runs only |
+| `boundary_conditions[].scalar` | `salinity` \| `temperature` | no | `salinity` | which registered scalar a `scalar_value` condition prescribes (v2 Q5); valid on kind `scalar_value` only. With `scalar: temperature`, targets `groundwater_top`/`groundwater_bottom` become valid as **cell-pinning** Dirichlet rows: the member columns' top/bottom cells are re-imposed after every update (the b6 tide rule applied vertically — the g6/g8 gates). The salinity top/bottom rows stay schema-rejected in v2.0 (no gate exercises them; §8.2 discipline) |
 | `boundary_conditions[].value.constant` | real | one of | — | fixed value |
 | `boundary_conditions[].value.series.file` | path | one of | — | time series |
 | `boundary_conditions[].value.gravity` | `true` | one of | — | free drainage (kind flux; legacy `bctype_GW` code 3) |
@@ -182,6 +193,39 @@ choice.
 | `transport.bounds.min` | real | no | 0 | scalar lower bound (replaces the legacy [0, 200] clamp; plan §3.2) |
 | `transport.bounds.max` | real | no | unbounded | scalar upper bound |
 | `transport.legacy_evap_allowance` | bool | no | false | v2 Q4: keep the legacy hardcoded +0.01/step limiter allowance on coupled dry evaporating columns instead of the exact in-step concentration factor (golden pinning) |
+
+## temperature (v2 Q5; required section when the module is on)
+
+The second registered scalar (plan §4.1). The transport machinery
+(advection schemes, limiter, ledgers, decomposition staging) is shared
+with salinity; these are the per-scalar parameters and the thermal
+physics: the subsurface mass basis is θ + κ with the retardation
+κ = (1 − θ_s)·(ρc)_s/(ρc)_w, conduction enters the dispersion tensor's
+molecular slot as λ_eff/(ρc)_w (a bulk property, **not** scaled by θ_s),
+uncoupled top faces advect the donor value (heat travels with the
+water), and rain/evaporation change volume without changing temperature.
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `temperature.scheme.advection` | `upwind` \| `superbee` | no | upwind | advection scheme |
+| `temperature.surface_diffusivity.x` | real ≥ 0 | no | 1e-10 | [m²/s] (needs SWE) |
+| `temperature.surface_diffusivity.y` | real ≥ 0 | no | 1e-10 | [m²/s] (needs SWE) |
+| `temperature.thermal_conductivity` | real > 0 | when GW on | — | λ_eff [W/m/K] bulk effective thermal conductivity |
+| `temperature.heat_capacity_water` | real > 0 | no | 4.184e6 | (ρc)_w [J/m³/K] |
+| `temperature.heat_capacity_solid` | real > 0 | when GW on | — | (ρc)_s [J/m³/K] solid volumetric heat capacity (the retardation) |
+| `temperature.dispersivity.longitudinal` | real ≥ 0 | no | 0 | thermal dispersivity [m] (needs GW) |
+| `temperature.dispersivity.transverse` | real ≥ 0 | no | 0 | thermal dispersivity [m] (needs GW) |
+| `temperature.bounds.min` | real | no | unbounded | optional lower bound [°C] (unlike salinity, both bounds default open) |
+| `temperature.bounds.max` | real | no | unbounded | optional upper bound [°C] |
+| `temperature.surface_exchange.mode` | `equilibrium` \| `bulk` | yes (in block) | — | surface heat flux (needs SWE). `equilibrium`: Q = −K_e (T − T_e) (Edinger). `bulk`: Q_net = Q_sw + ε(LW_in − σT_K⁴) − Q_lat − Q_sens with ε = 0.97 and the latent/sensible terms on the shared Q4 atm chain, evaluated at the local water temperature; requires `atmosphere`. Wet cells only; audited in the `surf_atmos` ledger column |
+| `temperature.surface_exchange.equilibrium.temperature` | real | with mode equilibrium | — | T_e [°C] |
+| `temperature.surface_exchange.equilibrium.coefficient` | real > 0 | with mode equilibrium | — | K_e [W/m²/K] |
+
+Output variables: `temperature` (subsurface, °C) and
+`temperature_surface` under `output.variables.temperature`;
+`temperature_surface` is also a valid point-monitor variable. An active
+temperature module writes the `/monitor/temperature_audit` heat ledger
+(the transport-audit identity with the extra `surf_atmos` column).
 
 ## output
 

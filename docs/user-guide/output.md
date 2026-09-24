@@ -16,10 +16,12 @@ seconds):
 /groundwater/<var>/<t> [NY*NX*NZ]  subsurface snapshot, index (j*NX + i)*NZ + k
 /groundwater/zcell/0 [NY*NX*NZ]    per-cell layer-center elevations (static)
 /transport/<var>/<t>         scalar snapshots (concentration on either grid)
+/temperature/<var>/<t>       temperature snapshots (v2 Q5; either grid, degC)
 /monitor/<name>    (rows, 1+k)  extendable table: time + the monitored variables
 /monitor/mass_audit (rows, 7+)  surface volume budget (see below)
 /monitor/gw_mass_audit (rows, 7) subsurface volume budget (see below)
 /monitor/transport_audit     scalar-mass budget (transport runs; see below)
+/monitor/temperature_audit   heat ledger (temperature runs; see below)
 /checkpoint/<t>/...          full prognostic state (only if checkpointing)
 ```
 
@@ -69,6 +71,17 @@ cumulative column (exchange, sources, boundary leaks, limiter/bounds clips,
 and the ledger re-anchor terms); the closure identities hold to rounding in
 every regime. The term-by-term definition is in the
 [transport theory page](../theory/transport.md).
+
+`/monitor/temperature_audit` (temperature runs, v2 Q5) is the same
+identity on the temperature scalar — columns `surf_heat`, `subs_heat`,
+`exchange`, `surf_source`, `surf_boundary`, `surf_adjust`, `surf_anchor`,
+`surf_atmos`, `subs_boundary`, `subs_adjust`, `subs_anchor` — with the
+atmospheric heat exchange in its own `surf_atmos` column and masses in
+K·m³ (subsurface on the θ+κ retardation basis). The temperature module
+also writes `temperature`/`temperature_surface` under `/temperature/`
+(°C, selected by `output.variables.temperature`), and
+`temperature_surface` is a valid point-monitor variable. See the
+[temperature theory page](../theory/temperature.md).
 
 ## Inspecting the file
 

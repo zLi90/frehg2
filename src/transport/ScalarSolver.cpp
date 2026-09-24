@@ -109,90 +109,149 @@ void computeTopLayer(const Grid& grid, const Field2<int>& kTop) {
 
 }  // namespace
 
+ScalarSpec ScalarSpec::salinity(const FrehgConfig& config) {
+  const TransportConfig& tr = config.transport;
+  ScalarSpec spec;
+  spec.prefix = "s";
+  spec.field = BcScalar::Salinity;
+  spec.isTemperature = false;
+  spec.superbee = (tr.scheme.advection == TransportSchemeConfig::Advection::Superbee);
+  spec.difuX = tr.surfaceDiffusivityX;
+  spec.difuY = tr.surfaceDiffusivityY;
+  spec.dispLon = tr.dispersionLongitudinal;
+  spec.dispLat = tr.dispersionTransverse;
+  spec.dispMol = tr.dispersionMolecular;
+  spec.hasBoundMin = true;
+  spec.boundMin = tr.boundMin;
+  spec.hasBoundMax = tr.hasBoundMax;
+  spec.boundMax = tr.boundMax;
+  spec.legacyEvapAllowance = tr.legacyEvapAllowance;
+  return spec;
+}
+
+ScalarSpec ScalarSpec::temperature(const FrehgConfig& config) {
+  const TemperatureConfig& tp = config.temperature;
+  ScalarSpec spec;
+  spec.prefix = "t";
+  spec.field = BcScalar::Temperature;
+  spec.isTemperature = true;
+  spec.superbee = (tp.scheme.advection == TransportSchemeConfig::Advection::Superbee);
+  spec.difuX = tp.surfaceDiffusivityX;
+  spec.difuY = tp.surfaceDiffusivityY;
+  spec.dispLon = tp.dispersivityLongitudinal;
+  spec.dispLat = tp.dispersivityTransverse;
+  // The molecular slot carries the effective thermal diffusivity
+  // alpha_e = lambda_eff / (rho c)_w (used as-is in the tensor).
+  spec.dispMol = tp.thermalConductivity / tp.heatCapacityWater;
+  spec.hasBoundMin = tp.hasBoundMin;
+  spec.boundMin = tp.boundMin;
+  spec.hasBoundMax = tp.hasBoundMax;
+  spec.boundMax = tp.boundMax;
+  spec.legacyEvapAllowance = false;
+  spec.kappaFactor = tp.heatCapacitySolid / tp.heatCapacityWater;
+  spec.heatCapacityWater = tp.heatCapacityWater;
+  spec.exchange = tp.surfaceExchange.mode;
+  spec.equilibriumT = tp.surfaceExchange.equilibriumTemperature;
+  spec.equilibriumK = tp.surfaceExchange.equilibriumCoefficient;
+  return spec;
+}
+
 ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
                            const BoundarySet& boundaries, HaloExchanger& halo,
                            const SurfaceWiring& surface, const SubsurfaceWiring& subsurface,
-                           const CouplingWiring& coupling)
-    : grid_(grid), halo_(halo), surf_(surface), subs_(subsurface), cpl_(coupling) {
-  const TransportConfig& tr = config.transport;
-  superbee_ = (tr.scheme.advection == TransportSchemeConfig::Advection::Superbee);
-  difuX_ = tr.surfaceDiffusivityX;
-  difuY_ = tr.surfaceDiffusivityY;
-  dispLon_ = tr.dispersionLongitudinal;
-  dispLat_ = tr.dispersionTransverse;
-  dispMol_ = tr.dispersionMolecular;
-  boundMin_ = tr.boundMin;
-  hasBoundMax_ = tr.hasBoundMax;
-  // The open-bound sentinel replaces the legacy hard 200 (plan §3.2): the
-  // limiter guards compare against it exactly as legacy compared against
-  // s_lim_hi, and the final clamp only applies with a configured maximum.
-  boundMax_ = hasBoundMax_ ? tr.boundMax : 1.0e30;
-  legacyEvapAllowance_ = tr.legacyEvapAllowance;
+                           const CouplingWiring& coupling, const ScalarSpec& spec)
+    : grid_(grid), halo_(halo), surf_(surface), subs_(subsurface), cpl_(coupling),
+      spec_(spec) {
+  superbee_ = spec_.superbee;
+  difuX_ = spec_.difuX;
+  difuY_ = spec_.difuY;
+  dispLon_ = spec_.dispLon;
+  dispLat_ = spec_.dispLat;
+  dispMol_ = spec_.dispMol;
+  hasBoundMin_ = spec_.hasBoundMin;
+  hasBoundMax_ = spec_.hasBoundMax;
+  // The open-bound sentinels replace the legacy hard limits (plan §3.2):
+  // the limiter guards compare against them exactly as legacy compared
+  // against s_lim_hi/s_lim_lo, and the final clamps only apply with a
+  // configured bound (temperature defaults both bounds open).
+  boundMin_ = hasBoundMin_ ? spec_.boundMin : -1.0e30;
+  boundMax_ = hasBoundMax_ ? spec_.boundMax : 1.0e30;
+  legacyEvapAllowance_ = spec_.legacyEvapAllowance;
+  if (spec_.exchange == SurfaceExchangeConfig::Mode::Bulk) {
+    met_ = atm::MetForcing(config.atmosphere, config);
+  }
 
   const std::size_t ny2 = static_cast<std::size_t>(grid_.nyLocal()) + 2;
   const std::size_t nx2 = static_cast<std::size_t>(grid_.nxLocal()) + 2;
   const std::size_t nz = static_cast<std::size_t>(grid_.nz());
 
+  // Field and halo names carry the spec prefix: "s_*" is the v1 salinity
+  // layout byte-for-byte (checkpoint compatibility); the temperature
+  // instance registers a parallel "t_*" set.
+  const std::string p = spec_.prefix + "_";
   if (surf_.active) {
-    sSurf_ = Field2<real_t>("s_surf", ny2, nx2);
-    smSurf_ = Field2<real_t>("s_sm_surf", ny2, nx2);
-    sSurfKp_ = Field2<real_t>("s_surf_kp", ny2, nx2);
-    sseepage_ = Field2<real_t>("s_seepage", ny2, nx2);
-    vsn_ = Field2<real_t>("s_vsn", ny2, nx2);
-    vflux_ = Field2<real_t>("s_vflux", ny2, nx2);
-    fuOld_ = Field2<real_t>("s_fu_old", ny2, nx2);
-    fvOld_ = Field2<real_t>("s_fv_old", ny2, nx2);
-    sMinS_ = Field2<real_t>("s_min_surf", ny2, nx2);
-    sMaxS_ = Field2<real_t>("s_max_surf", ny2, nx2);
-    sFarXm2_ = Field2<real_t>("s_far_xm_2d", ny2, nx2);
-    sFarXp2_ = Field2<real_t>("s_far_xp_2d", ny2, nx2);
-    sFarYm2_ = Field2<real_t>("s_far_ym_2d", ny2, nx2);
-    sFarYp2_ = Field2<real_t>("s_far_yp_2d", ny2, nx2);
-    halo_.add("s_surf", sSurf_);
-    halo_.add("s_fu_old", fuOld_);
-    halo_.add("s_fv_old", fvOld_);
-    halo_.add("s_far_xm_2d", sFarXm2_);
-    halo_.add("s_far_xp_2d", sFarXp2_);
-    halo_.add("s_far_ym_2d", sFarYm2_);
-    halo_.add("s_far_yp_2d", sFarYp2_);
+    sSurf_ = Field2<real_t>(p + "surf", ny2, nx2);
+    smSurf_ = Field2<real_t>(p + "sm_surf", ny2, nx2);
+    sSurfKp_ = Field2<real_t>(p + "surf_kp", ny2, nx2);
+    sseepage_ = Field2<real_t>(p + "seepage", ny2, nx2);
+    vsn_ = Field2<real_t>(p + "vsn", ny2, nx2);
+    vflux_ = Field2<real_t>(p + "vflux", ny2, nx2);
+    fuOld_ = Field2<real_t>(p + "fu_old", ny2, nx2);
+    fvOld_ = Field2<real_t>(p + "fv_old", ny2, nx2);
+    sMinS_ = Field2<real_t>(p + "min_surf", ny2, nx2);
+    sMaxS_ = Field2<real_t>(p + "max_surf", ny2, nx2);
+    sFarXm2_ = Field2<real_t>(p + "far_xm_2d", ny2, nx2);
+    sFarXp2_ = Field2<real_t>(p + "far_xp_2d", ny2, nx2);
+    sFarYm2_ = Field2<real_t>(p + "far_ym_2d", ny2, nx2);
+    sFarYp2_ = Field2<real_t>(p + "far_yp_2d", ny2, nx2);
+    halo_.add(p + "surf", sSurf_);
+    halo_.add(p + "fu_old", fuOld_);
+    halo_.add(p + "fv_old", fvOld_);
+    halo_.add(p + "far_xm_2d", sFarXm2_);
+    halo_.add(p + "far_xp_2d", sFarXp2_);
+    halo_.add(p + "far_ym_2d", sFarYm2_);
+    halo_.add(p + "far_yp_2d", sFarYp2_);
   }
   if (subs_.active) {
-    dzzTop_ = Field2<real_t>("s_dzz_top", ny2, nx2);
-    sSubs_ = Field3<real_t>("s_subs", ny2, nx2, nz);
-    smSubs_ = Field3<real_t>("s_sm_subs", ny2, nx2, nz);
-    sMin3_ = Field3<real_t>("s_min_subs", ny2, nx2, nz);
-    sMax3_ = Field3<real_t>("s_max_subs", ny2, nx2, nz);
-    dxx_ = Field3<real_t>("s_dxx", ny2, nx2, nz);
-    dyy_ = Field3<real_t>("s_dyy", ny2, nx2, nz);
-    dzz_ = Field3<real_t>("s_dzz", ny2, nx2, nz);
-    dxy_ = Field3<real_t>("s_dxy", ny2, nx2, nz);
-    dxz_ = Field3<real_t>("s_dxz", ny2, nx2, nz);
-    dyz_ = Field3<real_t>("s_dyz", ny2, nx2, nz);
-    sFarXm3_ = Field3<real_t>("s_far_xm_3d", ny2, nx2, nz);
-    sFarXp3_ = Field3<real_t>("s_far_xp_3d", ny2, nx2, nz);
-    sFarYm3_ = Field3<real_t>("s_far_ym_3d", ny2, nx2, nz);
-    sFarYp3_ = Field3<real_t>("s_far_yp_3d", ny2, nx2, nz);
-    kzLower_ = Field3<real_t>("s_kz_lower", ny2, nx2, nz);
-    kTop_ = Field2<int>("s_ktop", ny2, nx2);
-    cauchyTop_ = Field2<int>("s_cauchy_top", ny2, nx2);
-    halo_.add("s_subs", sSubs_);
-    halo_.add("s_dxx", dxx_);
-    halo_.add("s_dyy", dyy_);
-    halo_.add("s_dzz", dzz_);
-    halo_.add("s_dxy", dxy_);
-    halo_.add("s_dxz", dxz_);
-    halo_.add("s_dyz", dyz_);
-    halo_.add("s_far_xm_3d", sFarXm3_);
-    halo_.add("s_far_xp_3d", sFarXp3_);
-    halo_.add("s_far_ym_3d", sFarYm3_);
-    halo_.add("s_far_yp_3d", sFarYp3_);
-    halo_.add("s_kz_lower", kzLower_);
+    dzzTop_ = Field2<real_t>(p + "dzz_top", ny2, nx2);
+    sSubs_ = Field3<real_t>(p + "subs", ny2, nx2, nz);
+    smSubs_ = Field3<real_t>(p + "sm_subs", ny2, nx2, nz);
+    sMin3_ = Field3<real_t>(p + "min_subs", ny2, nx2, nz);
+    sMax3_ = Field3<real_t>(p + "max_subs", ny2, nx2, nz);
+    dxx_ = Field3<real_t>(p + "dxx", ny2, nx2, nz);
+    dyy_ = Field3<real_t>(p + "dyy", ny2, nx2, nz);
+    dzz_ = Field3<real_t>(p + "dzz", ny2, nx2, nz);
+    dxy_ = Field3<real_t>(p + "dxy", ny2, nx2, nz);
+    dxz_ = Field3<real_t>(p + "dxz", ny2, nx2, nz);
+    dyz_ = Field3<real_t>(p + "dyz", ny2, nx2, nz);
+    sFarXm3_ = Field3<real_t>(p + "far_xm_3d", ny2, nx2, nz);
+    sFarXp3_ = Field3<real_t>(p + "far_xp_3d", ny2, nx2, nz);
+    sFarYm3_ = Field3<real_t>(p + "far_ym_3d", ny2, nx2, nz);
+    sFarYp3_ = Field3<real_t>(p + "far_yp_3d", ny2, nx2, nz);
+    kzLower_ = Field3<real_t>(p + "kz_lower", ny2, nx2, nz);
+    kTop_ = Field2<int>(p + "ktop", ny2, nx2);
+    cauchyTop_ = Field2<int>(p + "cauchy_top", ny2, nx2);
+    halo_.add(p + "subs", sSubs_);
+    halo_.add(p + "dxx", dxx_);
+    halo_.add(p + "dyy", dyy_);
+    halo_.add(p + "dzz", dzz_);
+    halo_.add(p + "dxy", dxy_);
+    halo_.add(p + "dxz", dxz_);
+    halo_.add(p + "dyz", dyz_);
+    halo_.add(p + "far_xm_3d", sFarXm3_);
+    halo_.add(p + "far_xp_3d", sFarXp3_);
+    halo_.add(p + "far_ym_3d", sFarYm3_);
+    halo_.add(p + "far_yp_3d", sFarYp3_);
+    halo_.add(p + "kz_lower", kzLower_);
     // The flow module's face conductivities and fluxes feed the transport
     // stencils at interface cells (the legacy exchanged ghosts); registering
     // the module's own views under transport names lets the transport step
-    // refresh exactly the halos it reads.
-    halo_.add("s_gw_kx", subs_.kx);
-    halo_.add("s_gw_ky", subs_.ky);
+    // refresh exactly the halos it reads. (With both scalars active the
+    // kx/ky views are registered twice under both prefixes and exchanged
+    // once per instance step — redundant but tiny, and it keeps the
+    // instances independent.)
+    halo_.add(p + "gw_kx", subs_.kx);
+    halo_.add(p + "gw_ky", subs_.ky);
   }
 
   buildBoundaryLists(boundaries);
@@ -202,17 +261,19 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
     computeTopLayer(grid_, kTop_);
   }
 
-  // Initial ghost/derived state: side ghosts at t_start, the exported
-  // top-cell scalar, and the end-of-step snapshots (legacy
+  // Initial ghost/derived state: cell pins and side ghosts at t_start, the
+  // exported top-cell scalar, and the end-of-step snapshots (legacy
   // initialize.c:587-588 and 630 seed Vsn and the scalar mass from the
   // initial state; Fu/Fv start at zero, matching the zero-initialized
   // legacy flow rates).
   if (subs_.active) {
+    applyCellPins(config.time.tStart);
+    audit_ = TransportAudit{};  // pin deltas at t_start are initial state
     enforceSubsurfaceBc(config.time.tStart);
-    halo_.exchangeWithCorners({"s_subs"});
+    halo_.exchangeWithCorners({spec_.prefix + "_subs"});
   }
   if (surf_.active) {
-    halo_.exchange({"s_surf"});
+    halo_.exchange({spec_.prefix + "_surf"});
   }
   snapshotEndOfStep();
 }
@@ -239,6 +300,13 @@ void ScalarSolver::buildBoundaryLists(const BoundarySet& boundaries) {
   };
 
   for (const BoundaryCondition& bc : boundaries.all()) {
+    if (bc.kind() == BcKind::ScalarCauchy && spec_.isTemperature) {
+      // The zero-total-scalar-flux relation is a SALT condition (water
+      // leaves, salt stays); heat leaves with the water — the temperature
+      // instance's donor-value top face is that physics, so the condition
+      // does not bind here (schema restricts it to salinity anyway).
+      continue;
+    }
     if (bc.kind() == BcKind::ScalarCauchy) {
       // The v2 §3.2 zero-total-scalar-flux top condition (Geng & Boufadel
       // Eq. (7)): mark the member columns; the subsurface step reads the
@@ -258,6 +326,28 @@ void ScalarSolver::buildBoundaryLists(const BoundarySet& boundaries) {
       continue;
     }
     if (bc.kind() != BcKind::ScalarValue) {
+      continue;
+    }
+    if (bc.scalarField() != spec_.field) {
+      // The other registered scalar's condition (v2 Q5 selector).
+      continue;
+    }
+    if (bc.target() == BcTarget::GroundwaterTop ||
+        bc.target() == BcTarget::GroundwaterBottom) {
+      // Cell-pinning Dirichlet rows (v2 Q5, V2-A17): the member columns'
+      // top/bottom cells are re-imposed after each update — the b6 tide
+      // rule applied vertically. Temperature-only in v2.0 (schema).
+      if (!subs_.active) {
+        log::fatal(log::msg() << "scalar condition '" << bc.name()
+                              << "': groundwater targets require the groundwater module");
+      }
+      ScalarBcList list = stage(bc.cells());
+      list.bc = &bc;
+      if (bc.target() == BcTarget::GroundwaterTop) {
+        topPin_.push_back(list);
+      } else {
+        botPin_.push_back(list);
+      }
       continue;
     }
     if (bc.target() == BcTarget::Surface) {
@@ -332,7 +422,9 @@ void ScalarSolver::buildBoundaryLists(const BoundarySet& boundaries) {
 }
 
 void ScalarSolver::applyInitialConditions(const FrehgConfig& config) {
-  const TransportInitialConfig& ic = config.initialConditions.transport;
+  const TransportInitialConfig& ic = spec_.isTemperature
+                                         ? config.initialConditions.temperature
+                                         : config.initialConditions.transport;
   if (surf_.active) {
     assign2(grid_, sSurf_, ic.surface, config);
   }
@@ -354,6 +446,61 @@ void ScalarSolver::applyInitialConditions(const FrehgConfig& config) {
           }
         });
   }
+}
+
+void ScalarSolver::applyCellPins(real_t t) {
+  if (!subs_.active || (topPin_.empty() && botPin_.empty())) {
+    return;
+  }
+  const int nz = grid_.nz();
+  Field3<real_t> s = sSubs_;
+  Field3<real_t> wc = subs_.wc, wcs = subs_.wcs, dz3d = subs_.dz3d;
+  Field3<PetscInt> gid = grid_.gid3();
+  Field2<int> kTop = kTop_;
+  const real_t az = subs_.az;
+  const real_t kappaFactor = spec_.kappaFactor;
+  real_t pinned = 0.0;
+  const auto applyList = [&](const ScalarBcList& list, const bool top) {
+    const real_t value = list.bc->value(t);
+    auto lj = list.j;
+    auto li = list.i;
+    real_t delta = 0.0;
+    Kokkos::parallel_reduce(
+        "transport_cell_pin", Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, lj.extent(0)),
+        KOKKOS_LAMBDA(const std::size_t m, real_t& sum) {
+          const int j = lj(m);
+          const int i = li(m);
+          int k = -1;
+          if (top) {
+            k = kTop(j, i);
+          } else {
+            for (int kk = nz - 1; kk >= 0; --kk) {
+              if (gid(j, i, kk) >= 0) {
+                k = kk;
+                break;
+              }
+            }
+          }
+          if (k < 0) {
+            return;
+          }
+          const real_t basis =
+              (wc(j, i, k) + kappaFactor * (1.0 - wcs(j, i, k))) * az * dz3d(j, i, k);
+          sum += (value - s(j, i, k)) * basis;
+          s(j, i, k) = value;
+        },
+        delta);
+    pinned += delta;
+  };
+  for (const ScalarBcList& list : topPin_) {
+    applyList(list, true);
+  }
+  for (const ScalarBcList& list : botPin_) {
+    applyList(list, false);
+  }
+  // The pinned-cell reset is boundary-driven mass (the vertical analogue of
+  // the surface tide reset, which books into surfSource).
+  audit_.subsBoundary += pinned;
 }
 
 void ScalarSolver::snapshotEndOfStep() {
@@ -391,15 +538,20 @@ void ScalarSolver::step(real_t t, real_t dt, real_t dtgLast, real_t rain, real_t
 }
 
 void ScalarSolver::refreshDerivedState(real_t t) {
+  const std::string p = spec_.prefix + "_";
   if (surf_.active) {
-    halo_.exchange({"s_surf", "s_fu_old", "s_fv_old"});
+    halo_.exchange({p + "surf", p + "fu_old", p + "fv_old"});
   }
   if (subs_.active) {
-    // The side ghosts and the exported top-cell scalar are functions of the
-    // restored scalar and the boundary values at the completed step's end
-    // time — exactly what the uninterrupted run's BC pass wrote.
+    // The cell pins, side ghosts, and the exported top-cell scalar are
+    // functions of the restored scalar and the boundary values at the
+    // completed step's end time — exactly what the uninterrupted run's
+    // BC pass wrote (the restored pinned cells already hold these values;
+    // re-imposing is idempotent).
+    applyCellPins(t);
+    audit_ = TransportAudit{};
     enforceSubsurfaceBc(t);
-    halo_.exchangeWithCorners({"s_subs"});
+    halo_.exchangeWithCorners({p + "subs"});
   }
   if (surf_.active) {
     // vsn reconstructs from the restored depth; fuOld/fvOld were restored
@@ -445,7 +597,8 @@ real_t ScalarSolver::ownedSubsurfaceMass() const {
   const int nxl = grid_.nxLocal();
   const int nz = grid_.nz();
   const real_t az = subs_.az;
-  Field3<real_t> s = sSubs_, wc = subs_.wc, dz3d = subs_.dz3d;
+  const real_t kappaFactor = spec_.kappaFactor;
+  Field3<real_t> s = sSubs_, wc = subs_.wc, wcs = subs_.wcs, dz3d = subs_.dz3d;
   Field3<PetscInt> gid = grid_.gid3();
   real_t mass = 0.0;
   Kokkos::parallel_reduce(
@@ -454,7 +607,11 @@ real_t ScalarSolver::ownedSubsurfaceMass() const {
           {1, 1, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k, real_t& sum) {
         if (gid(j, i, k) >= 0) {
-          sum += s(j, i, k) * wc(j, i, k) * az * dz3d(j, i, k);
+          // Salinity: theta V (kappa = 0, the legacy saltmass_subs basis).
+          // Temperature: (theta + kappa) V — the heat-content basis of the
+          // thermal retardation (V2-A17).
+          sum += s(j, i, k) * (wc(j, i, k) + kappaFactor * (1.0 - wcs(j, i, k))) * az *
+                 dz3d(j, i, k);
         }
       },
       mass);

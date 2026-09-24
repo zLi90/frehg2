@@ -1,0 +1,112 @@
+# g6(c) composed coupled variant (v2 plan §4.2 note + V2-A17): the same
+# Stallman column, but the sinusoidal temperature is supplied by the
+# SURFACE MODULE through the infiltration exchange instead of a
+# prescribed subsurface BC — the coupled surface->subsurface thermal
+# gate composed from g6(c) with zero new reference data.
+#
+# A 5 cm pond (single surface cell) is held at stage 0.05 by an eta
+# Dirichlet; its temperature is reset each step from the diel series
+# (the b6 tide-rule wet-cell override, scalar: temperature). The bottom
+# head 2.01 m drives steady infiltration q_z = -2e-6 m/s down
+# (Delta H = q L / K = 0.04 below the ponded hydrostatic head 2.05).
+# Heat enters the column through the coupled top exchange (advective
+# seepage at the surface temperature + the conductive two-point term).
+# The harness asserts the measured flux within a window of the target,
+# then gates fitted amplitude/phase at the same cell centres RELATIVE
+# to the top cell's own fitted values (the interface transfer function
+# divides out) against the Stallman roots at the measured v_t — the
+# same criteria as the prescribed-BC sub-case.
+# Q5 target schema — red until the capability lands.
+simulation:
+  id: g6c-coupled
+  title: g6(c) composed coupled Stallman (surface-supplied diel forcing)
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 200
+  dx: 1.0
+  dy: 1.0
+  dz: 0.01
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 50.0
+  t_end: 432000.0
+  output_interval: 1800.0
+
+modules:
+  surface_water: true
+  groundwater: true
+  temperature: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.0}
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+
+groundwater:
+  timestep:
+    dt_init: 50.0
+    dt_min: 50.0
+    dt_max: 50.0
+  specific_storage: 1.0e-6
+
+coupling:
+  mode: sync
+
+soil:
+  types:
+    - name: sand
+      ksx: 1.0e-4
+      ksy: 1.0e-4
+      ksz: 1.0e-4
+      theta_s: 0.35
+      theta_r: 0.02
+      vg_alpha: 3.0
+      vg_n: 2.0
+  map: {constant: sand}
+
+temperature:
+  scheme: {advection: upwind}
+  surface_diffusivity: {x: 0.0, y: 0.0}
+  thermal_conductivity: 2.0
+  heat_capacity_water: 4.184e6
+  heat_capacity_solid: 2.3009e6
+  dispersivity: {longitudinal: 0.0, transverse: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.05}
+  groundwater:
+    water_table: {constant: 0.0}
+  temperature:
+    surface: {constant: 20.0}
+    groundwater: {constant: 20.0}
+
+boundary_conditions:
+  - name: pond-stage
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.05}
+  - name: pond-temperature
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: surface
+    kind: scalar_value
+    scalar: temperature
+    value: {series: {file: input/diel_temperature.dat}}
+  - name: head-bottom
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_bottom
+    kind: head
+    value: {constant: 2.01}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [seepage]
+    groundwater: [qz]
+    temperature: [temperature, temperature_surface]

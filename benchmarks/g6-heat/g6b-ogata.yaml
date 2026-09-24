@@ -1,0 +1,113 @@
+# g6(b) — Ogata & Banks (1961) heat breakthrough, the OGS heat-benchmark
+# parameterization (v2 plan §4.2; realization V2-A17: the column runs
+# VERTICALLY so dz_stretch supplies the graded mesh — dz is the code's
+# only graded direction; same parameters and criteria).
+#
+# OGS parameter set: (rho c)_eff = 2e6 J/m3/K, lambda = 2.2 W/m/K ->
+# alpha = lambda/(rho c)_eff = 1.1e-6 m2/s; thermal front velocity
+# v_t = 1.5e-6 m/s. With phi = 0.35: theta (rho c)_w = 1.4644e6, so
+# (rho c)_s = (2e6 - 1.4644e6)/0.65 = 8.2400e5 J/m3/K, and the water
+# flux is q = v_t (rho c)_eff/(rho c)_w = 7.1702e-7 m/s (downward).
+# Graded mesh: dz = 0.125 at the surface, stretch 1.02, nz = 145 ->
+# 104 m deep (front reaches ~65 m at 500 d; the erfc tail at the
+# bottom is O(1e-4) of the step). The top-cell thickness sets the
+# inlet-plane ambiguity (below): halving it from a first-cut 0.25 m
+# halved every observation point's error (the §6.3 rule-3 study —
+# the errors scale with dz0/2 over the front width, i.e. they are
+# representation, not scheme). Inlet: the top cell pinned at 330 K
+# by the new groundwater_top scalar_value; the initial column is 300 K.
+# Observation depths ~1/5/10/20/50 m below the pinned-cell centre
+# (nearest cell centres, computed from /grid mesh data by the harness).
+#
+# Flow through head BCs around the hydrostatic baseline (bottom
+# pressure head 100.3 m at the box bottom; harness-verified): the gate
+# reads the achieved qz and asserts it within a window of the target
+# before gating (V2-A17). Gate: superbee breakthrough vs the erfc
+# closed form <= 1% of the step per observation point over outputs with
+# t >= 2e6 s — the pinned INLET CELL holds 330 K over its whole
+# thickness, a +-dz0/2 boundary-position ambiguity relative to the
+# assumed inlet plane (the pinned centre) that decays with the front
+# width sqrt(4 alpha t) (measured at dz0 = 0.25: 2.08% at the first
+# output at x = 1 m, 0.65% at the second; the window excludes 4.6% of
+# the horizon and the dz0 = 0.125 mesh keeps every gated point under
+# the bound with ~40% headroom). The upwind variant is run and
+# RECORDED, not gated (plan §4.2).
+# Q5 target schema — red until the capability lands.
+simulation:
+  id: g6b-ogata
+  title: g6(b) Ogata-Banks heat step on the graded vertical column
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 145
+  dx: 1.0
+  dy: 1.0
+  dz: 0.125
+  dz_stretch: 1.02
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 6000.0
+  t_end: 43200000.0      # 500 d
+  output_interval: 864000.0
+
+modules:
+  groundwater: true
+  temperature: true
+
+groundwater:
+  timestep:
+    dt_init: 6000.0
+    dt_min: 6000.0
+    dt_max: 6000.0
+  specific_storage: 1.0e-6
+
+soil:
+  types:
+    - name: aquifer
+      ksx: 1.0e-5
+      ksy: 1.0e-5
+      ksz: 1.0e-5
+      theta_s: 0.35
+      theta_r: 0.02
+      vg_alpha: 3.0
+      vg_n: 2.0
+  map: {constant: aquifer}
+
+temperature:
+  scheme: {advection: superbee}
+  thermal_conductivity: 2.2           # lambda [W/m/K]
+  heat_capacity_water: 4.184e6
+  heat_capacity_solid: 8.24e5         # -> (rho c)_eff = 2e6 at theta_s
+  dispersivity: {longitudinal: 0.0, transverse: 0.0}
+
+initial_conditions:
+  groundwater:
+    water_table: {constant: 0.0}
+  temperature:
+    groundwater: {constant: 300.0}
+
+boundary_conditions:
+  - name: head-top
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: head
+    value: {constant: 0.0}
+  - name: head-bottom
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_bottom
+    kind: head
+    value: {constant: 100.0}        # harness writes depth + (-q L / K) exactly
+  - name: temperature-inlet
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 330.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [qz]
+    temperature: [temperature]

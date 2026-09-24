@@ -2019,3 +2019,162 @@ O(10 %) ≫ 2 %; in (b) Δη/H ≈ 2.5e-3. The convergence numbers above are
 measured; the §6.3 negative battery (scripts/test_g910_gates.py) covers
 every criterion including the dead-forcing-series case (no oscillation
 → FAIL).
+
+### V2-A17 (Q5, 2026-09-24) — §4.1/§4.2: how the temperature design is realized
+
+**Scalar registration and schema.** §4.1's "two registered scalars" is
+realized in the code (`ScalarSolver` is instantiated once per registered
+scalar from a `ScalarSpec` — name prefix, per-scalar parameters, the
+per-scalar physics switches below), while the *user schema* exposes
+temperature as `modules.temperature` plus its own `temperature:` section
+rather than a `transport.scalars` list. Rationale: (1) the salinity
+surface (`transport:`, its BC/IC keys, its checkpoint field names) stays
+byte-untouched, so "b6 unchanged with temperature off" and the risk
+register's two-scalar-checkpoint concern hold *by construction* — with
+temperature off, the layout is the v1 layout; (2) temperature's
+parameters are thermal (λ_eff, volumetric heat capacities), not solute
+parameters, and a shared list-entry schema would misname one or the
+other; (3) §8.2's kind×side matrix composes through one `scalar:
+salinity|temperature` selector on `scalar_value` instead of a parallel
+`temperature_value` kind that would double the matrix rows.
+
+**Boundary conditions.** `scalar_value` gains the `scalar:` selector
+(default `salinity`); `scalar: temperature` requires
+`modules.temperature`, `scalar: salinity` requires `modules.transport`.
+Targets `groundwater_top`/`groundwater_bottom` become valid for
+`scalar_value` as *cell-pinning* Dirichlet conditions (the member
+columns' top/bottom cells are re-imposed after each update — the b6
+tide-rule pattern applied vertically), **temperature-only in v2.0**: the
+salinity top/bottom rows are schema-rejected pending a gate (§8.2
+rejected-cell discipline). `scalar_cauchy` stays salinity-only.
+
+**Per-scalar physics switches** (everything else — advection stencils,
+dispersion machinery, limiter, ledgers, halo/checkpoint staging — is the
+same code):
+1. *Thermal retardation:* the subsurface mass basis is
+   `θ + κ`, κ = (1 − θs)·(ρc)_s/(ρc)_w, in the scalar mass, the flux
+   volume, and the owned-mass reduction (the SEAWAT
+   retardation-as-scalar precedent §12 cites). κ = 0 reproduces the
+   salinity arithmetic bitwise (the added term is branch-guarded on the
+   spec, not computed-and-zero).
+2. *Conduction:* the dispersion tensor's molecular slot becomes
+   λ_eff/(ρc)_w (a constant — **not** multiplied by θs), likewise the
+   coupled top-face ghost coefficient; the mechanical-dispersivity terms
+   remain available as thermal dispersivity (default 0).
+3. *Uncoupled top face:* temperature advects **donor-value** through
+   flux- and head-condition tops (heat travels with the water; T is
+   invariant under pure mass removal — exact when dt = dtg). The
+   salinity-specific zero-advection + evaporative-concentration
+   machinery (scalar_cauchy, the legacy allowance, the exact in-step
+   factor) never applies to temperature. Prescribing an *inflow*
+   temperature at a top face is done by pinning the top cell (the new
+   BC), not through the flux ghost.
+4. *Rain/evaporation dilution is salinity-only.* Rain enters at the
+   cell's own temperature and evaporating water leaves at it (the
+   volume change carries no temperature change); the latent-heat effect
+   is a flux term (below), and the rain-heat approximation is measured
+   into the surface anchor column, not hidden.
+5. *Surface heat exchange* (temperature only, wet cells): mass source
+   dt·A·Q_net/(ρc)_w with `mode: equilibrium` (Q = −K_e(T − T_e)) or
+   `mode: bulk` (Q = Q_sw + Q_lw,in − εσT_K⁴ − Q_lat − Q_sens,
+   ε = 0.97; Q_lat = ρ_w L_v(T) E(T) and Q_sens = ρ_a c_pa (T − T_a)/R_air
+   share the Q4 `atm/` module's Tetens/Liu chain — one implementation,
+   consumer three). The limiter window is *shifted* by the source's own
+   concentration increment so exchange can legitimately cross the local
+   advective extrema (an un-shifted window would stall relaxation toward
+   a T_e below the wet-stencil minimum). A new `surf_atmos` ledger
+   column audits the exchanged heat; the closure identity gains that
+   term. New atmosphere keys: `shortwave`/`longwave_in` (prescribed
+   absorbed/incident W/m², default 0) and `wind_speed_floor` (the GLM
+   still-air lower bound §4.1 adopts, default 0.5 m/s, applied at
+   MetForcing::sample for every bulk consumer — no gated case sits
+   below it). `atmosphere.surface_temperature` becomes optional,
+   required by cross-check only when a Q4 evaporation consumer
+   (surface bulk evaporation / soil evaporation) reads it; the Q5 heat
+   exchange never does — it uses the local water temperature. The
+   *evaporation volume* pathways stay exactly Q4's (the latent term
+   shares the formulas, not the volume plumbing); the §8.3 row records
+   this.
+6. *Density:* r_rho = 1 + β_s·s − β_T·(T − T₀) with all coefficients
+   schema-validated config (`density_coupling.beta_saline`,
+   `.beta_saline_viscosity`, `.thermal_expansion` default 0,
+   `.reference_temperature` default 20) whose defaults are the legacy
+   compile-time constants — golden-neutral, and the §4.1
+   compile-time-constant fix. r_visc stays salinity-only (μ(T) is out
+   of scope for v2.0; recorded, not modeled). The UNESCO-polynomial
+   option is **not shipped** (g8 gates the linear form; the polynomial
+   moves to §11 deferred). `density_coupling.enabled` now requires
+   transport **or** temperature; `thermal_expansion ≠ 0` requires
+   temperature.
+
+**Gate realizations** (criteria unchanged from §4.2):
+- g6(a)/g6(c) drive the column flux through head values but **gate at
+  the measured flux** (the harness reads qz from the output, asserts
+  the achieved Pe/q lands within a window of the target so the sweep
+  really spans the range, then evaluates the closed form at the
+  measured value) — the gate is immune to head-BC discretization
+  details it does not test, and gravity in the total head cannot
+  silently re-center the sweep (the drafted head arithmetic had
+  exactly that error — caught at authoring).
+- g6(b) runs the Ogata–Banks column **vertically** with `dz_stretch`
+  as the graded mesh (dz is the code's only graded direction); same
+  parameters and criteria, superbee gated / upwind recorded.
+- g6(c) adds the §4.2 **composed coupled variant** as a fourth
+  sub-case: an eta-Dirichlet pond whose wet-cell temperature is reset
+  from the diel series (the tide-rule pattern), constant infiltration
+  asserted from the measured seepage, and the subsurface response
+  gated against the same Stallman roots.
+- g7(a) gains the energy-ledger criterion on the new audit table;
+  g7(a) stage 2 root-finds T_e offline with the identical flux chain.
+- g8: pinning top/bottom *cells* puts the isothermal planes at the
+  pinned-cell centres → H_eff = H − dz and Ra_eff = {28.5, 52.25} for
+  the configured {30, 55} — both still clear of Ra_c = 39.48, asserted
+  with H_eff. The 2H-wide box with insulated sides admits a_c = π/H
+  exactly (the m = 2 cosine mode); the committed seed is that mode.
+  (The drafted sine seed was *orthogonal* to it — projection zero, the
+  growth would have ridden the weaker m = 3 component; caught by the
+  §6.3 review and regenerated, generator committed.)
+- The heat x-battery is `benchmarks/g6-heat/orient-base.yaml` (2D
+  subsurface thermal case, asymmetric IC + one side-Dirichlet that
+  visits all four sides across the 8 orientations — the "thermal BC on
+  all sides" row) run through the wind-orient transform machinery,
+  plus `rank-invariance-heat` (strict + default lanes) on the same
+  case for the §7.1 decomposition axis.
+
+### V2-A18 (Q5, 2026-09-24) — §8.1/§4.2: the heat orientation battery catches the y+-only limiter admission (and the corner-face spill), first battery-caught defect
+
+**What happened.** On its first execution against the working
+temperature capability, the §8.1 heat 8-orientation battery failed
+every y-involving transform at 1.4–2.9 K (flipx passed at 1.4e-13). The
+single-step bisection localized it to the transport step at the
+side-Dirichlet corner cells: the subsurface limiter admits a prescribed
+side-ghost value into its window on the **y+ side only** (the legacy
+sea-side rule, `scalar.c:397-400`, which b6's tidal golden pins for
+salinity) — so a side thermal Dirichlet's inflow was limiter-ADMITTED
+when the side landed on y+ under a rotation but CLIPPED on x−/x+/y−.
+Two compounding findings:
+
+1. **The corner-face spill** (`BoundarySet::appendSideFaces`): a side
+   polygon that spans a domain corner hands the condition *every*
+   domain-edge face of the corner cell — the battery's west strip put
+   head and temperature conditions on the corners' y faces too, which
+   is where the y+-only admission turned into a +0.29 K corner
+   artifact. This semantic is load-bearing for b6 (the one-cell-wide
+   tank's sea condition relies on member cells carrying their x faces),
+   so it is DOCUMENTED (parameters.md, theory/temperature.md), not
+   changed; it is orientation-equivariant by itself.
+2. **The admission asymmetry** is the real defect for a scalar with no
+   legacy goldens: the temperature instance now admits prescribed side
+   ghosts on ALL FOUR sides (`SubsurfaceTransport.cpp`, spec-keyed);
+   salinity keeps the y+-only legacy rule byte-for-byte. After the fix
+   the battery passes at ≤ 1.5e-13 (temperature) / 1.8e-15 (head)
+   against the 1e-12 strict-mode tolerance — §8.1's aspiration met
+   with margin.
+
+**Why it matters for the register.** This is the first defect caught by
+an x-gate battery *executing* (V2-A9/A10/A11/A12 were all
+vacuous-or-unexercised-gate findings). The §8.1 exemption table gains
+its first two entries when the backfill lands: the salinity y+-only
+admission (legacy-faithful, b6-pinned — exempt) and the corner-face
+spill (documented semantics, b6-load-bearing — exempt with the
+all-sides admission making it equivariant for temperature).

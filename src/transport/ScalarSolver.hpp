@@ -38,15 +38,69 @@
 #ifndef FREHG_TRANSPORT_SCALARSOLVER_HPP
 #define FREHG_TRANSPORT_SCALARSOLVER_HPP
 
+#include "atm/MetForcing.hpp"
 #include "bc/BoundarySet.hpp"
 #include "core/Config.hpp"
 #include "core/Grid.hpp"
 #include "core/HaloExchanger.hpp"
 #include "core/Types.hpp"
 
+#include <string>
 #include <vector>
 
 namespace frehg::transport {
+
+/// Which registered scalar a ScalarSolver instance transports (v2 Q5,
+/// plan §4.1/V2-A17: two registered scalars, not a general N). The
+/// salinity spec reproduces the v1 single-scalar solver byte-for-byte
+/// (field names, checkpoint layout, arithmetic); the temperature spec
+/// swaps in the thermal physics:
+///  - subsurface mass basis theta + kappa, kappa = (1 - theta_s)
+///    (rho c)_s / (rho c)_w (thermal retardation, SEAWAT form);
+///  - the dispersion tensor's molecular slot is the effective thermal
+///    diffusivity lambda_eff/(rho c)_w, a bulk property NOT multiplied
+///    by theta_s (solute molecular diffusion is pore-water-only);
+///  - uncoupled top faces advect the DONOR value in both directions
+///    (heat travels with the water; T is invariant under pure mass
+///    exchange at the cell's own temperature) — the salinity-specific
+///    zero-advection / evaporative-concentration machinery
+///    (scalar_cauchy, the legacy allowance) never applies;
+///  - rain/evaporation dilution is skipped (rain enters and evaporation
+///    leaves at the cell's own temperature; the rain-heat approximation
+///    is measured into the surface anchor column);
+///  - an optional surface heat-exchange source (equilibrium or bulk)
+///    applies inside the update pass, audited in the surf_atmos column;
+///  - scalar_value conditions bind by their `scalar:` selector, and the
+///    temperature instance additionally stages groundwater_top/_bottom
+///    conditions as cell-pinning Dirichlet rows (the b6 tide rule
+///    applied vertically; schema-restricted to temperature in v2.0).
+struct ScalarSpec {
+  std::string prefix = "s";  ///< halo/checkpoint field-name prefix
+  BcScalar field = BcScalar::Salinity;  ///< which scalar_value conditions bind
+  bool isTemperature = false;           ///< thermal physics switches
+  bool superbee = false;                ///< advection scheme
+  real_t difuX = 0.0, difuY = 0.0;      ///< surface diffusivities [m^2/s]
+  real_t dispLon = 0.0, dispLat = 0.0;  ///< dispersivities [m]
+  /// Molecular slot of the dispersion tensor: solute tau*Dm for
+  /// salinity (times theta_s in the tensor), alpha_e = lambda/(rho c)_w
+  /// for temperature (used as-is).
+  real_t dispMol = 0.0;
+  bool hasBoundMin = true;              ///< salinity: always (legacy 0)
+  real_t boundMin = 0.0;
+  bool hasBoundMax = false;
+  real_t boundMax = 0.0;
+  bool legacyEvapAllowance = false;     ///< salinity only
+  real_t kappaFactor = 0.0;             ///< (rho c)_s / (rho c)_w
+  real_t heatCapacityWater = 0.0;       ///< (rho c)_w [J/m^3/K]
+  SurfaceExchangeConfig::Mode exchange = SurfaceExchangeConfig::Mode::None;
+  real_t equilibriumT = 0.0;            ///< T_e [C]
+  real_t equilibriumK = 0.0;            ///< K_e [W/m^2/K]
+
+  /// The v1 salinity layout from transport: (byte-identical behavior).
+  static ScalarSpec salinity(const FrehgConfig& config);
+  /// The temperature layout from temperature: (v2 Q5).
+  static ScalarSpec temperature(const FrehgConfig& config);
+};
 
 /// Surface-module state the transport reads (filled by the driver from
 /// SurfaceSolver accessors; all views alias the module's storage).
@@ -89,6 +143,8 @@ struct SubsurfaceWiring {
   Field2<real_t> topValue;    ///< configured top flux (legacy qtop)
   Field2<int> sideCodeYp;     ///< y+ side code (limiter ghost gates)
   Field2<int> sideCodeYm;     ///< y- side code
+  Field2<int> sideCodeXm;     ///< x- side code (temperature admission, V2-A17)
+  Field2<int> sideCodeXp;     ///< x+ side code
 };
 
 /// Coupler state the transport reads in coupled runs.
@@ -102,7 +158,7 @@ struct CouplingWiring {
 /// /monitor/transport_audit table. Every non-conservative piece of the
 /// legacy scheme is measured, so the closure identities
 ///   Δ(Σ s dept A) = exchange + surfSource + surfBoundary + surfAdjust
-///                   + surfAnchor
+///                   + surfAnchor + surfAtmos
 ///   Δ(Σ s θ V)    = -exchange + subsBoundary + subsAdjust + subsAnchor
 /// hold to rounding (the P3 mass-audit convention: defects reported as
 /// data, not hidden in the residual). The anchor terms measure the legacy
@@ -121,6 +177,9 @@ struct TransportAudit {
   real_t surfBoundary = 0.0;
   real_t surfAdjust = 0.0;    ///< surface limiter/bounds/dry-zero mass delta
   real_t surfAnchor = 0.0;    ///< surface ledger re-anchor (actual - flux volume)
+  /// Surface atmospheric heat-exchange mass [K m^3] (temperature instance
+  /// with a surface_exchange mode; always 0 for salinity).
+  real_t surfAtmos = 0.0;
   /// Subsurface boundary-face scalar mass in, including the coupled top
   /// interface's one-sided dispersive gain (scalar.c:362 adds it to the
   /// subsurface with no surface counterpart — a measured legacy defect).
@@ -129,7 +188,8 @@ struct TransportAudit {
   real_t subsAnchor = 0.0;    ///< subsurface ledger re-anchor (θ_new V - Vgflux)
 };
 
-/// The scalar-transport module (single scalar, plan Appendix A note).
+/// One registered scalar's transport module (salinity or temperature,
+/// selected by the ScalarSpec; plan §4.1/V2-A17).
 class ScalarSolver {
  public:
   /// Allocate fields, stage the scalar boundary conditions, and apply the
@@ -137,7 +197,8 @@ class ScalarSolver {
   /// grid.comm().
   ScalarSolver(const Grid& grid, const FrehgConfig& config, const BoundarySet& boundaries,
                HaloExchanger& halo, const SurfaceWiring& surface,
-               const SubsurfaceWiring& subsurface, const CouplingWiring& coupling);
+               const SubsurfaceWiring& subsurface, const CouplingWiring& coupling,
+               const ScalarSpec& spec);
 
   /// Advance the scalar by the surface step \p dt, evaluating series-valued
   /// scalar conditions at time \p t. \p dtgLast is the subsurface window's
@@ -199,11 +260,15 @@ class ScalarSolver {
   // guide, "Extended Lambda Restrictions"). Treat as private.
  public:
   // ScalarSolver.cpp
-  /// Stage the scalar boundary lists (scalar_value conditions and their
-  /// paired discharge inflows) on device.
+  /// Stage the scalar boundary lists (this spec's scalar_value conditions
+  /// and their paired discharge inflows; the temperature instance also
+  /// stages the groundwater_top/_bottom cell pins) on device.
   void buildBoundaryLists(const BoundarySet& boundaries);
   /// Set the initial surface/subsurface concentrations from the config.
   void applyInitialConditions(const FrehgConfig& config);
+  /// Re-impose the pinned top/bottom cell values at time \p t
+  /// (temperature instance; the delta is booked into subsBoundary).
+  void applyCellPins(real_t t);
   /// Snapshot the restart-carried state (the s_fu_old/s_fv_old flow rates
   /// and the top-cell Dzz; see the file comment).
   void snapshotEndOfStep();
@@ -244,14 +309,18 @@ class ScalarSolver {
   SubsurfaceWiring subs_;
   CouplingWiring cpl_;
 
-  // Configuration extracts.
+  ScalarSpec spec_;           ///< which scalar this instance transports
+  atm::MetForcing met_;       ///< met forcing (bulk surface exchange only)
+
+  // Configuration extracts (from spec_; kept as members so the kernels'
+  // capture lists stay unchanged).
   bool superbee_ = false;
   real_t difuX_ = 0.0, difuY_ = 0.0;      ///< surface diffusivities
   real_t dispLon_ = 0.0, dispLat_ = 0.0;  ///< dispersivities [m]
-  real_t dispMol_ = 0.0;                  ///< molecular diffusivity [m^2/s]
-  real_t boundMin_ = 0.0;                 ///< transport.bounds.min
-  real_t boundMax_ = 0.0;                 ///< transport.bounds.max (or the
-                                          ///< open-bound sentinel)
+  real_t dispMol_ = 0.0;                  ///< molecular slot (see ScalarSpec)
+  real_t boundMin_ = 0.0;                 ///< lower bound (or open sentinel)
+  real_t boundMax_ = 0.0;                 ///< upper bound (or open sentinel)
+  bool hasBoundMin_ = true;
   bool hasBoundMax_ = false;
   /// transport.legacy_evap_allowance (v2 Q4 §3.2): keep the hardcoded
   /// +0.01 coupled evaporative-concentration allowance instead of the
@@ -285,6 +354,8 @@ class ScalarSolver {
   std::vector<ScalarBcList> surfaceDirichlet_;  ///< eta-paired (tide) cells
   std::vector<ScalarBcList> surfaceInflow_;     ///< discharge-paired cells
   std::vector<ScalarBcList> sideGhost_;         ///< groundwater_side ghosts
+  std::vector<ScalarBcList> topPin_;            ///< pinned top cells (Q5)
+  std::vector<ScalarBcList> botPin_;            ///< pinned bottom cells (Q5)
 
   TransportAudit audit_;
 };

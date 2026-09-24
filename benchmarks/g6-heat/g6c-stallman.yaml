@@ -1,0 +1,105 @@
+# g6(c) — Stallman (1965) damped diel sinusoid (v2 plan §4.2;
+# realization V2-A17): 2 m saturated column at dz = 0.01, the top cell
+# pinned to the diel series 20 + 5 sin(2 pi t / 86400) C, the bottom
+# cell pinned at 20 C; (rho c)_w = 4.184e6, (rho c)_b = 2.96e6
+# (phi = 0.35, (rho c)_s = 2.3009e6), lambda = 2.0 W/m/K ->
+# alpha = 6.7568e-7 m2/s, no-flow damping depth 0.1363 m.
+#
+# The harness runs q_z in {0, +2e-6, -2e-6} m/s (K = 1e-4; bottom head
+# 2 -/+ 0.04 m around the hydrostatic baseline; positive q_z =
+# downward). |q| = 2e-6 keeps upwind's numerical diffusion
+# v_t dz / 2 at ~2% of alpha while the +/- amplitude ratios still
+# differ by ~30% at the deepest gated depth — the direction signal.
+# The gate asserts the MEASURED q within a window of the target, then
+# gates fitted amplitude ratio and phase lag at the cell centres
+# z = 0.085/0.185/0.285 m RELATIVE to the pinned top cell's own fitted
+# amplitude and phase (z_eff = z - 0.005 from the pinned centre), after
+# 3 spin-up cycles, against the exact dispersion-relation roots.
+# Amplitude and phase gate separately — amplitude catches numerical
+# dissipation (and carries the direction discrimination), phase catches
+# dispersion error and is nearly even in q_z (the Hatch 2006
+# direction-blindness; scripts/test_g678_gates.py).
+# Q5 target schema — red until the capability lands.
+simulation:
+  id: g6c-stallman
+  title: g6(c) Stallman diel damping under vertical flow
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 200
+  dx: 1.0
+  dy: 1.0
+  dz: 0.01
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 50.0
+  t_end: 432000.0
+  output_interval: 1800.0
+
+modules:
+  groundwater: true
+  temperature: true
+
+groundwater:
+  timestep:
+    dt_init: 50.0
+    dt_min: 50.0
+    dt_max: 50.0
+  specific_storage: 1.0e-6
+
+soil:
+  types:
+    - name: sand
+      ksx: 1.0e-4
+      ksy: 1.0e-4
+      ksz: 1.0e-4
+      theta_s: 0.35
+      theta_r: 0.02
+      vg_alpha: 3.0
+      vg_n: 2.0
+  map: {constant: sand}
+
+temperature:
+  scheme: {advection: upwind}
+  thermal_conductivity: 2.0
+  heat_capacity_water: 4.184e6
+  heat_capacity_solid: 2.3009e6
+  dispersivity: {longitudinal: 0.0, transverse: 0.0}
+
+initial_conditions:
+  groundwater:
+    water_table: {constant: 0.0}
+  temperature:
+    groundwater: {constant: 20.0}
+
+boundary_conditions:
+  - name: head-top
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: head
+    value: {constant: 0.0}
+  - name: head-bottom
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_bottom
+    kind: head
+    value: {constant: 2.0}          # hydrostatic baseline; harness adds -/+ 0.04
+  - name: temperature-top
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: scalar_value
+    scalar: temperature
+    value: {series: {file: input/diel_temperature.dat}}
+  - name: temperature-bottom
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_bottom
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 20.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [qz]
+    temperature: [temperature]

@@ -1,0 +1,97 @@
+# g8 — Horton-Rogers-Lapwood thermal convection onset (v2 plan §4.2,
+# nightly, recommended; realization V2-A17). Saturated porous slab
+# 2 x 1 m heated from below (bottom cells pinned 30 C, top cells 20 C),
+# linear rho(T) with beta_T = 2e-4 1/K, alpha_e = lambda_b/(rho c)_w =
+# 5e-7 m2/s (lambda = 2.092 W/m/K). Pinning CELLS puts the isothermal
+# planes at the pinned-cell centres: H_eff = 1 - dz = 0.95 m, so the
+# configured K = 1.375e-2 gives Ra_eff = K beta_T dT H_eff / alpha_e =
+# 52.25 (supercritical; Ra_c = 4 pi^2 = 39.48); the harness derives the
+# subcritical variant K = 7.5e-3 -> Ra_eff = 28.5 by rewriting ks*.
+# The 2H-wide box with insulated impermeable sides admits the critical
+# wavenumber a_c = pi/H exactly (the m = 2 cosine mode); the committed
+# seed (input/ic_temperature.dat, generator input/gen_hrl_ic.py) is the
+# conduction profile + 0.5 K of that mode. Criteria: at Ra = 28.5 the
+# seeded-mode amplitude decays below 10 % of its seed; at Ra = 52.25
+# the Nusselt number (mid-plane advective+conductive flux over the
+# conductive reference) exceeds 1.05 persistently over the trailing
+# half. This is the one gate that exercises the thermal density
+# coupling in the Darcy momentum, which g6/g7 never touch. (The
+# thermal Elder problem is rejected per §4.2.)
+# Q5 target schema — red until the capability lands.
+simulation:
+  id: g8-hrl
+  title: g8 Horton-Rogers-Lapwood convection onset (Ra_eff = 52.25)
+
+domain:
+  nx: 40
+  ny: 1
+  nz: 20
+  dx: 0.05
+  dy: 0.05
+  dz: 0.05
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 500.0
+  t_end: 5000000.0
+  output_interval: 100000.0
+
+modules:
+  groundwater: true
+  temperature: true
+
+groundwater:
+  timestep:
+    dt_init: 500.0
+    dt_min: 100.0
+    dt_max: 500.0
+  specific_storage: 1.0e-6
+  density_coupling:
+    enabled: true
+    thermal_expansion: 2.0e-4       # beta_T [1/K]
+    reference_temperature: 20.0     # [C]
+
+soil:
+  types:
+    - name: gravel
+      ksx: 1.375e-2
+      ksy: 1.375e-2
+      ksz: 1.375e-2
+      theta_s: 0.35
+      theta_r: 0.02
+      vg_alpha: 3.0
+      vg_n: 2.0
+  map: {constant: gravel}
+
+temperature:
+  scheme: {advection: upwind}
+  thermal_conductivity: 2.092       # alpha_e = lambda/(rho c)_w = 5e-7 m2/s
+  heat_capacity_water: 4.184e6
+  heat_capacity_solid: 1.5216e6     # (rho c)_b = 2.4534e6 J/m3/K at theta_s
+  dispersivity: {longitudinal: 0.0, transverse: 0.0}
+
+initial_conditions:
+  groundwater:
+    water_table: {constant: 0.0}
+  temperature:
+    groundwater: {file: input/ic_temperature.dat}
+
+boundary_conditions:
+  - name: temperature-top
+    region: {polygon: [[-0.1, -0.1], [2.1, -0.1], [2.1, 0.1], [-0.1, 0.1]]}
+    target: groundwater_top
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 20.0}
+  - name: temperature-bottom
+    region: {polygon: [[-0.1, -0.1], [2.1, -0.1], [2.1, 0.1], [-0.1, 0.1]]}
+    target: groundwater_bottom
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 30.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    temperature: [temperature]
+    groundwater: [qz]

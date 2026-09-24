@@ -41,6 +41,8 @@ class BoundaryCondition {
   BcTarget target() const { return target_; }
   /// The prescribed quantity.
   BcKind kind() const { return kind_; }
+  /// Which registered scalar a scalar_value condition prescribes (Q5).
+  BcScalar scalarField() const { return scalarField_; }
   /// Value form (constant / series / gravity / hydrostatic).
   BcValueConfig::Form valueForm() const { return form_; }
   ///@}
@@ -67,6 +69,7 @@ class BoundaryCondition {
   std::string name_;
   BcTarget target_ = BcTarget::Surface;
   BcKind kind_ = BcKind::Eta;
+  BcScalar scalarField_ = BcScalar::Salinity;
   BcValueConfig::Form form_ = BcValueConfig::Form::Constant;
   real_t constant_ = 0.0;
   real_t hydrostaticEta_ = 0.0;

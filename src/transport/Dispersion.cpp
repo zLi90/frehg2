@@ -29,6 +29,11 @@ void ScalarSolver::updateDispersionTensor() {
   const real_t molecular = dispMol_;
   const real_t lon = dispLon_;
   const real_t lat = dispLat_;
+  // Solute molecular diffusion acts in the pore water (times theta_s, the
+  // legacy tensor); the temperature instance's molecular slot is the bulk
+  // effective thermal diffusivity lambda_eff/(rho c)_w, used as-is
+  // (v2 Q5, V2-A17).
+  const bool thermal = spec_.isTemperature;
 
   Field3<real_t> dxx = dxx_, dyy = dyy_, dzz = dzz_;
   Field3<real_t> dxy = dxy_, dxz = dxz_, dyz = dyz_;
@@ -44,7 +49,7 @@ void ScalarSolver::updateDispersionTensor() {
         const real_t uy = qy(j, i, k);
         // Legacy qz[ii] is the flux at the face below the cell — plane k+1.
         const real_t uz = qzF(j, i, k + 1);
-        real_t xx = molecular * wcs(j, i, k);
+        real_t xx = thermal ? molecular : molecular * wcs(j, i, k);
         real_t yy = xx;
         real_t zz = xx;
         real_t xy = 0.0;
@@ -76,7 +81,8 @@ void ScalarSolver::updateDispersionTensor() {
         dyz(j, i, k) = yz;
       });
 
-  halo_.exchange({"s_dxx", "s_dyy", "s_dzz", "s_dxy", "s_dxz", "s_dyz"});
+  const std::string p = spec_.prefix + "_";
+  halo_.exchange({p + "dxx", p + "dyy", p + "dzz", p + "dxy", p + "dxz", p + "dyz"});
 }
 
 }  // namespace frehg::transport

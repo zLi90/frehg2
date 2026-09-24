@@ -89,7 +89,8 @@ struct TimeConfig {
 struct ModulesConfig {
   bool surfaceWater = false;  ///< run the SWE module
   bool groundwater = false;   ///< run the Richards module
-  bool transport = false;     ///< run scalar transport
+  bool transport = false;     ///< run scalar (salinity) transport
+  bool temperature = false;   ///< run temperature transport (v2 Q5)
 };
 
 /// surface_water.friction: drag law and roughness (plan §5.8).
@@ -130,13 +131,26 @@ struct WindConfig {
 struct AtmosphereConfig {
   bool present = false;                 ///< true when the block is configured
   SeriesOrConstant airTemperature;      ///< [C]
-  SeriesOrConstant surfaceTemperature;  ///< T_s [C]; prescribed until Q5
+  /// T_s [C] for the Q4 evaporation consumers (surface bulk / soil bulk).
+  /// Optional since v2 Q5: the surface HEAT exchange never reads it (it
+  /// evaluates the bulk chain at the local water temperature, V2-A17);
+  /// the schema requires it exactly when a Q4 consumer is configured.
+  bool hasSurfaceTemperature = false;   ///< true when the key was given
+  SeriesOrConstant surfaceTemperature;  ///< T_s [C]
   SeriesOrConstant pressure;            ///< P0 [kPa]
   /// Exactly one humidity form (schema cross-check).
   bool humidityIsRelative = false;      ///< which form was configured
   SeriesOrConstant specificHumidity;    ///< q_a [-]
   SeriesOrConstant relativeHumidity;    ///< [-] of q_sat(air temperature)
   SeriesOrConstant windSpeed;           ///< U [m/s] (shared with the Q6 wind)
+  /// v2 Q5 (plan V2-A17): prescribed absorbed shortwave and incident
+  /// longwave radiation [W/m^2] for the bulk surface heat exchange
+  /// (radiation SCHEMES stay out of scope — plan §10), and the GLM
+  /// still-air lower bound on the wind speed entering the bulk transfer
+  /// functions (applied at MetForcing::sample for every bulk consumer).
+  SeriesOrConstant shortwave;           ///< absorbed SW [W/m^2] (default 0)
+  SeriesOrConstant longwaveIn;          ///< incident LW [W/m^2] (default 0)
+  real_t windSpeedFloor = 0.5;          ///< [m/s] still-air lower bound
 };
 
 /// surface_water: SWE module parameters.
@@ -188,9 +202,17 @@ struct GroundwaterTimestepConfig {
   real_t courantMax = 2.0;  ///< legacy Co_max: Courant limit on dK/dtheta
 };
 
-/// groundwater.density_coupling: baroclinic feedback (activated in P4).
+/// groundwater.density_coupling: baroclinic feedback (activated in P4;
+/// coefficients made configuration in v2 Q5 with the legacy compile-time
+/// constants as defaults — golden-neutral, V2-A17):
+///   r_rho  = 1 + beta_saline s - thermal_expansion (T - reference_temperature)
+///   r_visc = 1 / (1 + beta_saline_viscosity s)   (mu(T) out of scope)
 struct DensityCouplingConfig {
   bool enabled = false;  ///< activate r_rho / r_visc face ratios (P4)
+  real_t betaSaline = 0.000744;          ///< legacy r_rho slope [L/g]
+  real_t betaSalineViscosity = 0.0022;   ///< legacy r_visc slope [L/g]
+  real_t thermalExpansion = 0.0;         ///< beta_T [1/K] (Q5; 0 = off)
+  real_t referenceTemperature = 20.0;    ///< T0 [C] for the thermal term
 };
 
 /// groundwater: Richards module parameters.
@@ -211,6 +233,54 @@ struct GroundwaterConfig {
   ReallocationSurplus reallocationSurplus = ReallocationSurplus::Drop;
   DensityCouplingConfig densityCoupling;  ///< baroclinic feedback switch
   GwEvaporationConfig evaporation;        ///< bulk soil evaporation (v2 Q4)
+};
+
+/// transport.scheme / temperature.scheme
+struct TransportSchemeConfig {
+  /// Advection scheme: first-order upwind or TVD superbee (plan §3.1).
+  enum class Advection { Upwind, Superbee };
+  Advection advection = Advection::Upwind;  ///< selected scheme
+};
+
+/// temperature.surface_exchange: the Q5 surface heat-flux term.
+struct SurfaceExchangeConfig {
+  /// None: no surface heat exchange. Equilibrium: dT/dt =
+  /// -K_e (T - T_e)/((rho c)_w h) (Edinger). Bulk: Q_net = Q_sw +
+  /// eps (LW_in - sigma T_K^4) - Q_lat - Q_sens on the shared Q4 atm
+  /// module chain, evaluated at the local water temperature.
+  enum class Mode { None, Equilibrium, Bulk };
+  Mode mode = Mode::None;         ///< selected mode
+  real_t equilibriumTemperature = 0.0;  ///< T_e [C] (equilibrium mode)
+  real_t equilibriumCoefficient = 0.0;  ///< K_e [W/m^2/K] (equilibrium mode)
+};
+
+/// temperature: the second registered scalar (v2 Q5, plan §4.1/V2-A17).
+/// The transport machinery is shared with salinity; these are the
+/// per-scalar parameters and the thermal physics switches.
+struct TemperatureConfig {
+  TransportSchemeConfig scheme;          ///< advection scheme selection
+  real_t surfaceDiffusivityX = 1.0e-10;  ///< [m^2/s]
+  real_t surfaceDiffusivityY = 1.0e-10;  ///< [m^2/s]
+  /// Subsurface effective thermal conduction lambda_eff [W/m/K]; enters
+  /// the dispersion tensor's molecular slot as lambda/(rho c)_w (a bulk
+  /// property — NOT multiplied by theta_s, unlike solute molecular
+  /// diffusion). Required with the groundwater module.
+  real_t thermalConductivity = 0.0;
+  real_t heatCapacityWater = 4.184e6;    ///< (rho c)_w [J/m^3/K]
+  /// Solid volumetric heat capacity (rho c)_s [J/m^3/K]: the thermal
+  /// retardation kappa = (1 - theta_s) (rho c)_s / (rho c)_w joins the
+  /// subsurface mass basis (theta + kappa) — the SEAWAT
+  /// retardation-as-scalar form. Required with the groundwater module.
+  real_t heatCapacitySolid = 0.0;
+  real_t dispersivityLongitudinal = 0.0; ///< thermal dispersivity [m]
+  real_t dispersivityTransverse = 0.0;   ///< thermal dispersivity [m]
+  /// Optional temperature bounds; both default OPEN (unlike salinity,
+  /// whose lower bound defaults to 0).
+  bool hasBoundMin = false;              ///< true if a lower bound is set
+  real_t boundMin = 0.0;                 ///< lower bound when present
+  bool hasBoundMax = false;              ///< true if an upper bound is set
+  real_t boundMax = 0.0;                 ///< upper bound when present
+  SurfaceExchangeConfig surfaceExchange; ///< surface heat-flux term
 };
 
 /// soil.types[]: van Genuchten–Mualem soil parameters.
@@ -274,6 +344,7 @@ struct InitialConditionsConfig {
   SurfaceInitialConfig surface;          ///< SWE initial state
   GroundwaterInitialConfig groundwater;  ///< Richards initial state
   TransportInitialConfig transport;      ///< scalar initial state
+  TransportInitialConfig temperature;    ///< temperature initial state (Q5)
 };
 
 /// boundary_conditions[].target: which sub-boundary the condition applies to.
@@ -305,20 +376,19 @@ struct BcValueConfig {
   real_t hydrostaticEta = 0.0;  ///< reference stage for Form::Hydrostatic
 };
 
+/// boundary_conditions[].scalar: which registered scalar a scalar_value
+/// condition prescribes (v2 Q5, V2-A17). Salinity is the default; the
+/// selector is only valid on kind scalar_value (schema cross-check).
+enum class BcScalar { Salinity, Temperature };
+
 /// boundary_conditions[]: one polygon-region boundary condition.
 struct BoundaryConditionConfig {
   std::string name;   ///< unique condition name
   std::vector<std::array<real_t, 2>> polygon;  ///< region vertices (x, y) [m]
   BcTarget target = BcTarget::Surface;  ///< sub-boundary the condition acts on
   BcKind kind = BcKind::Eta;            ///< what quantity is prescribed
+  BcScalar scalarField = BcScalar::Salinity;  ///< scalar_value selector (Q5)
   BcValueConfig value;                  ///< the prescribed value
-};
-
-/// transport.scheme
-struct TransportSchemeConfig {
-  /// Advection scheme: first-order upwind or TVD superbee (plan §3.1).
-  enum class Advection { Upwind, Superbee };
-  Advection advection = Advection::Upwind;  ///< selected scheme
 };
 
 /// transport: scalar transport parameters.
@@ -353,6 +423,7 @@ struct OutputConfig {
   std::vector<std::string> surfaceVariables;      ///< /surface/* selection
   std::vector<std::string> groundwaterVariables;  ///< /groundwater/* selection
   std::vector<std::string> transportVariables;    ///< /transport/* selection
+  std::vector<std::string> temperatureVariables;  ///< /temperature/* selection
   std::vector<MonitorConfig> monitors;            ///< point probes
   real_t checkpointInterval = 0.0;  ///< 0 = off; final checkpoint always written
 };
@@ -417,6 +488,7 @@ struct FrehgConfig {
   InitialConditionsConfig initialConditions;  ///< initial state
   std::vector<BoundaryConditionConfig> boundaryConditions;  ///< BC list
   TransportConfig transport;      ///< scalar-transport parameters
+  TemperatureConfig temperature;  ///< temperature-transport parameters (Q5)
   OutputConfig output;            ///< output selection
   RestartConfig restart;          ///< restart request
   SolverConfig solver;            ///< PETSc options hookup

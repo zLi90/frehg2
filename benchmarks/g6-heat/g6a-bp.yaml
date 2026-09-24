@@ -1,0 +1,111 @@
+# g6(a) — Bredehoeft & Papadopulos (1965) steady Peclet sweep (v2 plan
+# §4.2, smoke tier; realization V2-A17). Saturated 10 m column between
+# pinned cell temperatures 20 C (top) and 10 C (bottom), lambda_eff =
+# 2.0 W/m/K. With phi = 0.35 and (rho c)_s = 2.0548e6 the bulk capacity
+# is (rho c)_b = theta (rho c)_w + (1 - phi)(rho c)_s = 2.8e6 J/m3/K,
+# so alpha = lambda/(rho c)_b = 7.1429e-7 m2/s.
+#
+# Flow: the harness sweeps Pe = v_t L / alpha over {-5, -1, 0, +1, +5}
+# by rewriting the bottom head around the hydrostatic no-flow baseline
+# h_p,bot = 10 m (the total head h_p + z is what drives flow — gravity
+# is in it, which is why the baseline is 10, not 0). Nominal delta:
+# q = Pe * alpha / L * (rho c)_b / (rho c)_w and dh = -q L / K
+# (positive Pe = downward flow = total head decreasing downward).
+# The gate does NOT trust this arithmetic: it reads the achieved qz
+# from the output, asserts the measured Pe lands within a window of
+# the target (so the sweep spans the range), and evaluates the closed
+# form at the MEASURED Pe (V2-A17).
+#
+# Steady-state horizon: at Pe = 0 the slowest surviving mode from the
+# uniform-15 C start is n = 2 (the n = 1 projection is exactly zero),
+# tau_2 = 3.55e6 s — but Pe != 0 BREAKS that symmetry and excites the
+# n = 1 advective-diffusive mode, tau_1 = L^2/(alpha (pi^2 + Pe^2/4)) =
+# 1.36e7 s at |Pe| = 1 (measured at gate bring-up: t_end = 2e7 left a
+# 0.36-0.83 K transient bump, 4-8x the budget, symmetric in +-Pe).
+# t_end = 8e7 s is >= 5.9 tau_1 at every gated Pe: residual < 0.02 K.
+# Q5 TARGET SCHEMA (modules.temperature, the temperature section,
+# scalar: temperature) — authored gate-first per §6.1; frehg --validate
+# rejects it until the capability lands.
+simulation:
+  id: g6a-bp
+  title: g6(a) Bredehoeft & Papadopulos steady Peclet sweep
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 100
+  dx: 1.0
+  dy: 1.0
+  dz: 0.1
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 5000.0
+  t_end: 80000000.0
+  output_interval: 8000000.0
+
+modules:
+  groundwater: true
+  temperature: true
+
+groundwater:
+  timestep:
+    dt_init: 5000.0
+    dt_min: 5000.0
+    dt_max: 5000.0
+  specific_storage: 1.0e-6
+
+soil:
+  types:
+    - name: sand
+      ksx: 1.0e-5
+      ksy: 1.0e-5
+      ksz: 1.0e-5
+      theta_s: 0.35
+      theta_r: 0.02
+      vg_alpha: 3.0
+      vg_n: 2.0
+  map: {constant: sand}
+
+temperature:
+  scheme: {advection: upwind}
+  thermal_conductivity: 2.0           # lambda_eff [W/m/K]
+  heat_capacity_water: 4.184e6        # (rho c)_w [J/m3/K]
+  heat_capacity_solid: 2.0548e6       # (rho c)_s [J/m3/K]
+  dispersivity: {longitudinal: 0.0, transverse: 0.0}
+
+initial_conditions:
+  groundwater:
+    water_table: {constant: 0.0}
+  temperature:
+    groundwater: {constant: 15.0}
+
+boundary_conditions:
+  - name: head-top
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: head
+    value: {constant: 0.0}
+  - name: head-bottom
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_bottom
+    kind: head
+    value: {constant: 10.0}         # hydrostatic baseline; harness adds -q L / K
+  - name: temperature-top
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 20.0}
+  - name: temperature-bottom
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_bottom
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 10.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [qz]
+    temperature: [temperature]

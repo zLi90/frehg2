@@ -1,7 +1,8 @@
 /// \file BulkAerodynamic.hpp
-/// \brief The bulk-aerodynamic (mass-transfer) vapor-flux formulas
-///        (v2 plan §3.2; one module, several consumers: open-water and
-///        soil evaporation in Q4, the surface latent-heat term in Q5).
+/// \brief The bulk-aerodynamic (mass-transfer) vapor-flux formulas and the
+///        Q5 surface net heat flux (v2 plan §3.2/§4.1; one module, several
+///        consumers: open-water and soil evaporation in Q4, the surface
+///        latent/sensible heat terms in Q5).
 ///
 /// Provenance: Geng & Boufadel (2015) Eqs. (1)-(6) — the paper's own
 /// formulation chain, which the V2-A13 derivation showed reproduces its
@@ -70,6 +71,42 @@ KOKKOS_INLINE_FUNCTION real_t evaporationRate(real_t surfaceTempC,
   return airDensity(surfaceTempC, pressureKpa) / aerodynamicResistance(windMs) *
          (qGround - airSpecificHumidity) / kWaterDensity;
 }
+
+/// \name Q5 surface heat exchange (plan §4.1, V2-A17)
+///@{
+inline constexpr real_t kStefanBoltzmann = 5.670374419e-8;  ///< [W/m^2/K^4]
+inline constexpr real_t kWaterEmissivity = 0.97;   ///< eps (Kirchhoff both ways)
+inline constexpr real_t kAirHeatCapacity = 1005.0; ///< c_pa [J/kg/K]
+
+/// Latent heat of vaporization L_v(T) [J/kg] at \p tempC [C].
+KOKKOS_INLINE_FUNCTION real_t latentHeatOfVaporization(real_t tempC) {
+  return 2.501e6 - 2370.0 * tempC;
+}
+
+/// Net surface heat flux [W/m^2, positive into the water]:
+///   Q_net = Q_sw + eps (LW_in - sigma T_K^4) - Q_lat - Q_sens
+/// with Q_lat = rho_w L_v(T) E on the Q4 evaporationRate chain verbatim
+/// (including its air density at the WATER temperature) and
+/// Q_sens = rho_a(T_air) c_pa (T - T_air) / R_air. Both bulk terms
+/// evaluate at the LOCAL water temperature \p waterTempC — never at
+/// atmosphere.surface_temperature (V2-A17). The g7(a2) gate root-finds
+/// the zero of this exact chain offline (tests/regression/gate_heat.py
+/// mirrors it term for term).
+KOKKOS_INLINE_FUNCTION real_t netHeatFlux(real_t waterTempC, real_t airTempC,
+                                          real_t pressureKpa, real_t windMs,
+                                          real_t airSpecificHumidity,
+                                          real_t shortwave, real_t longwaveIn) {
+  const real_t tK = waterTempC + 273.15;
+  const real_t tK2 = tK * tK;
+  const real_t lw = kWaterEmissivity * (longwaveIn - kStefanBoltzmann * tK2 * tK2);
+  const real_t evap =
+      evaporationRate(waterTempC, pressureKpa, windMs, airSpecificHumidity);
+  const real_t qLat = kWaterDensity * latentHeatOfVaporization(waterTempC) * evap;
+  const real_t qSens = airDensity(airTempC, pressureKpa) * kAirHeatCapacity *
+                       (waterTempC - airTempC) / aerodynamicResistance(windMs);
+  return shortwave + lw - qLat - qSens;
+}
+///@}
 
 }  // namespace frehg::atm
 

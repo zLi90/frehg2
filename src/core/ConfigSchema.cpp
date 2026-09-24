@@ -188,11 +188,16 @@ const std::vector<std::string>& transportVariables() {
   static const std::vector<std::string> v = {"concentration", "concentration_surface"};
   return v;
 }
+const std::vector<std::string>& temperatureVariables() {
+  static const std::vector<std::string> v = {"temperature", "temperature_surface"};
+  return v;
+}
 
 std::vector<std::string> allVariables() {
   std::vector<std::string> v = surfaceVariables();
   v.insert(v.end(), groundwaterVariables().begin(), groundwaterVariables().end());
   v.insert(v.end(), transportVariables().begin(), transportVariables().end());
+  v.insert(v.end(), temperatureVariables().begin(), temperatureVariables().end());
   return v;
 }
 
@@ -216,6 +221,10 @@ Spec buildRootSchema() {
        {"kind",
         enumeration(true, {"eta", "discharge", "velocity", "outflow", "head", "flux",
                            "scalar_value", "scalar_cauchy"})},
+       // scalar_value selector (v2 Q5): which registered scalar the
+       // condition prescribes; valid on kind scalar_value only
+       // (cross-field check), default salinity.
+       {"scalar", enumeration(false, {"salinity", "temperature"})},
        // value is required for every kind except outflow and scalar_cauchy
        // (cross-field check).
        {"value", oneOf({{"constant", real(false)},
@@ -251,7 +260,8 @@ Spec buildRootSchema() {
                    true)},
       {"modules", map({{"surface_water", boolean(false)},
                        {"groundwater", boolean(false)},
-                       {"transport", boolean(false)}},
+                       {"transport", boolean(false)},
+                       {"temperature", boolean(false)}},
                       true)},
       {"surface_water",
        map({{"gravity", realPositive(false)},
@@ -293,13 +303,20 @@ Spec buildRootSchema() {
                                  {"exclude", map({{"polygon", sequence(point2(), true, 3)}})}})}})},
       {"atmosphere",
        // Met forcing for the bulk-aerodynamic module (v2 Q4 §3.2); exactly
-       // one humidity form (cross-field check).
+       // one humidity form (cross-field check). surface_temperature became
+       // optional in v2 Q5 (required exactly when a Q4 evaporation consumer
+       // is configured — cross-field check; the Q5 heat exchange evaluates
+       // at the local water temperature instead, V2-A17). shortwave /
+       // longwave_in / wind_speed_floor feed the Q5 bulk heat exchange.
        map({{"air_temperature", seriesOrConstant(true)},
-            {"surface_temperature", seriesOrConstant(true)},
+            {"surface_temperature", seriesOrConstant(false)},
             {"pressure", seriesOrConstant(true)},
             {"specific_humidity", seriesOrConstant(false)},
             {"relative_humidity", seriesOrConstant(false)},
-            {"wind_speed", seriesOrConstant(true)}})},
+            {"wind_speed", seriesOrConstant(true)},
+            {"shortwave", seriesOrConstant(false)},
+            {"longwave_in", seriesOrConstant(false)},
+            {"wind_speed_floor", realNonNegative(false)}})},
       {"groundwater",
        map({{"scheme", enumeration(false, {"pca"})},
             {"use_full3d", boolean(false)},
@@ -312,7 +329,14 @@ Spec buildRootSchema() {
                              true)},
             {"specific_storage", realNonNegative(true)},
             {"reallocation_surplus", enumeration(false, {"drop", "redistribute"})},
-            {"density_coupling", map({{"enabled", boolean(false)}})},
+            {"density_coupling",
+             // Coefficients configurable since v2 Q5 (defaults = the
+             // legacy compile-time constants; thermal term default 0).
+             map({{"enabled", boolean(false)},
+                  {"beta_saline", realNonNegative(false)},
+                  {"beta_saline_viscosity", realNonNegative(false)},
+                  {"thermal_expansion", realNonNegative(false)},
+                  {"reference_temperature", real(false)}})},
             // Bulk-aerodynamic soil evaporation over a region (v2 Q4
             // §3.2); dependencies (atmosphere block, uncoupled runs) are
             // cross-field checks.
@@ -330,7 +354,9 @@ Spec buildRootSchema() {
                                    {"head", fileOrConstant(false)},
                                    {"moisture", fileOrConstant(false)}})},
             {"transport", map({{"surface", fileOrConstant(false)},
-                               {"groundwater", fileOrConstant(false)}})}})},
+                               {"groundwater", fileOrConstant(false)}})},
+            {"temperature", map({{"surface", fileOrConstant(false)},
+                                 {"groundwater", fileOrConstant(false)}})}})},
       {"boundary_conditions", sequence(bcEntry)},
       {"transport",
        map({{"scheme", map({{"advection", enumeration(false, {"upwind", "superbee"})}})},
@@ -341,13 +367,31 @@ Spec buildRootSchema() {
                                 {"molecular", realNonNegative(false)}})},
             {"bounds", map({{"min", real(false)}, {"max", real(false)}})},
             {"legacy_evap_allowance", boolean(false)}})},
+      {"temperature",
+       // The second registered scalar (v2 Q5, plan §4.1/V2-A17). The
+       // thermal parameters' module dependencies are cross-field checks.
+       map({{"scheme", map({{"advection", enumeration(false, {"upwind", "superbee"})}})},
+            {"surface_diffusivity",
+             map({{"x", realNonNegative(false)}, {"y", realNonNegative(false)}})},
+            {"thermal_conductivity", realPositive(false)},
+            {"heat_capacity_water", realPositive(false)},
+            {"heat_capacity_solid", realPositive(false)},
+            {"dispersivity", map({{"longitudinal", realNonNegative(false)},
+                                  {"transverse", realNonNegative(false)}})},
+            {"bounds", map({{"min", real(false)}, {"max", real(false)}})},
+            {"surface_exchange",
+             map({{"mode", enumeration(true, {"equilibrium", "bulk"})},
+                  {"equilibrium", map({{"temperature", real(false)},
+                                       {"coefficient", realPositive(false)}})}})}})},
       {"output",
        map({{"filename", text(true)},
             {"variables",
              map({{"surface", sequence(enumeration(false, surfaceVariables()), false, 1)},
                   {"groundwater",
                    sequence(enumeration(false, groundwaterVariables()), false, 1)},
-                  {"transport", sequence(enumeration(false, transportVariables()), false, 1)}})},
+                  {"transport", sequence(enumeration(false, transportVariables()), false, 1)},
+                  {"temperature",
+                   sequence(enumeration(false, temperatureVariables()), false, 1)}})},
             {"monitors", sequence(monitorEntry)},
             {"checkpoint", map({{"interval", integerSeconds(false, 0.0)}})}},
            true)},
@@ -657,12 +701,17 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
   const bool sw = moduleOn(root, "surface_water");
   const bool gw = moduleOn(root, "groundwater");
   const bool tr = moduleOn(root, "transport");
+  const bool tp = moduleOn(root, "temperature");
 
   if (!sw && !gw) {
     ctx.addError("modules", "at least one of surface_water/groundwater must be enabled");
   }
   if (tr && !sw && !gw) {
     ctx.addError("modules", "transport requires a flow module (surface_water or groundwater)");
+  }
+  if (tp && !sw && !gw) {
+    ctx.addError("modules",
+                 "temperature requires a flow module (surface_water or groundwater)");
   }
   if (sw && !root["surface_water"].IsDefined()) {
     ctx.addError("surface_water", "section is required when modules.surface_water is true");
@@ -675,6 +724,72 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
   }
   if (tr && !root["transport"].IsDefined()) {
     ctx.addError("transport", "section is required when modules.transport is true");
+  }
+  if (tp && !root["temperature"].IsDefined()) {
+    ctx.addError("temperature", "section is required when modules.temperature is true");
+  }
+
+  // v2 Q5 temperature cross-field rules (plan §4.1, V2-A17).
+  {
+    const YAML::Node temp = root["temperature"];
+    if (temp.IsDefined() && temp.IsMap()) {
+      if (gw && tp) {
+        // The subsurface heat physics has no defaults: conduction and the
+        // solid heat capacity are the case's thermal identity.
+        if (!temp["thermal_conductivity"].IsDefined()) {
+          ctx.addError("temperature.thermal_conductivity",
+                       "required when modules.groundwater is true");
+        }
+        if (!temp["heat_capacity_solid"].IsDefined()) {
+          ctx.addError("temperature.heat_capacity_solid",
+                       "required when modules.groundwater is true");
+        }
+      }
+      if (!gw) {
+        for (const char* key : {"thermal_conductivity", "heat_capacity_solid",
+                                "dispersivity"}) {
+          if (temp[key].IsDefined()) {
+            ctx.addError(std::string("temperature.") + key,
+                         "subsurface thermal parameter requires modules.groundwater: true");
+          }
+        }
+      }
+      const YAML::Node exchange = temp["surface_exchange"];
+      if (exchange.IsDefined() && exchange.IsMap()) {
+        if (!sw) {
+          ctx.addError("temperature.surface_exchange",
+                       "requires modules.surface_water: true");
+        }
+        const std::string mode =
+            (exchange["mode"].IsDefined() && exchange["mode"].IsScalar())
+                ? exchange["mode"].as<std::string>()
+                : std::string();
+        const YAML::Node eq = exchange["equilibrium"];
+        if (mode == "equilibrium") {
+          if (!eq.IsDefined() || !sub(eq, "temperature").IsDefined() ||
+              !sub(eq, "coefficient").IsDefined()) {
+            ctx.addError("temperature.surface_exchange.equilibrium",
+                         "mode equilibrium requires equilibrium.temperature and "
+                         "equilibrium.coefficient");
+          }
+        }
+        if (mode == "bulk") {
+          if (eq.IsDefined()) {
+            ctx.addError("temperature.surface_exchange.equilibrium",
+                         "mode bulk takes no equilibrium block (the flux comes from "
+                         "the atmosphere block)");
+          }
+          if (!root["atmosphere"].IsDefined()) {
+            ctx.addError("temperature.surface_exchange",
+                         "mode bulk requires the atmosphere block");
+          }
+        }
+      }
+      if (temp["surface_diffusivity"].IsDefined() && !sw) {
+        ctx.addError("temperature.surface_diffusivity",
+                     "requires modules.surface_water: true");
+      }
+    }
   }
 
   // time ordering.
@@ -750,6 +865,15 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
       }
     }
     const YAML::Node evap = sub(root, "surface_water", "evaporation");
+    const bool surfBulkEvap = evap.IsDefined() && evap.IsMap() && evap["mode"].IsDefined();
+    const bool gwBulkEvap = sub(root, "groundwater", "evaporation").IsDefined();
+    if (atmPresent && atm.IsMap() && (surfBulkEvap || gwBulkEvap) &&
+        !atm["surface_temperature"].IsDefined()) {
+      ctx.addError("atmosphere.surface_temperature",
+                   "required when a bulk evaporation consumer is configured "
+                   "(surface_water.evaporation.mode bulk or "
+                   "groundwater.evaporation)");
+    }
     if (evap.IsDefined() && evap.IsMap()) {
       const bool bulk = evap["mode"].IsDefined();
       const int present = (evap["constant"].IsDefined() ? 1 : 0) +
@@ -786,13 +910,31 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
     }
   }
 
-  // density coupling requires transport.
+  // density coupling requires a scalar to couple to (salinity and/or
+  // temperature since v2 Q5); the per-term coefficients require their
+  // scalar's module.
   {
-    const YAML::Node dc = sub(sub(root, "groundwater", "density_coupling"), "enabled");
-    bool enabled = false;
-    if (dc.IsDefined() && dc.IsScalar() && nodeAsBool(dc, enabled) && enabled && !tr) {
-      ctx.addError("groundwater.density_coupling.enabled",
-                   "density coupling requires modules.transport: true");
+    const YAML::Node dc = sub(root, "groundwater", "density_coupling");
+    if (dc.IsDefined() && dc.IsMap()) {
+      bool enabled = false;
+      if (dc["enabled"].IsDefined() && dc["enabled"].IsScalar()) {
+        nodeAsBool(dc["enabled"], enabled);
+      }
+      if (enabled && !tr && !tp) {
+        ctx.addError("groundwater.density_coupling.enabled",
+                     "density coupling requires modules.transport or "
+                     "modules.temperature");
+      }
+      if (!tr && (dc["beta_saline"].IsDefined() ||
+                  dc["beta_saline_viscosity"].IsDefined())) {
+        ctx.addError("groundwater.density_coupling",
+                     "the saline coefficients require modules.transport: true");
+      }
+      if (!tp && (dc["thermal_expansion"].IsDefined() ||
+                  dc["reference_temperature"].IsDefined())) {
+        ctx.addError("groundwater.density_coupling",
+                     "the thermal coefficients require modules.temperature: true");
+      }
     }
   }
 
@@ -847,6 +989,16 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
       if (gw && !sub(ic, "transport", "groundwater").IsDefined()) {
         ctx.addError("initial_conditions.transport.groundwater",
                      "required when transport and groundwater are enabled");
+      }
+    }
+    if (tp) {
+      if (sw && !sub(ic, "temperature", "surface").IsDefined()) {
+        ctx.addError("initial_conditions.temperature.surface",
+                     "required when temperature and surface_water are enabled");
+      }
+      if (gw && !sub(ic, "temperature", "groundwater").IsDefined()) {
+        ctx.addError("initial_conditions.temperature.groundwater",
+                     "required when temperature and groundwater are enabled");
       }
     }
   }
@@ -924,8 +1076,31 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
           ctx.addError(where, "target groundwater_top must be kind flux in coupled "
                               "runs (the coupler owns the top head)");
         }
-        if (kind == "scalar_value" && !tr) {
-          ctx.addError(where, "kind scalar_value requires modules.transport: true");
+        const std::string scalarSel =
+            (bc["scalar"].IsDefined() && bc["scalar"].IsScalar())
+                ? bc["scalar"].as<std::string>()
+                : std::string("salinity");
+        if (bc["scalar"].IsDefined() && kind != "scalar_value") {
+          ctx.addError(where + ".scalar",
+                       "the scalar selector applies to kind scalar_value only");
+        }
+        if (kind == "scalar_value") {
+          if (scalarSel == "temperature" && !tp) {
+            ctx.addError(where,
+                         "scalar: temperature requires modules.temperature: true");
+          }
+          if (scalarSel == "salinity" && !tr) {
+            ctx.addError(where, "kind scalar_value requires modules.transport: true");
+          }
+          // Cell-pinning Dirichlet tops/bottoms are the Q5 temperature
+          // form (g6/g8); the salinity rows of the §8.2 matrix stay
+          // schema-rejected until a gate exercises them.
+          if ((target == "groundwater_top" || target == "groundwater_bottom") &&
+              scalarSel != "temperature") {
+            ctx.addError(where,
+                         "scalar_value on " + target + " is temperature-only in "
+                         "v2.0 (no salinity gate exercises the pinned-cell form)");
+          }
         }
         if (kind == "scalar_cauchy") {
           // The v2 Q4 zero-total-scalar-flux top condition (Geng & Boufadel

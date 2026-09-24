@@ -1256,6 +1256,25 @@ import gate_evap  # noqa: E402
 # ---------------------------------------------------------------------------
 import gate_wind  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# v2 Q5 gates (plan §4.2, realization V2-A17): g6 subsurface heat
+# (B&P Peclet sweep / Ogata-Banks breakthrough / Stallman diel damping +
+# the composed coupled variant), g7 surface heat exchange (Edinger
+# relaxation + ledger / bulk equilibrium consistency / channel plume),
+# g8 Horton-Rogers-Lapwood convection onset, the heat 8-orientation
+# battery, the two-scalar restart-determinism lane, and the heat
+# rank-invariance lane. Authored gate-first per §6.1: every case uses
+# the Q5 target schema (modules.temperature) and fails "capability
+# absent" until the capability lands. The closed forms and check
+# functions live in gate_heat.py; the §6.3 negative battery is
+# scripts/test_g678_gates.py.
+# ---------------------------------------------------------------------------
+import gate_heat  # noqa: E402
+
+CAPABILITY_ABSENT_Q5 = ("capability absent: the schema rejects the Q5 "
+                        "temperature keys (expected until the Q5 capability "
+                        "lands — plan §6.1)")
+
 
 def monitor_series(handle, name: str):
     table = handle[f"/monitor/{name}"][:]
@@ -1830,6 +1849,628 @@ def gate_rank_invariance(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------------
+# v2 Q5 gate implementations (plan §4.2 + V2-A17).
+# ---------------------------------------------------------------------------
+
+def heat_tolerances() -> dict:
+    with open(HERE / "tolerances" / "g6-g8-heat.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def subsurface_column(handle, group: str, t: int, nz: int) -> np.ndarray:
+    """A (nz,) column from a flat nx = ny = 1 3D dataset at time t."""
+    return handle[f"{group}/{t}"][:].reshape(nz)
+
+
+def subsurface_slice(handle, group: str, t: int, nx: int, nz: int) -> np.ndarray:
+    """A (nx, nz) x-z slice from a flat ny = 1 3D dataset at time t."""
+    return handle[f"{group}/{t}"][:].reshape(nx, nz)
+
+
+def measured_qz_down(handle, t: int, nz: int) -> float:
+    """Downward-positive Darcy flux [m/s], mid-column, from the per-area
+    qz output (positive up) of a single-column run."""
+    qz = subsurface_column(handle, "/groundwater/qz", t, nz)
+    return -float(qz[nz // 2])
+
+
+def graded_depths(dz0: float, stretch: float, nz: int) -> np.ndarray:
+    """Cell-centre depths below the surface for the dz dz_stretch^k mesh."""
+    dz = dz0 * stretch ** np.arange(nz)
+    tops = np.concatenate([[0.0], np.cumsum(dz)[:-1]])
+    return tops + 0.5 * dz
+
+
+def gate_g6(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "g6-heat", args.work)
+    tol = heat_tolerances()
+    ok = True
+
+    def report(sub: str, sub_ok: bool, msgs: list[str]) -> bool:
+        for msg in msgs:
+            print(f"  {msg}")
+        print(f"g6({sub}):", "ok" if sub_ok else "FAIL")
+        return sub_ok
+
+    for config in ("g6a-bp.yaml", "g6b-ogata.yaml", "g6c-stallman.yaml",
+                   "g6c-coupled.yaml"):
+        if not validate_config(args.frehg, case_dir / config):
+            ok &= report(config, False, [CAPABILITY_ABSENT_Q5])
+    if not ok:
+        print("g6 gate:", "FAIL")
+        return 1
+
+    # (a) B&P steady Peclet sweep. Both column ends are pinned CELLS, so
+    # the isothermal planes sit at the pinned centres: L_eff = L - dz.
+    rc_w, rc_b = 4.184e6, 2.8e6
+    lam = 2.0
+    alpha = lam / rc_b
+    nz, dz, length, k_soil = 100, 0.1, 10.0, 1.0e-5
+    l_eff = length - dz
+    a_ok = True
+    a_msgs: list[str] = []
+    for pe in (-5.0, -1.0, 0.0, 1.0, 5.0):
+        v_target = pe * alpha / l_eff
+        q_target = v_target * rc_b / rc_w          # downward-positive [m/s]
+        head_bottom = length - q_target * length / k_soil
+        config = case_dir / f"g6a-pe{pe:+g}.yaml"
+        with open(case_dir / "g6a-bp.yaml", encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        doc["simulation"]["id"] = f"g6a-pe{pe:+g}"
+        for bc in doc["boundary_conditions"]:
+            if bc["name"] == "head-bottom":
+                bc["value"] = {"constant": float(head_bottom)}
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        t_end = int(doc["time"]["t_end"])
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            q_meas = measured_qz_down(handle, t_end, nz)
+            temp = subsurface_column(handle, "/temperature/temperature", t_end, nz)
+        (case_dir / "out" / "output.h5").unlink()
+        f_ok, f_msgs = gate_heat.check_flux_window(
+            q_meas, q_target, float(tol["g6a"]["flux_window_rel"]),
+            float(tol["g6a"]["flux_floor_abs"]), f"g6a Pe={pe:+g}")
+        a_msgs += f_msgs
+        a_ok &= f_ok
+        pe_meas = (q_meas * rc_w / rc_b) * l_eff / alpha
+        depths = (np.arange(nz) + 0.5) * dz
+        xi = (depths - 0.5 * dz) / l_eff
+        t_ref = 20.0 + (10.0 - 20.0) * gate_heat.bp_profile(xi, pe_meas)
+        err = float(np.max(np.abs(temp - t_ref)))
+        p_ok, p_msgs = gate_heat.check_bp([pe_meas], [err], 10.0,
+                                          float(tol["g6a"]["profile_tol_fraction"]))
+        a_msgs += p_msgs
+        a_ok &= p_ok
+    ok &= report("a", a_ok, a_msgs)
+
+    # (b) Ogata-Banks heat breakthrough on the graded vertical column.
+    rc_eff = 2.0e6
+    lam, k_soil = 2.2, 1.0e-5
+    alpha = lam / rc_eff
+    v_target = 1.5e-6
+    q_target = v_target * rc_eff / rc_w
+    nz, dz0, stretch = 145, 0.125, 1.02
+    depths = graded_depths(dz0, stretch, nz)
+    column_depth = float(dz0 * (stretch ** nz - 1.0) / (stretch - 1.0))
+    b_ok = True
+    b_msgs: list[str] = []
+    results = {}
+    for scheme in ("superbee", "upwind"):
+        config = case_dir / f"g6b-{scheme}.yaml"
+        with open(case_dir / "g6b-ogata.yaml", encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        doc["simulation"]["id"] = f"g6b-{scheme}"
+        doc["temperature"]["scheme"]["advection"] = scheme
+        for bc in doc["boundary_conditions"]:
+            if bc["name"] == "head-bottom":
+                bc["value"] = {"constant": float(column_depth -
+                                                 q_target * column_depth / k_soil)}
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            times = output_times(handle, "/temperature/temperature")
+            q_meas = measured_qz_down(handle, times[-1], nz)
+            series = {t: subsurface_column(handle, "/temperature/temperature", t, nz)
+                      for t in times}
+        (case_dir / "out" / "output.h5").unlink()
+        results[scheme] = (q_meas, times, series)
+    q_meas = results["superbee"][0]
+    f_ok, f_msgs = gate_heat.check_flux_window(
+        q_meas, q_target, float(tol["g6b"]["flux_window_rel"]), 0.0, "g6b")
+    b_msgs += f_msgs
+    b_ok &= f_ok
+    v_meas = q_meas * rc_w / rc_eff
+    obs_targets = [1.0, 5.0, 10.0, 20.0, 50.0]
+    obs_cells = [int(np.argmin(np.abs((depths - depths[0]) - x))) for x in obs_targets]
+    for scheme in ("superbee", "upwind"):
+        _, times, series = results[scheme]
+        rel_errors = []
+        # Gate from t >= 2e6 s: the pinned inlet CELL carries a half-cell
+        # boundary-position ambiguity that dominates only while
+        # sqrt(4 alpha t) spans a few cell widths (case README/comment).
+        t_min = 2.0e6
+        for cell in obs_cells:
+            x = float(depths[cell] - depths[0])
+            worst = 0.0
+            for t in times:
+                if t < t_min:
+                    continue
+                ref = gate_heat.ogata_banks(x, float(t), v_meas, alpha, 300.0, 330.0)
+                worst = max(worst, abs(float(series[t][cell]) - ref) / 30.0)
+            rel_errors.append(worst)
+        points = [float(depths[c] - depths[0]) for c in obs_cells]
+        c_ok, c_msgs = gate_heat.check_breakthrough(
+            points, rel_errors, float(tol["g6b"]["breakthrough_tol_rel"]))
+        if scheme == "superbee":
+            b_msgs += [f"superbee (gated): {m}" for m in c_msgs]
+            b_ok &= c_ok
+        else:
+            b_msgs += [f"upwind (recorded, not gated): {m}" for m in c_msgs]
+    ok &= report("b", b_ok, b_msgs)
+
+    # (c) Stallman diel damping: q_z in {0, +2e-6, -2e-6} m/s.
+    rc_b = 2.96e6
+    lam, k_soil = 2.0, 1.0e-4
+    alpha = lam / rc_b
+    nz, dz, length = 200, 0.01, 2.0
+    period = 86400.0
+    spinup = float(tol["g6c"]["spinup_cycles"]) * period
+    gate_cells = [8, 18, 28]
+    c_ok = True
+    c_msgs: list[str] = []
+    for q_target in (0.0, 2.0e-6, -2.0e-6):
+        config = case_dir / f"g6c-q{q_target:+g}.yaml"
+        with open(case_dir / "g6c-stallman.yaml", encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        doc["simulation"]["id"] = f"g6c-q{q_target:+g}"
+        for bc in doc["boundary_conditions"]:
+            if bc["name"] == "head-bottom":
+                bc["value"] = {"constant": float(length - q_target * length / k_soil)}
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            times = np.array(output_times(handle, "/temperature/temperature"), dtype=float)
+            q_meas = measured_qz_down(handle, int(times[-1]), nz)
+            history = np.stack([
+                subsurface_column(handle, "/temperature/temperature", int(t), nz)
+                for t in times])
+        (case_dir / "out" / "output.h5").unlink()
+        f_ok, f_msgs = gate_heat.check_flux_window(
+            q_meas, q_target, float(tol["g6c"]["flux_window_rel"]),
+            float(tol["g6c"]["flux_floor_abs"]), f"g6c q={q_target:+g}")
+        c_msgs += f_msgs
+        c_ok &= f_ok
+        sel = times >= spinup
+        v_meas = q_meas * rc_w / rc_b
+        amp_top, lag_top, _ = gate_heat.fit_sinusoid(times[sel], history[sel, 0], period)
+        depths_z, amp_m, amp_r, lag_m, lag_r = [], [], [], [], []
+        for cell in gate_cells:
+            z_eff = (cell - 0) * dz
+            amp, lag, _ = gate_heat.fit_sinusoid(times[sel], history[sel, cell], period)
+            ratio_ref, lag_ref = gate_heat.stallman_amplitude_phase(
+                z_eff, v_meas, alpha, period)
+            depths_z.append(z_eff)
+            amp_m.append(amp / amp_top)
+            amp_r.append(ratio_ref)
+            lag_m.append(lag - lag_top)
+            lag_r.append(lag_ref)
+        s_ok, s_msgs = gate_heat.check_stallman(
+            depths_z, amp_m, amp_r, lag_m, lag_r,
+            float(tol["g6c"]["amplitude_tol_rel"]), float(tol["g6c"]["phase_tol_s"]),
+            f"g6c q={q_target:+g}")
+        c_msgs += s_msgs
+        c_ok &= s_ok
+    ok &= report("c", c_ok, c_msgs)
+
+    # (c, coupled) — the composed surface-fed variant (plan §4.2 note).
+    config = case_dir / "g6c-coupled.yaml"
+    with open(config, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    q_target = 2.0e-6
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        times = np.array(output_times(handle, "/temperature/temperature"), dtype=float)
+        q_meas = measured_qz_down(handle, int(times[-1]), nz)
+        history = np.stack([
+            subsurface_column(handle, "/temperature/temperature", int(t), nz)
+            for t in times])
+    d_ok = True
+    d_msgs: list[str] = []
+    f_ok, f_msgs = gate_heat.check_flux_window(
+        q_meas, q_target, float(tol["g6c_coupled"]["flux_window_rel"]), 0.0,
+        "g6c coupled")
+    d_msgs += f_msgs
+    d_ok &= f_ok
+    sel = times >= float(tol["g6c_coupled"]["spinup_cycles"]) * period
+    v_meas = q_meas * rc_w / rc_b
+    amp_top, lag_top, _ = gate_heat.fit_sinusoid(times[sel], history[sel, 0], period)
+    depths_z, amp_m, amp_r, lag_m, lag_r = [], [], [], [], []
+    for cell in gate_cells:
+        z_eff = cell * dz
+        amp, lag, _ = gate_heat.fit_sinusoid(times[sel], history[sel, cell], period)
+        ratio_ref, lag_ref = gate_heat.stallman_amplitude_phase(z_eff, v_meas, alpha, period)
+        depths_z.append(z_eff)
+        amp_m.append(amp / amp_top)
+        amp_r.append(ratio_ref)
+        lag_m.append(lag - lag_top)
+        lag_r.append(lag_ref)
+    s_ok, s_msgs = gate_heat.check_stallman(
+        depths_z, amp_m, amp_r, lag_m, lag_r,
+        float(tol["g6c_coupled"]["amplitude_tol_rel"]),
+        float(tol["g6c_coupled"]["phase_tol_s"]), "g6c coupled")
+    d_msgs += s_msgs
+    d_ok &= s_ok
+    ok &= report("c coupled", d_ok, d_msgs)
+
+    print("g6 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def temperature_audit_closure(output: Path) -> np.ndarray:
+    """Per-step closure residuals of the temperature heat ledger,
+    normalized by the basin heat content: d(surf_heat) minus the summed
+    per-step deltas of the cumulative source columns."""
+    with h5py.File(output, "r") as handle:
+        table = handle["/monitor/temperature_audit"][:]
+    surf = table[:, 1]
+    cumulative = (table[:, 3] + table[:, 4] + table[:, 5] + table[:, 6] +
+                  table[:, 7] + table[:, 8])
+    residual = np.diff(surf) - np.diff(cumulative)
+    scale = max(float(np.max(np.abs(surf))), 1.0e-12)
+    return residual / scale
+
+
+def gate_g7(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "g7-heat", args.work)
+    tol = heat_tolerances()
+    ok = True
+
+    def report(sub: str, sub_ok: bool, msgs: list[str]) -> bool:
+        for msg in msgs:
+            print(f"  {msg}")
+        print(f"g7({sub}):", "ok" if sub_ok else "FAIL")
+        return sub_ok
+
+    for config in ("g7a-edinger.yaml", "g7a2-bulk.yaml", "g7b-channel.yaml"):
+        if not validate_config(args.frehg, case_dir / config):
+            ok &= report(config, False, [CAPABILITY_ABSENT_Q5])
+    if not ok:
+        print("g7 gate:", "FAIL")
+        return 1
+
+    # (a) stage 1: equilibrium relaxation + the per-step energy ledger.
+    out_a = run_and_rename(args, case_dir, "g7a-edinger.yaml")
+    with h5py.File(out_a, "r") as handle:
+        tm, vm = monitor_series(handle, "t_probe")
+    r_ok, r_msgs = gate_heat.check_relaxation(
+        tm, vm, 30.0, 20.0, 30.0, 1.0, float(tol["g7a"]["relaxation_tol_rel"]))
+    residuals = temperature_audit_closure(out_a)
+    l_ok, l_msgs = gate_heat.check_energy_ledger(
+        residuals, float(tol["g7a"]["ledger_tol_per_step"]))
+    ok &= report("a", r_ok and l_ok, r_msgs + l_msgs)
+
+    # (a) stage 2: full bulk-formula mode settles at the offline root.
+    out_a2 = run_and_rename(args, case_dir, "g7a2-bulk.yaml")
+    q_air = 0.6 * gate_heat.q_sat(25.0, 101.325)
+    t_e = gate_heat.equilibrium_root(25.0, 101.325, 2.0, q_air, 150.0, 350.0)
+    with h5py.File(out_a2, "r") as handle:
+        tm, vm = monitor_series(handle, "t_probe")
+    tail = vm[tm >= tm[-1] * 0.9]
+    span = float(np.max(tail) - np.min(tail))
+    s_ok = span <= float(tol["g7a2"]["steady_tol_c"])
+    s_msgs = [f"g7a2 steadiness: trailing span {span:.2e} C "
+              f"(allowed {tol['g7a2']['steady_tol_c']:g}) {'ok' if s_ok else 'FAIL'}"]
+    e_ok, e_msgs = gate_heat.check_equilibrium_consistency(
+        float(vm[-1]), t_e, float(tol["g7a2"]["equilibrium_tol_c"]))
+    ok &= report("a2", s_ok and e_ok, s_msgs + e_msgs)
+
+    # (b) channel thermal plume: steady profile + measured-inlet-convolved
+    # transient breakthrough (the inlet cell is a 1000 s mixing volume, so
+    # the ideal-step closed form is convolved with the measured inlet
+    # history — the measured-flux principle applied to the inlet signal).
+    config_b = case_dir / "g7b-channel.yaml"
+    with open(config_b, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    doc["output"]["monitors"].append(
+        {"name": "t_inlet", "i": 0, "j": 0, "variables": ["temperature_surface"]})
+    with open(config_b, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(doc, handle, sort_keys=False)
+    run_case(args.frehg, config_b, case_dir, args.mpiexec, args.ranks)
+    nx, dx = 840, 100.0
+    rho_c, depth_nom = 4.184e6, 1.0
+    k_e, t_amb, d_l = 25.0, 15.0, 5.0
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        t_end = output_times(handle, "/temperature/temperature_surface")[-1]
+        temp = handle[f"/temperature/temperature_surface/{t_end}"][:].reshape(nx)
+        uu = handle[f"/surface/uu/{t_end}"][:].reshape(nx)
+        eta = handle[f"/surface/eta/{t_end}"][:].reshape(nx)
+        tm, vm = monitor_series(handle, "t_mid")
+        ti, vi = monitor_series(handle, "t_inlet")
+    depth = depth_nom + float(np.mean(eta[10:-10]))
+    u_meas = float(np.mean(uu[10:-10]))
+    v_ok = abs(u_meas - 0.5) <= float(tol["g7b"]["velocity_tol_rel"]) * 0.5
+    b_msgs = [f"g7b velocity: measured u = {u_meas:.4f} m/s (target 0.5, "
+              f"allowed {tol['g7b']['velocity_tol_rel']:.0%}) {'ok' if v_ok else 'FAIL'}"]
+    decay = k_e / (rho_c * depth)
+    x_c = (np.arange(nx) + 0.5) * dx
+    excess0 = float(temp[0] - t_amb)
+    steady_ref = t_amb + excess0 * gate_heat.channel_steady(
+        x_c - x_c[0], u_meas, d_l, decay)
+    c_ok, c_msgs = gate_heat.check_channel(
+        x_c[:-2], temp[:-2], steady_ref[:-2], float(tol["g7b"]["steady_l2_tol"]),
+        [0.0], [0.0], 1.0, excess0)
+    # Transient: convolve the closed-form step response with the measured
+    # inlet increments (superposition of the linear ADE).
+    x_mid = float(x_c[420] - x_c[0])
+    inlet = np.asarray(vi, dtype=float) - t_amb
+    t_in = np.asarray(ti, dtype=float)
+    ref_mid = []
+    for t_now in tm:
+        val = 0.0
+        prev = 0.0
+        for tj, sj in zip(t_in, inlet):
+            if tj >= t_now:
+                break
+            step = sj - prev
+            prev = sj
+            if step != 0.0:
+                val += step * gate_heat.channel_transient(
+                    x_mid, float(t_now - tj), u_meas, d_l, decay)
+        ref_mid.append(t_amb + val)
+    err = float(np.max(np.abs(np.asarray(vm) - np.asarray(ref_mid)))) / abs(excess0)
+    t_ok = err <= float(tol["g7b"]["transient_tol_rel"])
+    b_msgs += c_msgs[:1]
+    b_msgs.append(f"g7b transient (measured-inlet convolution): max "
+                  f"{err:.2%} of the step (allowed "
+                  f"{tol['g7b']['transient_tol_rel']:.0%}) {'ok' if t_ok else 'FAIL'}")
+    ok &= report("b", v_ok and c_ok and t_ok, b_msgs)
+
+    print("g7 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_g8(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "g8-hrl", args.work)
+    tol = heat_tolerances()
+    if not validate_config(args.frehg, case_dir / "g8-hrl.yaml"):
+        print(f"g8 gate: {CAPABILITY_ABSENT_Q5}")
+        print("g8 gate: FAIL")
+        return 1
+    nx, nz, dx, dz = 40, 20, 0.05, 0.05
+    width, h_eff, z_top_pin = 2.0, 0.95, 0.025
+    lam, rc_w, beta_t, delta_t = 2.092, 4.184e6, 2.0e-4, 10.0
+    alpha_e = lam / rc_w
+    x_c = (np.arange(nx) + 0.5) * dx
+    depths = (np.arange(nz) + 0.5) * dz
+    histories = {}
+    for label, k_soil in (("sub", 7.5e-3), ("super", 1.375e-2)):
+        config = case_dir / f"g8-{label}.yaml"
+        with open(case_dir / "g8-hrl.yaml", encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        doc["simulation"]["id"] = f"g8-{label}"
+        for soil in doc["soil"]["types"]:
+            soil["ksx"] = soil["ksy"] = soil["ksz"] = float(k_soil)
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        ra = gate_heat.rayleigh_number(k_soil, beta_t, delta_t, h_eff, alpha_e)
+        print(f"  g8 {label}: K = {k_soil:g} -> Ra_eff = {ra:.2f} "
+              f"(Ra_c = {gate_heat.RAYLEIGH_CRITICAL:.2f})")
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        amps, nus = [], []
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            for t in output_times(handle, "/temperature/temperature"):
+                temp = subsurface_slice(handle, "/temperature/temperature", t, nx, nz)
+                qz = subsurface_slice(handle, "/groundwater/qz", t, nx, nz)
+                amps.append(gate_heat.hrl_mode_amplitude(
+                    temp, x_c, depths, z_top_pin, h_eff, width))
+                nus.append(gate_heat.hrl_nusselt(
+                    temp, qz[:, nz // 2 - 1], nz // 2 - 1, dz, lam, rc_w,
+                    delta_t, h_eff))
+        (case_dir / "out" / "output.h5").unlink()
+        histories[label] = (np.array(amps), np.array(nus))
+    ok, msgs = gate_heat.check_hrl(histories["sub"][0], histories["super"][1],
+                                   float(tol["g8"]["decay_factor"]),
+                                   float(tol["g8"]["nusselt_min"]))
+    msgs.append(f"recorded: subcritical trailing Nusselt "
+                f"{float(histories['sub'][1][-1]):.4f} (conduction = 1); "
+                f"supercritical mode amplitude end "
+                f"{float(histories['super'][0][-1]):.3f} K (seed 0.5)")
+    for msg in msgs:
+        print(f"  {msg}")
+    print("g8 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def heat_orient_ic(nx: int, ny: int, nz: int, dx: float, dy: float,
+                   dz: float) -> np.ndarray:
+    """The heat-battery base IC: 20 C + an off-axis warm blob, decaying
+    with depth — injective enough that any orientation mix-up shows."""
+    x = (np.arange(nx) + 0.5) * dx
+    y = (np.arange(ny) + 0.5) * dy
+    depth = (np.arange(nz) + 0.5) * dz
+    blob = 6.0 * np.exp(-(((x[None, :] - 1.1) ** 2 + (y[:, None] - 1.7) ** 2)
+                          / 0.5 ** 2))
+    profile = 1.0 - depth / (nz * dz)
+    return 20.0 + blob[:, :, None] * profile[None, None, :]
+
+
+def write_ic_raster(path: Path, field: np.ndarray) -> None:
+    """(ny, nx, nz) -> the (j*nx + i)*nz + k flat file format."""
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("# heat orientation battery IC (generated by the harness)\n")
+        for j in range(field.shape[0]):
+            for i in range(field.shape[1]):
+                for k in range(field.shape[2]):
+                    handle.write(f"{field[j, i, k]:.10f}\n")
+
+
+def gate_heat_orient(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "g6-heat", args.work)
+    tol = heat_tolerances()
+    base = case_dir / "orient-base.yaml"
+    if not validate_config(args.frehg, base):
+        print(f"heat-orient battery: {CAPABILITY_ABSENT_Q5}")
+        print("heat-orient battery: FAIL")
+        return 1
+    nx = ny = 8
+    nz = 6
+    dx = dy = 0.5
+    dz = 0.25
+    length = nx * dx
+    ic_base = heat_orient_ic(nx, ny, nz, dx, dy, dz)
+    (case_dir / "input").mkdir(exist_ok=True)
+    with open(base, encoding="utf-8") as handle:
+        base_doc = yaml.safe_load(handle)
+    t_fields = {}
+    h_fields = {}
+    # The §8.1 battery runs strict-mode (rank/orientation-invariant
+    # preconditioning) so the tolerance bounds rounding, not solver noise.
+    strict = STRICT_PETSC_OPTIONS_GW
+    for name, (array_op, coord_op) in gate_heat.dihedral_table(length).items():
+        ic = np.stack([array_op(ic_base[:, :, k]) for k in range(nz)], axis=2)
+        write_ic_raster(case_dir / "input" / f"orient_ic_{name}.dat", ic)
+        doc = yaml.safe_load(yaml.safe_dump(base_doc))
+        doc["simulation"]["id"] = f"g6-orient-{name}"
+        doc["initial_conditions"]["temperature"]["groundwater"] = {
+            "file": f"input/orient_ic_{name}.dat"}
+        for bc in doc["boundary_conditions"]:
+            poly = [list(coord_op(float(p[0]), float(p[1]))) for p in
+                    bc["region"]["polygon"]]
+            bc["region"]["polygon"] = poly
+        config = case_dir / f"orient-{name}.yaml"
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks, strict)
+        t_out = int(base_doc["time"]["t_end"])
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            t_fields[name] = handle[f"/temperature/temperature/{t_out}"][:].reshape(
+                ny, nx, nz)
+            h_fields[name] = handle[f"/groundwater/hydraulic_head/{t_out}"][:].reshape(
+                ny, nx, nz)
+        (case_dir / "out" / "output.h5").unlink()
+    ok_t, msgs_t = gate_heat.check_heat_orientations(
+        t_fields, length, float(tol["orient"]["tol_abs"]), "temperature")
+    ok_h, msgs_h = gate_heat.check_heat_orientations(
+        h_fields, length, float(tol["orient"]["tol_abs"]), "head")
+    for msg in msgs_t + msgs_h:
+        print(f"  {msg}")
+    ok = ok_t and ok_h
+    print("heat-orient battery:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_heat_restart(args: argparse.Namespace) -> int:
+    """Two-scalar restart determinism (v2 plan §10 risk register): the
+    heat battery base case run straight vs checkpoint-restarted must
+    agree bitwise-class (1e-12 rel) on temperature, head, and moisture."""
+    case_dir = stage_case(args.repo, "g6-heat", args.work)
+    base = case_dir / "orient-base.yaml"
+    if not validate_config(args.frehg, base):
+        print(f"heat-restart determinism: {CAPABILITY_ABSENT_Q5}")
+        print("heat-restart determinism: FAIL")
+        return 1
+    nx = ny = 8
+    nz = 6
+    ic = heat_orient_ic(nx, ny, nz, 0.5, 0.5, 0.25)
+    (case_dir / "input").mkdir(exist_ok=True)
+    write_ic_raster(case_dir / "input" / "orient_ic_id.dat", ic)
+
+    def use_ic(doc):
+        doc["initial_conditions"]["temperature"]["groundwater"] = {
+            "file": "input/orient_ic_id.dat"}
+        doc["output"]["variables"]["groundwater"] = ["hydraulic_head", "water_content"]
+        return doc
+
+    def add_checkpoint(doc):
+        use_ic(doc)
+        doc["output"]["checkpoint"] = {"interval": 10000}
+        doc["output"]["filename"] = "out/straight.h5"
+        return doc
+
+    def add_restart(doc):
+        use_ic(doc)
+        doc["restart"] = {"enabled": True, "file": "out/straight.h5", "time": 10000}
+        doc["output"]["filename"] = "out/restarted.h5"
+        return doc
+
+    straight = case_dir / "straight.yaml"
+    shutil.copy(base, straight)
+    rewrite_config(straight, add_checkpoint)
+    run_case(args.frehg, straight, case_dir, args.mpiexec, args.ranks)
+    restarted = case_dir / "restarted.yaml"
+    shutil.copy(base, restarted)
+    rewrite_config(restarted, add_restart)
+    run_case(args.frehg, restarted, case_dir, args.mpiexec, args.ranks)
+
+    ok = True
+    with h5py.File(case_dir / "out" / "straight.h5", "r") as a, \
+            h5py.File(case_dir / "out" / "restarted.h5", "r") as b:
+        for group in ("/temperature/temperature", "/groundwater/hydraulic_head",
+                      "/groundwater/water_content"):
+            t = 20000
+            va = a[f"{group}/{t}"][:]
+            vb = b[f"{group}/{t}"][:]
+            scale = max(float(np.abs(va).max()), 1.0e-12)
+            diff = float(np.abs(va - vb).max()) / scale
+            print(f"  restart {group}@{t}: max rel diff = {diff:.3e}")
+            if diff > 1.0e-12:
+                ok = False
+    print("heat-restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_rank_invariance_heat(args: argparse.Namespace) -> int:
+    """The §7.1 decomposition lane for the temperature module: the heat
+    battery base case at 1/2/4 ranks, strict (rounding-only) and default
+    (production-preconditioner drift) modes."""
+    strict = args.mode == "strict"
+    extra = STRICT_PETSC_OPTIONS_GW if strict else []
+    limit = 1.0e-12 if strict else 1.0e-4
+    nx = ny = 8
+    nz = 6
+    ic = heat_orient_ic(nx, ny, nz, 0.5, 0.5, 0.25)
+    outputs = {}
+    for ranks in (1, 2, 4):
+        case_dir = stage_case(args.repo, "g6-heat", args.work / f"n{ranks}")
+        if not validate_config(args.frehg, case_dir / "orient-base.yaml"):
+            print(f"heat rank invariance: {CAPABILITY_ABSENT_Q5}")
+            print(f"heat rank invariance ({args.mode}): FAIL")
+            return 1
+        (case_dir / "input").mkdir(exist_ok=True)
+        write_ic_raster(case_dir / "input" / "orient_ic_id.dat", ic)
+
+        def use_ic(doc):
+            doc["initial_conditions"]["temperature"]["groundwater"] = {
+                "file": "input/orient_ic_id.dat"}
+            return doc
+
+        rewrite_config(case_dir / "orient-base.yaml", use_ic)
+        run_case(args.frehg, case_dir / "orient-base.yaml", case_dir, args.mpiexec,
+                 ranks, extra)
+        outputs[ranks] = case_dir / "out" / "output.h5"
+    ok = True
+    with h5py.File(outputs[1], "r") as base:
+        for ranks in (2, 4):
+            with h5py.File(outputs[ranks], "r") as other:
+                worst = 0.0
+                for group in ("/temperature/temperature", "/groundwater/hydraulic_head"):
+                    for t in base[group]:
+                        a = base[f"{group}/{t}"][:]
+                        b = other[f"{group}/{t}"][:]
+                        scale = max(float(np.abs(a).max()), 1.0e-12)
+                        worst = max(worst, float(np.abs(a - b).max()) / scale)
+                print(f"  n=1 vs n={ranks} [{args.mode}]: max rel diff = {worst:.3e} "
+                      f"(allowed {limit:.0e})")
+                if worst > limit:
+                    ok = False
+    print(f"heat rank invariance ({args.mode}):", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gate", choices=["b1", "b2", "b3", "b4", "b5", "b6", "b1-restart",
@@ -1837,7 +2478,9 @@ def main() -> int:
                                          "rank-invariance", "rank-invariance-b2",
                                          "rank-invariance-b5", "b6-gw-smoke",
                                          "smoke-b5", "smoke-b6", "g4", "g5",
-                                         "g9", "g10", "wind-orient"])
+                                         "g9", "g10", "wind-orient", "g6", "g7",
+                                         "g8", "heat-orient", "heat-restart",
+                                         "rank-invariance-heat"])
     parser.add_argument("--frehg", type=Path, required=True)
     parser.add_argument("--mpiexec", type=Path, required=True)
     parser.add_argument("--repo", type=Path, required=True)
@@ -1926,6 +2569,18 @@ def main() -> int:
         return gate_g10(args)
     if args.gate == "wind-orient":
         return gate_wind_orient(args)
+    if args.gate == "g6":
+        return gate_g6(args)
+    if args.gate == "g7":
+        return gate_g7(args)
+    if args.gate == "g8":
+        return gate_g8(args)
+    if args.gate == "heat-orient":
+        return gate_heat_orient(args)
+    if args.gate == "heat-restart":
+        return gate_heat_restart(args)
+    if args.gate == "rank-invariance-heat":
+        return gate_rank_invariance_heat(args)
     return gate_rank_invariance(args)
 
 

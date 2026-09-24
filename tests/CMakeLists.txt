@@ -159,6 +159,16 @@ add_test(NAME unit.g910_gates.negative
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_g910_gates.py)
 set_tests_properties(unit.g910_gates.negative PROPERTIES LABELS "unit")
 
+# g6/g7/g8 gate-logic battery (v2 plan §6.3, Q5): every closed form checked
+# two independent ways (hand values, limiting cases, ODE/PDE residual
+# substitution), the bulk-formula chain pinned to hand-computed spot values,
+# the dihedral array/coordinate ops proven consistent, and every criterion
+# provably able to fail on corrupted synthetic inputs. Green while the
+# g6/g7/g8 gates themselves stay red (§6.1).
+add_test(NAME unit.g678_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_g678_gates.py)
+set_tests_properties(unit.g678_gates.negative PROPERTIES LABELS "unit")
+
 # ---------------------------------------------------------------------------
 # Benchmark configuration validation (part of the P0 exit criteria)
 # ---------------------------------------------------------------------------
@@ -174,7 +184,16 @@ foreach(case
     g4-evap/g4a-drawdown
     g4-evap/g4b-concentration
     g4-evap/g4d-drain
-    g9-wind/g9a-setup)
+    g9-wind/g9a-setup
+    g6-heat/g6a-bp
+    g6-heat/g6b-ogata
+    g6-heat/g6c-stallman
+    g6-heat/g6c-coupled
+    g6-heat/orient-base
+    g7-heat/g7a-edinger
+    g7-heat/g7a2-bulk
+    g7-heat/g7b-channel
+    g8-hrl/g8-hrl)
   # g4c-bulk and the two g5 configurations are deliberately NOT in this
   # list: they are written to the Q4 target schema (atmosphere block /
   # bulk evaporation) and fail --validate until the capability lands —
@@ -348,6 +367,48 @@ add_test(NAME regression.wind_orient
           --work ${CMAKE_BINARY_DIR}/regression/wind-orient)
 set_tests_properties(regression.wind_orient PROPERTIES LABELS "regression"
   ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# v2 Q5 gates (plan §4.2, V2-A17; authored FAILING per §6.1). Every case
+# uses the Q5 target schema (modules.temperature) and fails "capability
+# absent" until it lands. g6/g7 and the batteries are per-PR (analytic
+# and cheap); g8's two convection-onset runs are nightly-class like g5.
+add_test(NAME regression.g6
+  COMMAND ${_regress} g6 ${_regress_args} --work ${CMAKE_BINARY_DIR}/regression/g6)
+set_tests_properties(regression.g6 PROPERTIES LABELS "regression"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 3600)
+
+add_test(NAME regression.g7
+  COMMAND ${_regress} g7 ${_regress_args} --work ${CMAKE_BINARY_DIR}/regression/g7)
+set_tests_properties(regression.g7 PROPERTIES LABELS "regression"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+add_test(NAME regression.g8
+  COMMAND ${_regress} g8 ${_regress_args} --work ${CMAKE_BINARY_DIR}/regression/g8)
+set_tests_properties(regression.g8 PROPERTIES LABELS "regression_nightly"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 21600)
+
+add_test(NAME regression.heat_orient
+  COMMAND ${_regress} heat-orient ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/heat-orient)
+set_tests_properties(regression.heat_orient PROPERTIES LABELS "regression"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# Two-scalar restart determinism (v2 plan §10 risk register: the
+# two-scalar checkpoint layout is gated before the physics lands).
+add_test(NAME regression.heat_restart
+  COMMAND ${_regress} heat-restart ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/heat-restart)
+set_tests_properties(regression.heat_restart PROPERTIES LABELS "regression"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# The §7.1 decomposition lane for the temperature module.
+foreach(mode strict default)
+  add_test(NAME regression.heat_rank_invariance.${mode}
+    COMMAND ${_regress} rank-invariance-heat --mode ${mode} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/rank-heat-${mode})
+  set_tests_properties(regression.heat_rank_invariance.${mode} PROPERTIES
+    LABELS "regression;mpi" ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 1800)
+endforeach()
 
 add_test(NAME regression.g5.geng2015
   COMMAND ${_regress} g5 ${_regress_args}

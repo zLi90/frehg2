@@ -67,6 +67,7 @@ class Simulation {
   void recordMassAudit(real_t t);
   void recordGwMassAudit(real_t t);
   void recordTransportAudit(real_t t);
+  void recordTemperatureAudit(real_t t);
   void writeCheckpoint(real_t t, long step, real_t labelTime = -1.0);
   /// Refresh the run record's dynamic sections (solver telemetry, closure)
   /// and rewrite it. Collective (v2 plan §2A).
@@ -84,6 +85,7 @@ class Simulation {
   std::unique_ptr<gw::RichardsSolver> gw_;
   std::unique_ptr<coupling::Coupler> coupler_;
   std::unique_ptr<transport::ScalarSolver> transport_;
+  std::unique_ptr<transport::ScalarSolver> temperature_;  ///< second scalar (Q5)
   std::unique_ptr<io::Hdf5Output> output_;
   std::unique_ptr<io::Checkpoint> checkpoint_;
   std::unique_ptr<io::RunRecord> runRecord_;
@@ -91,6 +93,7 @@ class Simulation {
   std::unique_ptr<io::Monitor> massAudit_;
   std::unique_ptr<io::Monitor> gwMassAudit_;
   std::unique_ptr<io::Monitor> transportAudit_;
+  std::unique_ptr<io::Monitor> temperatureAudit_;
 
   /// Current adaptive subsurface step [s] (groundwater-only runs).
   real_t dtg_ = 0.0;
@@ -116,6 +119,16 @@ class Simulation {
   real_t cumTrSubsBoundary_ = 0.0;
   real_t cumTrSubsAdjust_ = 0.0;
   real_t cumTrSubsAnchor_ = 0.0;
+  // Temperature-instance cumulative budgets (the heat ledger, v2 Q5).
+  real_t cumTpExchange_ = 0.0;
+  real_t cumTpSurfSource_ = 0.0;
+  real_t cumTpSurfBoundary_ = 0.0;
+  real_t cumTpSurfAdjust_ = 0.0;
+  real_t cumTpSurfAnchor_ = 0.0;
+  real_t cumTpSurfAtmos_ = 0.0;
+  real_t cumTpSubsBoundary_ = 0.0;
+  real_t cumTpSubsAdjust_ = 0.0;
+  real_t cumTpSubsAnchor_ = 0.0;
 };
 
 }  // namespace frehg::driver

@@ -1,0 +1,80 @@
+# g7(a) stage 2 — full bulk-formula equilibrium consistency (v2 plan
+# §4.2): the same still basin under constant met forcing with
+# surface_exchange mode bulk. Q_net = Q_sw + Q_lw,in - eps sigma T_K^4
+# - Q_lat(T) - Q_sens(T), eps = 0.97, with the latent and sensible
+# terms from the shared atm/ module (Tetens q_sat, Liu R_air with the
+# still-air wind floor, L_v(T) = 2.501e6 - 2370 T; V2-A17). The basin
+# must settle at the equilibrium temperature found OFFLINE by
+# root-finding Q_net(T) = 0 with the identical formula chain
+# (gate_heat.py), within 0.05 C — the consistency check on the
+# nonlinear flux terms. Forcing here roots at T_e = 20.55 C (hand check
+# in scripts/test_g678_gates.py: Q_net(20 C) = +44.9, Q_net(22 C) =
+# -122.2 W/m2); effective K_e = -dQ/dT ~ 84 W/m2/K -> e-fold ~0.58 d,
+# run 10 d ~ 17 e-folds. The atmosphere block carries no
+# surface_temperature: the heat exchange evaluates the bulk chain at
+# the LOCAL water temperature (V2-A17), and no Q4 evaporation consumer
+# is configured.
+# Q5 target schema — red until the capability lands.
+simulation:
+  id: g7a2-bulk
+  title: g7(a) stage 2 bulk-formula equilibrium consistency
+
+domain:
+  nx: 4
+  ny: 3
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 0.5
+  bottom_elevation: {constant: -1.0}
+
+time:
+  dt: 600.0
+  t_end: 864000.0
+  output_interval: 43200.0
+
+modules:
+  surface_water: true
+  temperature: true
+
+atmosphere:
+  air_temperature: {constant: 25.0}     # [C]
+  pressure: {constant: 101.325}         # [kPa]
+  relative_humidity: {constant: 0.6}    # of q_sat(T_air)
+  wind_speed: {constant: 2.0}           # [m/s]
+  shortwave: {constant: 150.0}          # absorbed SW [W/m2]
+  longwave_in: {constant: 350.0}        # incident LW [W/m2]
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.0}
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+
+temperature:
+  scheme: {advection: upwind}
+  surface_diffusivity: {x: 0.0, y: 0.0}
+  heat_capacity_water: 4.184e6
+  surface_exchange:
+    mode: bulk
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+  temperature:
+    surface: {constant: 28.0}
+
+boundary_conditions:
+  - name: walls
+    region: {polygon: [[-1.0, -1.0], [5.0, -1.0], [5.0, 4.0], [-1.0, 4.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    temperature: [temperature_surface]
+  monitors:
+    - {name: t_probe, i: 1, j: 1, variables: [temperature_surface]}

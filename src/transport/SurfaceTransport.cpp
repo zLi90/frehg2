@@ -43,7 +43,8 @@ void ScalarSolver::stageSurfaceFarNeighbors() {
         fym(j, i) = s(j - 1, i);
         fyp(j, i) = s(j + 1, i);
       });
-  halo_.exchange({"s_far_xm_2d", "s_far_xp_2d", "s_far_ym_2d", "s_far_yp_2d"});
+  const std::string p = spec_.prefix + "_";
+  halo_.exchange({p + "far_xm_2d", p + "far_xp_2d", p + "far_ym_2d", p + "far_yp_2d"});
 }
 
 void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
@@ -63,7 +64,31 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   const real_t limHi = boundMax_;
   const real_t limLo = boundMin_;
   const bool hasMax = hasBoundMax_;
+  const bool hasMin = hasBoundMin_;
   const real_t difux = difuX_, difuy = difuY_;
+  // v2 Q5 thermal switches (V2-A17): temperature skips the rain/evap
+  // dilution (rain enters and evaporation leaves at the cell's own
+  // temperature — the volume change carries no temperature change; the
+  // rain-heat approximation lands in the anchor column), and may carry a
+  // surface heat-exchange source, applied inside the update pass on the
+  // final volume basis and audited into surf_atmos.
+  const bool dilution = !spec_.isTemperature;
+  const bool atmosEquilibrium =
+      spec_.exchange == SurfaceExchangeConfig::Mode::Equilibrium;
+  const bool atmosBulk = spec_.exchange == SurfaceExchangeConfig::Mode::Bulk;
+  const real_t equilibriumT = spec_.equilibriumT;
+  const real_t equilibriumK = spec_.equilibriumK;
+  const real_t rhoCw = spec_.heatCapacityWater;
+  atm::MetSample metNow;
+  if (atmosBulk) {
+    metNow = met_.sample(t);
+  }
+  const real_t metAirT = metNow.airTemperatureC;
+  const real_t metPressure = metNow.pressureKpa;
+  const real_t metWind = metNow.windSpeed;
+  const real_t metQAir = metNow.airSpecificHumidity;
+  const real_t metShortwave = metNow.shortwave;
+  const real_t metLongwaveIn = metNow.longwaveIn;
 
   stageSurfaceFarNeighbors();
 
@@ -305,11 +330,13 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   const real_t evapRate = evap;
   real_t adjustMass = 0.0;
   real_t anchorMass = 0.0;
+  real_t atmosMass = 0.0;
   Kokkos::parallel_reduce(
       "transport_surface_update",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
           {1, 1}, {nyl + 1, nxl + 1}),
-      KOKKOS_LAMBDA(const int j, const int i, real_t& sumAdjust, real_t& sumAnchor) {
+      KOKKOS_LAMBDA(const int j, const int i, real_t& sumAdjust, real_t& sumAnchor,
+                    real_t& sumAtmos) {
         const bool wet = (vflux(j, i) > 0.0 && dept(j, i) > 0.0);
         real_t value = wet ? sm(j, i) / vflux(j, i) : 0.0;
         const real_t raw = value;
@@ -339,16 +366,18 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
           }
           if (hasMax && value >= limHi) {
             value = limHi;
-          } else if (value < limLo) {
+          } else if (hasMin && value < limLo) {
             value = limLo;
           }
           sumAdjust += (value - raw) * vflux(j, i);
         } else {
           sumAdjust -= sm(j, i);
         }
-        // Rain/evaporation dilution (scalar.c:243-254).
+        // Rain/evaporation dilution (scalar.c:243-254; salinity only —
+        // temperature is invariant under volume exchange at the cell's own
+        // temperature, V2-A17).
         real_t vre = 0.0;
-        if (vflux(j, i) > 0.0) {
+        if (dilution && vflux(j, i) > 0.0) {
           const real_t area = (dept(j, i) > 0.0) ? cellArea : 0.0;
           const real_t cellRain = rainRate * rainMask(j, i);
           if (dept(j, i) > minDepth && cellRain > 0.0) {
@@ -358,16 +387,34 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
           }
           value = value * vflux(j, i) / (vflux(j, i) + vre);
         }
+        // Surface heat exchange (v2 Q5, plan §4.1): an explicit source on
+        // the final volume basis, after the limiter — an atmospheric flux
+        // must be able to cross the local advective extrema (relaxation
+        // toward a T_e below the wet-stencil minimum would otherwise
+        // stall). Booked into surf_atmos; the anchor below then closes the
+        // ledger on the final value.
+        const real_t vBasis = vflux(j, i) + vre;
+        if ((atmosEquilibrium || atmosBulk) && dept(j, i) > 0.0 && vBasis > 0.0) {
+          const real_t qnet =
+              atmosEquilibrium
+                  ? -equilibriumK * (value - equilibriumT)
+                  : atm::netHeatFlux(value, metAirT, metPressure, metWind, metQAir,
+                                     metShortwave, metLongwaveIn);
+          const real_t dTv = dt * cellArea * qnet / rhoCw;  // [K m^3]
+          value += dTv / vBasis;
+          sumAtmos += dTv;
+        }
         s(j, i) = value;
         // Ledger re-anchor: the mass now lives on the actual volume, not
         // the (lagged) flux volume the update divided by.
         if (wet) {
-          sumAnchor += value * (dept(j, i) * cellArea - (vflux(j, i) + vre));
+          sumAnchor += value * (dept(j, i) * cellArea - vBasis);
         }
       },
-      adjustMass, anchorMass);
+      adjustMass, anchorMass, atmosMass);
   audit_.surfAdjust = adjustMass;
   audit_.surfAnchor = anchorMass;
+  audit_.surfAtmos = atmosMass;
 
   // Ghost, tide, and dry rules in the legacy order (scalar.c:263-288):
   // zero-gradient edge ghosts, then the Dirichlet stage salinity, then the
@@ -427,7 +474,7 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
         }
       });
 
-  halo_.exchange({"s_surf"});
+  halo_.exchange({spec_.prefix + "_surf"});
 }
 
 }  // namespace frehg::transport

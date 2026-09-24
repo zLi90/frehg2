@@ -183,8 +183,9 @@ void ScalarSolver::stageSubsurfaceFarNeighbors() {
         fyp(j, i, k) = s(j + 1, i, k);
         kzLower(j, i, k) = kzF(j, i, k + 1);
       });
-  halo_.exchange({"s_far_xm_3d", "s_far_xp_3d", "s_far_ym_3d", "s_far_yp_3d", "s_kz_lower",
-                  "s_gw_kx", "s_gw_ky"});
+  const std::string p = spec_.prefix + "_";
+  halo_.exchange({p + "far_xm_3d", p + "far_xp_3d", p + "far_ym_3d", p + "far_yp_3d",
+                  p + "kz_lower", p + "gw_kx", p + "gw_ky"});
 }
 
 void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
@@ -200,7 +201,12 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   const real_t limHi = boundMax_;
   const real_t limLo = boundMin_;
   const bool hasMax = hasBoundMax_;
+  const bool hasMin = hasBoundMin_;
   const bool legacyAllowance = legacyEvapAllowance_;
+  // Thermal switches (v2 Q5, V2-A17). kappaFactor = 0 for salinity keeps
+  // every added term an exact +0.0 — the salinity arithmetic is unchanged.
+  const bool thermal = spec_.isTemperature;
+  const real_t kappaFactor = spec_.kappaFactor;
 
   stageSubsurfaceFarNeighbors();
   updateDispersionTensor();
@@ -239,6 +245,9 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   Field3<PetscInt> gid = grid_.gid3();
   Field2<int> kTop = kTop_;
   Field2<int> sideYp = subs_.sideCodeYp;
+  Field2<int> sideYm = subs_.sideCodeYm;
+  Field2<int> sideXm = subs_.sideCodeXm;
+  Field2<int> sideXp = subs_.sideCodeXp;
   Field2<int> topCode = subs_.topCode;
   Field2<real_t> topValue = subs_.topValue;
   Field2<int> cauchy = cauchyTop_;
@@ -274,7 +283,12 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         const bool isTop = (k == columnTop);
         const real_t volume = az * dz3d(j, i, k);
 
-        real_t mass = s(j, i, k) * wcn(j, i, k) * volume;
+        // Thermal retardation (V2-A17): the subsurface mass basis is
+        // theta + kappa, kappa = (1 - theta_s)(rho c)_s/(rho c)_w; the
+        // conductive fraction holds heat but does not advect (the flux
+        // divergence below stays a water-volume divergence).
+        const real_t kap = kappaFactor * (1.0 - wcs(j, i, k));
+        real_t mass = s(j, i, k) * (wcn(j, i, k) + kap) * volume;
 
         // Far neighbors for the superbee stencils.
         const real_t sIp2 = (i + 2 <= nxl + 1) ? s(j, i + 2, k) : fxp(j, i + 1, k);
@@ -394,8 +408,16 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           // A scalar_cauchy column (v2 §3.2, Geng & Boufadel Eq. (7))
           // passes no scalar mass through the top face regardless of the
           // flow-side top code: water leaves, salt stays.
+          // TEMPERATURE (V2-A17): heat travels with the water — uncoupled
+          // top faces advect the donor value in BOTH directions (outflow
+          // removes heat at the cell's own T, exact when dt = dtg; inflow
+          // enters at the pinned/zero-gradient ghost value, which is the
+          // top cell itself). The salt-specific zero-flux machinery never
+          // applies.
           const bool topFlux = (topCode(j, i) == kBcFlux);
-          if (cauchy(j, i) != 0) {
+          if (thermal) {
+            skm = coupled ? 0.0 : ((qzm != 0.0) ? s(j, i, k) : 0.0);
+          } else if (cauchy(j, i) != 0) {
             skm = 0.0;
           } else if (coupled) {
             skm = 0.0;
@@ -446,8 +468,10 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           // zero advective value above, the total scalar flux through the
           // face is exactly zero (the Eq. (7) relation, discretized).
           if (coupled && dept(j, i) > 0.0) {
-            const real_t dzzGhost =
-                molecular * wcs(j, i, k) + lon * Kokkos::fabs(qzF(j, i, k));
+            // Solute molecular diffusion is pore-water-only (times theta_s);
+            // thermal conduction is a bulk property used as-is (V2-A17).
+            const real_t molBase = thermal ? molecular : molecular * wcs(j, i, k);
+            const real_t dzzGhost = molBase + lon * Kokkos::fabs(qzF(j, i, k));
             jkm = dzzGhost * az * (s(j, i, k) - sSurf(j, i)) / dz3d(j, i, k);
           }
         } else {
@@ -474,11 +498,19 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
             lo = value;
           }
         };
-        if (kx(j, i, k) > 0.0 && gid(j, i + 1, k) >= 0) {
-          extend(s(j, i + 1, k));
+        if (kx(j, i, k) > 0.0) {
+          if (gid(j, i + 1, k) >= 0) {
+            extend(s(j, i + 1, k));
+          } else if (thermal && eastCell && sideXp(j, i) != kBcNoFlux) {
+            extend(s(j, i + 1, k));
+          }
         }
-        if (kx(j, i - 1, k) > 0.0 && gid(j, i - 1, k) >= 0) {
-          extend(s(j, i - 1, k));
+        if (kx(j, i - 1, k) > 0.0) {
+          if (gid(j, i - 1, k) >= 0) {
+            extend(s(j, i - 1, k));
+          } else if (thermal && westCell && sideXm(j, i) != kBcNoFlux) {
+            extend(s(j, i - 1, k));
+          }
         }
         if (ky(j, i, k) > 0.0) {
           if (gid(j + 1, i, k) >= 0) {
@@ -486,11 +518,23 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           } else if (northCell && sideYp(j, i) != kBcNoFlux) {
             // The prescribed side ghost feeds the limiter (scalar.c:397-400)
             // — the sea-side Dirichlet salinity may raise the local bound.
+            // Legacy defines this admission for y+ ONLY (the b6 sea side,
+            // golden-pinned for salinity). The TEMPERATURE instance admits
+            // prescribed side ghosts on ALL FOUR sides (the x-/x+/y-
+            // branches here and above/below) — the y+-only rule is
+            // orientation-asymmetric and no golden pins temperature to it
+            // (V2-A17; caught by the heat 8-orientation battery: a side
+            // thermal Dirichlet was limiter-admitted on y+ but clipped on
+            // the other sides).
             extend(s(j + 1, i, k));
           }
         }
-        if (ky(j - 1, i, k) > 0.0 && gid(j - 1, i, k) >= 0) {
-          extend(s(j - 1, i, k));
+        if (ky(j - 1, i, k) > 0.0) {
+          if (gid(j - 1, i, k) >= 0) {
+            extend(s(j - 1, i, k));
+          } else if (thermal && southCell && sideYm(j, i) != kBcNoFlux) {
+            extend(s(j - 1, i, k));
+          }
         }
         if (kzLower(j, i, k) > 0.0 && k + 1 < nz && gid(j, i, k + 1) >= 0) {
           extend(s(j, i, k + 1));
@@ -543,6 +587,7 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   // (volume_by_flux_subs, groundwater.c:1634-1644, evaluated over the last
   // substep), the qtop quirk, the limiter, and the bounds.
   Field3<real_t> wcNow = subs_.wc;
+  Field3<real_t> wcsUpd = subs_.wcs;
   real_t adjustMass = 0.0;
   real_t anchorMass = 0.0;
   long negatives = 0;
@@ -557,8 +602,9 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           return;
         }
         const real_t volume = az * dz3d(j, i, k);
+        const real_t kap = kappaFactor * (1.0 - wcsUpd(j, i, k));
         const real_t vgflux =
-            wcn(j, i, k) * volume +
+            (wcn(j, i, k) + kap) * volume +
             dtgLast * (qx(j, i, k) - qx(j, i - 1, k) + qy(j, i, k) - qy(j - 1, i, k) +
                        qzF(j, i, k + 1) - qzF(j, i, k));
         real_t value = (vgflux > 0.0) ? sm(j, i, k) / vgflux : 0.0;
@@ -616,7 +662,7 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         }
         if (hasMax && value > limHi) {
           value = limHi;
-        } else if (value < limLo) {
+        } else if (hasMin && value < limLo) {
           if (value < limLo - 0.01) {
             ++badCount;
           }
@@ -624,12 +670,13 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         }
         if (vgflux > 0.0) {
           sumAdjust += (value - raw) * vgflux;
-          // Ledger re-anchor: the mass now lives on θ_new V, which differs
-          // from the flux volume by the reallocation/clamp adjustments.
-          sumAnchor += value * (wcNow(j, i, k) * volume - vgflux);
+          // Ledger re-anchor: the mass now lives on the (theta_new + kappa)
+          // basis, which differs from the flux volume by the
+          // reallocation/clamp adjustments.
+          sumAnchor += value * ((wcNow(j, i, k) + kap) * volume - vgflux);
         } else {
           sumAdjust -= sm(j, i, k);
-          sumAnchor += value * wcNow(j, i, k) * volume;
+          sumAnchor += value * (wcNow(j, i, k) + kap) * volume;
         }
         s(j, i, k) = value;
       },
@@ -641,6 +688,9 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
                          << " subsurface cell(s) clipped from below the scalar bound");
   }
 
+  // Re-impose the pinned top/bottom cells (v2 Q5) before the ghost pass so
+  // the zero-gradient edge ghosts propagate the pinned values.
+  applyCellPins(t);
   enforceSubsurfaceBc(t);
 
   // Snapshot the top-cell Dzz for the next surface step's exchange term
@@ -656,7 +706,7 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         dzzTop(j, i) = (columnTop >= 0) ? dzz(j, i, columnTop) : 0.0;
       });
 
-  halo_.exchangeWithCorners({"s_subs"});
+  halo_.exchangeWithCorners({spec_.prefix + "_subs"});
 }
 
 void ScalarSolver::enforceSubsurfaceBc(real_t t) {
