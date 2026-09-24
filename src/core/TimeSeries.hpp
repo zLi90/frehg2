@@ -49,6 +49,13 @@ class TimeSeries {
   /// \return last sample time (fatal on empty series).
   real_t tMax() const;
 
+  /// \name Raw sample access (v2 Q6: the wind module rebuilds direction
+  /// series as unit-vector component series for circle-safe interpolation)
+  ///@{
+  const std::vector<real_t>& times() const { return times_; }
+  const std::vector<real_t>& values() const { return values_; }
+  ///@}
+
  private:
   std::vector<real_t> times_;
   std::vector<real_t> values_;

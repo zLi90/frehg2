@@ -32,14 +32,14 @@ void SurfaceSolver::momentumSource() {
   Field2<real_t> deptx = deptx_, depty = depty_;
 
   const bool wind = windCfg_.enabled;
-  const real_t windDrag = windCfg_.cd;
+  // Per-step wind sample (v2 Q6, WindForcing): speed, direction in
+  // radians from +x (the legacy compass arithmetic preserved on the
+  // speed/direction path; atan2 on the component path), and Cd under the
+  // configured law (the legacy constant Cw by default).
+  const real_t windDrag = windCd_;
   const real_t windAttenuation = windCfg_.attenuationDepth;
   const real_t hD = thinLayerDepth_;
-  // Wind direction measured from north plus the grid-to-north rotation,
-  // converted to radians from +x (legacy wind_source, shallowwater.c:263-265
-  // with pi truncated to the legacy literal 3.1415926).
-  const real_t legacyPi = 3.1415926;
-  const real_t omega = (windDirection_ + windCfg_.northAngle) * legacyPi / 180.0;
+  const real_t omega = windOmega_;
   const real_t windSpeed = windSpeed_;
 
   Kokkos::parallel_for(

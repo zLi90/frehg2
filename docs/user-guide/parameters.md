@@ -66,13 +66,19 @@ At least one of `surface_water`/`groundwater` must be true.
 | `surface_water.min_depth` | real > 0 | yes | — | wet/dry threshold [m] (legacy `min_dept`) |
 | `surface_water.wetting_face_depth` | real > 0 | yes | — | face-wetting threshold [m] (legacy `wtfh`) |
 | `surface_water.wind.enabled` | bool | no | false | quadratic wind stress |
-| `surface_water.wind.cd` | real ≥ 0 | no | 0.0013 | drag coefficient (legacy `Cw`) |
+| `surface_water.wind.law` | `constant` \| `garratt` \| `smith-banke` \| `wu` \| `large-pond` | no | constant | v2 Q6 Cd(U₁₀) law: `constant` is the uncapped legacy `Cw`; the published laws — Garratt (1977) (0.75+0.067·U)e-3, Smith & Banke (1975) (0.63+0.066·U)e-3, Wu (1982) (0.8+0.065·U)e-3, Large & Pond (1981) piecewise — are capped at `cap` |
+| `surface_water.wind.cd` | real ≥ 0 | no | 0.0013 | drag coefficient (legacy `Cw`; constant law only) |
+| `surface_water.wind.cap` | real > 0 | no | 3.5e-3 | Cd cap for the U₁₀ laws (not the constant law) |
 | `surface_water.wind.attenuation_depth` | real > 0 | no | 5.0 | thin-layer attenuation depth (legacy `CwT`) |
-| `surface_water.wind.north_angle` | real | no | 0 | grid-to-north rotation [deg] |
-| `surface_water.wind.speed.constant` | real | one of | — | wind speed [m/s] |
+| `surface_water.wind.north_angle` | real | no | 0 | grid-to-north rotation [deg] (compass form only) |
+| `surface_water.wind.speed.constant` | real | one of | — | wind speed [m/s] (compass form) |
 | `surface_water.wind.speed.series.file` | path | one of | — | wind speed series |
 | `surface_water.wind.direction.constant` | real | one of | — | wind direction [deg] |
-| `surface_water.wind.direction.series.file` | path | one of | — | wind direction series |
+| `surface_water.wind.direction.series.file` | path | one of | — | wind direction series; interpolated on the circle (unit-vector chord — 350°→10° passes through 0°, never 180°; sample finely enough that successive directions differ well below 180°) |
+| `surface_water.wind.u10.constant` | real | one of | — | v2 Q6 grid-frame wind +x component [m/s]; the (u10, v10) pair replaces speed/direction (wrap-free) and ignores `north_angle` |
+| `surface_water.wind.u10.series.file` | path | one of | — | u10 series |
+| `surface_water.wind.v10.constant` | real | one of | — | wind +y component [m/s] |
+| `surface_water.wind.v10.series.file` | path | one of | — | v10 series |
 | `surface_water.rainfall.constant` | real | one of | 0 | rain rate [m/s] |
 | `surface_water.rainfall.series.file` | path | one of | — | rain series |
 | `surface_water.rainfall.exclude.polygon` | [x, y] list ≥ 3 | no | — | region receiving no rainfall. Expresses the legacy hardcoded skip of the last global row (`shallowwater.c:596`), which the b1 goldens embed for their outlet row; omit it for uniform rain |

@@ -11,6 +11,7 @@
 #include "core/Types.hpp"
 #include "swe/SurfaceSolver.hpp"
 #include "swe/SweFormulas.hpp"
+#include "swe/WindForcing.hpp"
 
 #include <gtest/gtest.h>
 #include <mpi.h>
@@ -127,6 +128,116 @@ TEST(SweFormulas, PointImplicitFactor) {
   EXPECT_DOUBLE_EQ(frehg::swe::pointImplicitFactor(5.0, 0.03, 0.4, 2.0),
                    1.0 / (0.5 * 5.0 * 0.03 * 0.4 * 2.0 + 1.0));
   EXPECT_DOUBLE_EQ(frehg::swe::pointImplicitFactor(5.0, 0.03, 0.0, 2.0), 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// v2 Q6 wind: Cd(U10) laws (hand tables per the published formulas, plan
+// §5.3 unit battery) and the WindForcing direction conventions including
+// the 360->0 wrap.
+// ---------------------------------------------------------------------------
+
+TEST(WindForcing, DragLawTablesMatchHandValues) {
+  using frehg::WindConfig;
+  using frehg::swe::windDragCoefficient;
+  const frehg::real_t cap = 3.5e-3;
+  struct Row {
+    frehg::real_t u10;
+    frehg::real_t garratt, smith, wu, largePond;
+  };
+  // Hand-computed from the published formulas (1e-12 relative, plan §5.3):
+  //   garratt   = (0.75 + 0.067 U) 1e-3   (cap 3.5e-3 above ~41.0 m/s)
+  //   smith     = (0.63 + 0.066 U) 1e-3
+  //   wu        = (0.80 + 0.065 U) 1e-3
+  //   large-pond= 1.2e-3 (U < 11) | (0.49 + 0.065 U) 1e-3, both capped
+  const Row rows[] = {
+      {0.0, 0.75e-3, 0.63e-3, 0.80e-3, 1.2e-3},
+      {5.0, 1.085e-3, 0.96e-3, 1.125e-3, 1.2e-3},
+      {10.0, 1.42e-3, 1.29e-3, 1.45e-3, 1.2e-3},
+      {20.0, 2.09e-3, 1.95e-3, 2.10e-3, 1.79e-3},
+      {30.0, 2.76e-3, 2.61e-3, 2.75e-3, 2.44e-3},
+      {40.0, 3.43e-3, 3.27e-3, 3.40e-3, 3.09e-3},
+      {60.0, 3.5e-3, 3.5e-3, 3.5e-3, 3.5e-3},  // every law capped
+  };
+  for (const Row& r : rows) {
+    EXPECT_NEAR(windDragCoefficient(WindConfig::DragLaw::Garratt, r.u10, cap, 0.0),
+                r.garratt, 1.0e-12 * r.garratt) << "garratt U=" << r.u10;
+    EXPECT_NEAR(windDragCoefficient(WindConfig::DragLaw::SmithBanke, r.u10, cap, 0.0),
+                r.smith, 1.0e-12 * r.smith) << "smith-banke U=" << r.u10;
+    EXPECT_NEAR(windDragCoefficient(WindConfig::DragLaw::Wu, r.u10, cap, 0.0),
+                r.wu, 1.0e-12 * r.wu) << "wu U=" << r.u10;
+    EXPECT_NEAR(windDragCoefficient(WindConfig::DragLaw::LargePond, r.u10, cap, 0.0),
+                r.largePond, 1.0e-12 * r.largePond) << "large-pond U=" << r.u10;
+  }
+  // The Large & Pond breakpoint: the published law's 5e-6 jump at 11 m/s.
+  EXPECT_DOUBLE_EQ(windDragCoefficient(WindConfig::DragLaw::LargePond, 10.999, cap, 0.0),
+                   1.2e-3);
+  EXPECT_NEAR(windDragCoefficient(WindConfig::DragLaw::LargePond, 11.0, cap, 0.0),
+              1.205e-3, 1.0e-15);
+  // The constant law is the uncapped legacy Cw.
+  EXPECT_DOUBLE_EQ(windDragCoefficient(WindConfig::DragLaw::Constant, 60.0, cap, 1.0277551),
+                   1.0277551);
+}
+
+TEST(WindForcing, DirectionSeriesInterpolatesAcrossTheWrap) {
+  // A direction series stepping 350 -> 10 degrees must pass through
+  // 0/360, never through 180 (the documented circle convention).
+  const std::string dir = ::testing::TempDir() + "/wind_dir_wrap.dat";
+  {
+    std::ofstream out(dir);
+    out << "0.0 350.0\n100.0 10.0\n";
+  }
+  frehg::WindConfig cfg;
+  cfg.enabled = true;
+  cfg.speed.constant = 10.0;
+  cfg.direction.fromSeries = true;
+  cfg.direction.file = "wind_dir_wrap.dat";
+  const frehg::swe::WindForcing forcing(
+      cfg, [](const std::string& f) { return ::testing::TempDir() + "/" + f; });
+  // Midpoint lands on 0/360 (the short arc's centre); the truncated
+  // legacy pi literal bounds the round-trip at ~5e-8 rad.
+  const frehg::real_t omegaMid = forcing.sample(50.0).omega;
+  EXPECT_NEAR(std::sin(omegaMid), 0.0, 1.0e-6);
+  EXPECT_NEAR(std::cos(omegaMid), 1.0, 1.0e-6);
+  // The wrap guarantee: every interpolated direction stays inside the
+  // short arc [350, 10] (chord interpolation of the unit vectors —
+  // within 0.04 deg of constant rate for this 20-degree step; it NEVER
+  // takes the 180-degree long way the legacy linear-in-degrees
+  // interpolation took).
+  for (frehg::real_t tt = 0.0; tt <= 100.0; tt += 5.0) {
+    const frehg::real_t omega = forcing.sample(tt).omega;
+    EXPECT_GT(std::cos(omega), std::cos(10.5 * frehg::swe::kLegacyPi / 180.0))
+        << "t = " << tt;
+  }
+  const frehg::real_t omegaQ = forcing.sample(25.0).omega;  // ~355 deg (chord)
+  EXPECT_NEAR(omegaQ * 180.0 / frehg::swe::kLegacyPi, -5.0, 0.05);
+  std::remove(dir.c_str());
+}
+
+TEST(WindForcing, ComponentFormMatchesCompassForm) {
+  // (u10, v10) = W (cos a, sin a) must give the same sample as the
+  // compass form with direction a and north_angle 0 (both feed the
+  // momentum as omega-from-+x), and the law sees the same |U10|.
+  frehg::WindConfig compass;
+  compass.enabled = true;
+  compass.law = frehg::WindConfig::DragLaw::Garratt;
+  compass.speed.constant = 13.0;
+  compass.direction.constant = 37.0;
+  const frehg::swe::WindForcing a(compass, [](const std::string& f) { return f; });
+
+  frehg::WindConfig comp;
+  comp.enabled = true;
+  comp.law = frehg::WindConfig::DragLaw::Garratt;
+  comp.componentForm = true;
+  const frehg::real_t rad = 37.0 * frehg::swe::kLegacyPi / 180.0;
+  comp.u10.constant = 13.0 * std::cos(rad);
+  comp.v10.constant = 13.0 * std::sin(rad);
+  const frehg::swe::WindForcing b(comp, [](const std::string& f) { return f; });
+
+  const auto sa = a.sample(0.0);
+  const auto sb = b.sample(0.0);
+  EXPECT_NEAR(sb.speed, sa.speed, 1.0e-12);
+  EXPECT_NEAR(sb.omega, sa.omega, 1.0e-9);
+  EXPECT_NEAR(sb.dragCd, sa.dragCd, 1.0e-15);
 }
 
 TEST(SweFormulas, WindStressAndThinLayerAttenuation) {

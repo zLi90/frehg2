@@ -151,6 +151,14 @@ add_test(NAME unit.g45_gates.negative
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_g45_gates.py)
 set_tests_properties(unit.g45_gates.negative PROPERTIES LABELS "unit")
 
+# g9/g10 gate-logic battery (v2 plan §6.3, Q6): every closed form checked
+# two independent ways (analytic integral vs numeric quadrature; the
+# sloping-bottom ODE vs the flat closed form; hand values for Merian and
+# each Cd law), and every criterion provably able to fail.
+add_test(NAME unit.g910_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_g910_gates.py)
+set_tests_properties(unit.g910_gates.negative PROPERTIES LABELS "unit")
+
 # ---------------------------------------------------------------------------
 # Benchmark configuration validation (part of the P0 exit criteria)
 # ---------------------------------------------------------------------------
@@ -165,7 +173,8 @@ foreach(case
     b6-kuan/b6-kuan-td
     g4-evap/g4a-drawdown
     g4-evap/g4b-concentration
-    g4-evap/g4d-drain)
+    g4-evap/g4d-drain
+    g9-wind/g9a-setup)
   # g4c-bulk and the two g5 configurations are deliberately NOT in this
   # list: they are written to the Q4 target schema (atmosphere block /
   # bulk evaporation) and fail --validate until the capability lands —
@@ -317,6 +326,27 @@ endforeach()
 add_test(NAME regression.g4
   COMMAND ${_regress} g4 ${_regress_args} --work ${CMAKE_BINARY_DIR}/regression/g4)
 set_tests_properties(regression.g4 PROPERTIES LABELS "regression"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# v2 Q6 gates (plan §5.3; authored FAILING per §6.1). g9(b)/(c) and the
+# orientation battery use the Q6 target schema (law/cap/u10/v10) and fail
+# "capability absent" until it lands; g9(a) and g10 run on configuration
+# the schema already accepts — their first execution is also the first
+# exercise ever of the v1 wind path (completion report §6).
+add_test(NAME regression.g9
+  COMMAND ${_regress} g9 ${_regress_args} --work ${CMAKE_BINARY_DIR}/regression/g9)
+set_tests_properties(regression.g9 PROPERTIES LABELS "regression"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+add_test(NAME regression.g10
+  COMMAND ${_regress} g10 ${_regress_args} --work ${CMAKE_BINARY_DIR}/regression/g10)
+set_tests_properties(regression.g10 PROPERTIES LABELS "regression"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+add_test(NAME regression.wind_orient
+  COMMAND ${_regress} wind-orient ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/wind-orient)
+set_tests_properties(regression.wind_orient PROPERTIES LABELS "regression"
   ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
 
 add_test(NAME regression.g5.geng2015

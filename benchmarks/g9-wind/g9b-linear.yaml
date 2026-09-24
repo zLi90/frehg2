@@ -1,0 +1,64 @@
+# g9(b) — steady wind setup, linear regime (v2 plan §5.3): physical
+# Garratt Cd(U10) law at U10 = 15 m/s over a 5 km x 100 m basin of 10 m
+# rest depth. Cd = min((0.75 + 0.067*15)e-3, cap) = 1.755e-3;
+# tau/rho_w = 4.847e-4 m^2/s^2; end-to-end setup 2.47 cm (0.25 % of
+# depth — the linear regime; the gate still compares against the exact
+# nonlinear closed form). THE Q6 TARGET SCHEMA, authored gate-first per
+# §6.1: `law`/`cap` and the (u10, v10) component form do not exist yet,
+# so `frehg --validate` rejects this file until the capability lands.
+# Wind enters as a ramped +x component series (quasi-static spin-up);
+# mild Manning friction damps the transient (u = 0 at the gated steady
+# state).
+simulation:
+  id: g9b-linear
+  title: g9(b) steady wind setup, linear regime (Garratt law)
+
+domain:
+  nx: 50
+  ny: 1
+  nz: 1
+  dx: 100.0
+  dy: 100.0
+  dz: 0.5
+  bottom_elevation: {constant: -10.0}
+
+time:
+  dt: 5.0
+  t_end: 40000.0
+  output_interval: 4000.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.015}
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+  wind:
+    enabled: true
+    law: garratt
+    cap: 3.5e-3
+    attenuation_depth: 5.0
+    u10: {series: {file: input/wind_ramp_15.dat}}
+    v10: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+
+boundary_conditions:
+  - name: walls
+    region: {polygon: [[-1.0, -1.0], [5001.0, -1.0], [5001.0, 101.0], [-1.0, 101.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+  monitors:
+    - {name: eta_west, i: 0, j: 0, variables: [eta]}
+    - {name: eta_east, i: 49, j: 0, variables: [eta]}

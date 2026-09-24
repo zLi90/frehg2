@@ -1,0 +1,74 @@
+# g9(a) — steady wind setup, nonlinear (v2 plan §5.3; TELEMAC-2D
+# validation case 10 replica). 500 x 100 m closed basin, 2 m rest depth;
+# effective kinematic stress tau/rho_w = c U^2 with c = 1.2615e-3 and
+# U = 5 m/s, expressed through the constant-Cd law as
+# Cd = c * rho_w / rho_a = 1.2615e-3 * 998 / 1.225 = 1.0277551 (the gate
+# script recomputes tau/rho_w from this Cd and the code's own densities,
+# so no constant is duplicated). Steady analytic:
+#   h(x)^2 = C + 2 (tau/rho_w) x / g, C from volume conservation
+#   -> h(0) = 1.5643 m, h(500) = 2.3795 m, end-to-end 0.8152 m.
+# Resolution per the §6.3 convergence study (archived in README.md): the
+# discrete setup converges to the closed form at first order in dx
+# (1.70/0.87/0.44/0.22 % at dx = 20/10/5/2.5), so the gate runs dx = 2.5
+# where the 0.5 % bound holds with 2.3x headroom.
+# Spin-up per the plan's "mild relaxation": the wind RAMPS over 4500 s
+# (~20 seiche periods, quasi-static) and a mild Manning n damps the
+# residual transient — legitimate because the steady state has u = 0, so
+# friction cannot alter what is gated. Steadiness is asserted in-gate.
+# Walls: the default edge is legacy-transmissive (the g4 bring-up
+# finding); a closed basin needs the explicit zero-velocity condition.
+# Uses the legacy speed/direction wind form (direction 0 + north_angle 0
+# = wind along +x under the preserved legacy convention).
+simulation:
+  id: g9a-setup
+  title: g9(a) steady wind setup, nonlinear (TELEMAC case-10 replica)
+
+domain:
+  nx: 200
+  ny: 5
+  nz: 1
+  dx: 2.5
+  dy: 20.0
+  dz: 0.5
+  bottom_elevation: {constant: -2.0}
+
+time:
+  dt: 0.25
+  t_end: 20000.0
+  output_interval: 2000.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.015}
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+  wind:
+    enabled: true
+    cd: 1.0277551
+    attenuation_depth: 5.0
+    north_angle: 0.0
+    speed: {series: {file: input/wind_ramp_5.dat}}
+    direction: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+
+boundary_conditions:
+  - name: walls
+    region: {polygon: [[-1.0, -1.0], [501.0, -1.0], [501.0, 101.0], [-1.0, 101.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+  monitors:
+    - {name: eta_west, i: 0, j: 2, variables: [eta]}
+    - {name: eta_east, i: 199, j: 2, variables: [eta]}

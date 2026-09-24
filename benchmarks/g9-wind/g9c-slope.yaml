@@ -1,0 +1,71 @@
+# g9(c) — steady wind setup over a sloping bottom (v2 plan §5.3): bed
+# from -0.12 m (upwind) to -2.0 m over 1 km; Garratt law at U10 = 12 m/s
+# (Cd = 1.554e-3, tau/rho_w = 2.747e-4). The upwind setdown draws the
+# shallow end to h_min = 0.088 m — grazing the wet/dry machinery without
+# crossing it (min_depth 1e-6; thin_layer_depth 0.02 keeps the wind
+# attenuation below the grazed depths). Reference: the quadrature
+# solution of d eta/dx = (tau/rho_w)/(g (eta - b(x))) under volume
+# conservation, solved in the gate script (RK4 + bisection; §6.3 rule 1
+# cross-check: on a flat bottom the quadrature reproduces the g9(a)
+# closed form). The gated norm is the profile RMS (the max deviation is
+# recorded — it concentrates in the shallow-tip cell and converges first
+# order: 5.5/2.4/1.1 % of range at dx = 10/5/2.5; RMS 0.40/0.15 % at
+# dx = 5/2.5, so the gate runs dx = 5 with 2.5x headroom on the 1 %
+# bound). Steadiness gates on the deep-end monitor: the shallow tip
+# carries the P3-documented thin-layer drag limit cycle (~5e-4 m), which
+# is legacy scheme behavior, not un-steadiness of the setup — its span
+# is recorded.
+simulation:
+  id: g9c-slope
+  title: g9(c) steady wind setup over a sloping bottom (quadrature)
+
+domain:
+  nx: 200
+  ny: 1
+  nz: 1
+  dx: 5.0
+  dy: 10.0
+  dz: 0.5
+  bottom_elevation: {file: input/slope_bed.dat}
+
+time:
+  dt: 0.5
+  t_end: 40000.0
+  output_interval: 4000.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.02}
+    thin_layer_depth: 0.02
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+  wind:
+    enabled: true
+    law: garratt
+    cap: 3.5e-3
+    attenuation_depth: 5.0
+    u10: {series: {file: input/wind_ramp_12.dat}}
+    v10: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+
+boundary_conditions:
+  - name: walls
+    region: {polygon: [[-1.0, -1.0], [1001.0, -1.0], [1001.0, 11.0], [-1.0, 11.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+  monitors:
+    - {name: eta_west, i: 0, j: 0, variables: [eta]}
+    - {name: eta_east, i: 199, j: 0, variables: [eta]}

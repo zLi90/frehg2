@@ -103,12 +103,22 @@ struct FrictionConfig {
 
 /// surface_water.wind: quadratic wind stress with thin-layer attenuation.
 struct WindConfig {
+  /// Selectable Cd(U10) laws (v2 Q6, plan §5.2). Constant is the legacy
+  /// Cw (no cap); the published laws are capped at `cap`.
+  enum class DragLaw { Constant, Garratt, SmithBanke, Wu, LargePond };
   bool enabled = false;            ///< apply wind stress
-  real_t cd = 0.0013;              ///< legacy Cw drag coefficient
+  DragLaw law = DragLaw::Constant; ///< wind.law
+  real_t cd = 0.0013;              ///< legacy Cw drag coefficient (constant law)
+  real_t cap = 3.5e-3;             ///< Cd cap for the U10 laws (wind.cap)
   real_t attenuationDepth = 5.0;   ///< legacy CwT thin-layer attenuation depth [m]
   real_t northAngle = 0.0;         ///< grid-to-north rotation [deg]
+  /// Input form (v2 Q6): grid-frame components (u10, v10) — the wrap-free
+  /// form — or the legacy compass speed/direction pair.
+  bool componentForm = false;
   SeriesOrConstant speed;          ///< wind speed [m/s]
   SeriesOrConstant direction;      ///< wind direction [deg]
+  SeriesOrConstant u10;            ///< wind +x component [m/s]
+  SeriesOrConstant v10;            ///< wind +y component [m/s]
 };
 
 /// atmosphere: met forcing for the bulk-aerodynamic module (v2 Q4, plan

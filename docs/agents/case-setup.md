@@ -155,11 +155,19 @@ Generate these files with small Python snippets in the case directory
     launches a drainage transient); and physics cases should set
     `groundwater.reallocation_surplus: redistribute` (the legacy `drop`
     default discards water under strong drying).
-12. Shallow steady flows inside `friction.thin_layer_depth` (default
+12. Wind forcing (v2 Q6): prefer the grid-frame `wind.u10`/`v10`
+    component pair (wrap-free; `north_angle` ignored) over the compass
+    `speed`/`direction` pair; direction *series* interpolate on the
+    circle (350°→10° goes through 0°) — sample them finely enough that
+    successive directions differ well below 180°. `wind.law` selects
+    Cd(U₁₀) (garratt/smith-banke/wu/large-pond, capped at `wind.cap`);
+    `constant` is the uncapped legacy `Cw` via `wind.cd`. A closed
+    wind-setup basin needs the explicit velocity-0 walls (pitfall 11).
+13. Shallow steady flows inside `friction.thin_layer_depth` (default
     0.1 m) sit in the legacy drag-regularization band — cm-scale normal
     depths can offset ~20 % from Manning theory; set `thin_layer_depth`
     below the expected depths when that matters.
-13. Model scope limits — do not try to configure around them: no
+14. Model scope limits — do not try to configure around them: no
     periodic boundaries, no Darcy–Weisbach friction, no
     surface-infiltration source term other than the groundwater coupling
     itself, one scalar, groundwater scheme is PCA only, no adaptive

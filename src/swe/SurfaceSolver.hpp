@@ -29,6 +29,7 @@
 #define FREHG_SWE_SURFACESOLVER_HPP
 
 #include "atm/MetForcing.hpp"
+#include "swe/WindForcing.hpp"
 #include "bc/BoundarySet.hpp"
 #include "core/Config.hpp"
 #include "core/Grid.hpp"
@@ -300,10 +301,10 @@ class SurfaceSolver {
   real_t offset_ = 0.0;
   bool chezy_ = false;
   WindConfig windCfg_;
+  WindForcing windForcing_;  ///< per-step wind evaluation (v2 Q6)
   bool rainIsSeries_ = false, evapIsSeries_ = false;
   real_t rainConstant_ = 0.0, evapConstant_ = 0.0;
   TimeSeries rainSeries_, evapSeries_;
-  TimeSeries windSpeedSeries_, windDirectionSeries_;
   bool hasRainExclusion_ = false;
   /// Open-water evaporation mode and its met forcing (v2 Q4, plan §3.2).
   SurfaceWaterConfig::EvapMode evapMode_ = SurfaceWaterConfig::EvapMode::Prescribed;
@@ -311,7 +312,9 @@ class SurfaceSolver {
 
   // Current-step forcing values.
   real_t rain_ = 0.0, evap_ = 0.0;
-  real_t windSpeed_ = 0.0, windDirection_ = 0.0;
+  real_t windSpeed_ = 0.0;   ///< |U10| of the step [m/s]
+  real_t windOmega_ = 0.0;   ///< wind direction of the step, radians from +x
+  real_t windCd_ = 0.0;      ///< Cd of the step under the configured law
 
   // Fields (nyLocal+2, nxLocal+2), (j, i) with one-cell halos.
   Field2<real_t> eta_, etan_, dept_, deptx_, depty_;

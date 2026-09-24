@@ -114,9 +114,24 @@ SurfaceWaterConfig extractSurfaceWater(const YAML::Node& node) {
   const YAML::Node wind = node["wind"];
   if (wind.IsDefined()) {
     out.wind.enabled = valueOr<bool>(wind["enabled"], false);
+    const std::string law = valueOr<std::string>(wind["law"], "constant");
+    out.wind.law = law == "garratt"       ? WindConfig::DragLaw::Garratt
+                   : law == "smith-banke" ? WindConfig::DragLaw::SmithBanke
+                   : law == "wu"          ? WindConfig::DragLaw::Wu
+                   : law == "large-pond"  ? WindConfig::DragLaw::LargePond
+                                          : WindConfig::DragLaw::Constant;
     out.wind.cd = valueOr<real_t>(wind["cd"], 0.0013);
+    out.wind.cap = valueOr<real_t>(wind["cap"], 3.5e-3);
     out.wind.attenuationDepth = valueOr<real_t>(wind["attenuation_depth"], 5.0);
     out.wind.northAngle = valueOr<real_t>(wind["north_angle"], 0.0);
+    out.wind.componentForm =
+        wind["u10"].IsDefined() || wind["v10"].IsDefined();
+    if (wind["u10"].IsDefined()) {
+      out.wind.u10 = extractSeriesOrConstant(wind["u10"]);
+    }
+    if (wind["v10"].IsDefined()) {
+      out.wind.v10 = extractSeriesOrConstant(wind["v10"]);
+    }
     if (wind["speed"].IsDefined()) {
       out.wind.speed = extractSeriesOrConstant(wind["speed"]);
     }
@@ -698,11 +713,28 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     node["wetting_face_depth"] = sw.wettingFaceDepth;
     YAML::Node wind;
     wind["enabled"] = sw.wind.enabled;
-    wind["cd"] = sw.wind.cd;
+    wind["law"] = sw.wind.law == WindConfig::DragLaw::Garratt      ? "garratt"
+                  : sw.wind.law == WindConfig::DragLaw::SmithBanke ? "smith-banke"
+                  : sw.wind.law == WindConfig::DragLaw::Wu         ? "wu"
+                  : sw.wind.law == WindConfig::DragLaw::LargePond  ? "large-pond"
+                                                                   : "constant";
+    // Mirror the schema's cross-field rules (cd belongs to the constant
+    // law, cap to the U10 laws) so the resolved config revalidates — the
+    // r1 round-trip requirement.
+    if (sw.wind.law == WindConfig::DragLaw::Constant) {
+      wind["cd"] = sw.wind.cd;
+    } else {
+      wind["cap"] = sw.wind.cap;
+    }
     wind["attenuation_depth"] = sw.wind.attenuationDepth;
     wind["north_angle"] = sw.wind.northAngle;
-    wind["speed"] = emitSeriesOrConstant(sw.wind.speed);
-    wind["direction"] = emitSeriesOrConstant(sw.wind.direction);
+    if (sw.wind.componentForm) {
+      wind["u10"] = emitSeriesOrConstant(sw.wind.u10);
+      wind["v10"] = emitSeriesOrConstant(sw.wind.v10);
+    } else {
+      wind["speed"] = emitSeriesOrConstant(sw.wind.speed);
+      wind["direction"] = emitSeriesOrConstant(sw.wind.direction);
+    }
     node["wind"] = wind;
     YAML::Node rainfall = emitSeriesOrConstant(sw.rainfall);
     if (!sw.rainfallExcludePolygon.empty()) {

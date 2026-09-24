@@ -1978,3 +1978,44 @@ trapezoidal integration; the model numbers from the gate's own
 observables. The reworked criteria pass on the current build and each
 negative case fails (scripts/test_g45_gates.py, updated with this
 amendment).
+
+### V2-A16 (Q6, 2026-09-24) — §5.3 g10: the seiche basis moves from g9(a) to g9(b)
+
+**What changed.** g10 releases the seiche from the g9(b) steady state
+(5 km × 100 m, 10 m deep, 2.5 cm setup) instead of the plan's g9(a)
+state, and the two setup cases spin up by quasi-static wind ramps plus a
+mild Manning n — the plan's own "mild relaxation", made concrete.
+
+**Why.** (1) The g9(a) steady state is a 0.815 m setup in 2 m of water:
+releasing it launches a 40 %-of-depth **nonlinear** seiche whose period
+is amplitude- and bathymetry-shifted — the linear Merian formula the
+gate compares against does not hold there at the 2 % tolerance, so the
+gate as planned would have measured the nonlinearity, not the scheme.
+The g9(b) release is 0.25 % of depth — squarely the linear regime Merian
+assumes. (2) Friction as the relaxation is exact, not approximate: the
+gated steady state has u = 0 identically, so the Manning term cannot
+alter what is gated; it only damps the spin-up transient, and the wind
+ramp (≥ 20 seiche periods) keeps the excitation small in the first
+place. Steadiness is asserted in-gate, so a still-sloshing basin cannot
+pass. g10 itself stays frictionless (its recorded amplitude decay is
+pure θ-scheme dissipation, as the plan requires).
+
+**Also recorded here (the §6.3 rule-3 study, archived in
+benchmarks/g9-wind/README.md):** the g9(a) discrete setup converges to
+the closed form at first order in dx — 1.70/0.87/0.44/0.22 % at
+dx = 20/10/5/2.5 m (the face-depth evaluation in the stress term, not a
+wind defect) — so the gate runs dx = 2.5 m, where the 0.5 % bound holds
+with 2.3× headroom. This first-ever exercise of the v1 wind path
+(authored in P1, ungated since — completion report §6) found it
+correct.
+
+**Scope-boundary note.** g10's criteria (2 % Merian period, recorded
+decay, Cr documented) are unchanged; only the basin it releases from
+and the spin-up protocol are fixed. g9's criteria are unchanged.
+
+**Verification.** The nonlinearity argument: the released amplitude in
+(a) is Δη/H ≈ 0.4 where finite-amplitude period corrections are
+O(10 %) ≫ 2 %; in (b) Δη/H ≈ 2.5e-3. The convergence numbers above are
+measured; the §6.3 negative battery (scripts/test_g910_gates.py) covers
+every criterion including the dead-forcing-series case (no oscillation
+→ FAIL).

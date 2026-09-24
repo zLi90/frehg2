@@ -48,6 +48,12 @@ Subcommands:
                     code-to-code vs the digitized MARUN figures
                     (nightly-class; V2-A13/V2-A14 criteria; authored
                     failing per §6.1)
+  g9                v2 Q6 steady wind setup (a nonlinear TELEMAC replica /
+                    b linear Garratt / c sloping-bottom quadrature;
+                    per-PR, closed forms in-script)
+  g10               v2 Q6 seiche relaxation vs the Merian period (per-PR)
+  wind-orient       v2 Q6 8-orientation wind-setup symmetry battery
+                    (the §8.1/§9 x-battery row; per-PR)
 
 Every run happens in a copy of the benchmark case directory so relative
 input paths keep working and the repository stays clean.
@@ -1238,6 +1244,200 @@ def gate_rank_invariance_b5(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 import gate_evap  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# v2 Q6 gates (plan §5.3): g9 steady wind setup (a nonlinear TELEMAC
+# replica / b linear Garratt / c sloping-bottom quadrature), g10 Merian
+# seiche relaxation, and the §8.1/§9 8-orientation symmetry battery.
+# Authored gate-first per §6.1: (b)/(c)/orient use the Q6 target schema
+# (law/cap/u10/v10) and fail "capability absent" until it lands; (a) and
+# g10's basis run on configuration the schema already accepts — their
+# first execution is also the first time the v1 wind path is exercised
+# at all (completion report §6: implemented, ungated).
+# ---------------------------------------------------------------------------
+import gate_wind  # noqa: E402
+
+
+def monitor_series(handle, name: str):
+    table = handle[f"/monitor/{name}"][:]
+    return table[:, 0], table[:, 1]
+
+
+def surface_eta(handle, t: int, ny: int, nx: int) -> np.ndarray:
+    return handle[f"/surface/eta/{t}"][:].reshape(ny, nx)
+
+
+def gate_g9(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "g9-wind", args.work)
+    with open(HERE / "tolerances" / "g9-wind.yaml", encoding="utf-8") as handle:
+        tol = yaml.safe_load(handle)
+    ok = True
+
+    def report(sub: str, sub_ok: bool, msgs: list[str]) -> bool:
+        for msg in msgs:
+            print(f"  {msg}")
+        print(f"g9({sub}):", "ok" if sub_ok else "FAIL")
+        return sub_ok
+
+    # (a) nonlinear setup, constant-Cd law (the v1 wind path's first gate).
+    config_a = case_dir / "g9a-setup.yaml"
+    with open(config_a, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    run_case(args.frehg, config_a, case_dir, args.mpiexec, args.ranks)
+    out_a = case_dir / "out" / "g9a.h5"
+    shutil.move(case_dir / "out" / "output.h5", out_a)
+    cd = float(doc["surface_water"]["wind"]["cd"])
+    u10 = 5.0  # the ramp's held value
+    taup = gate_wind.kinematic_stress(cd, u10)
+    nx, ny, dx = 200, 5, 2.5  # the §6.3 convergence-study resolution
+    x_c = (np.arange(nx) + 0.5) * dx
+    h_ref = gate_wind.setup_flat(taup, nx * dx, 2.0, x_c)
+    with h5py.File(out_a, "r") as handle:
+        t_end = int(doc["time"]["t_end"])
+        eta = surface_eta(handle, t_end, ny, nx)[ny // 2]
+        tm, vm = monitor_series(handle, "eta_east")
+    delta_ref = float(h_ref[-1] - h_ref[0])
+    s_ok, s_msgs = gate_wind.check_steady(
+        tm, vm, 0.1, float(tol["g9a"]["steady_tol_m"]), "g9a")
+    d_ok, d_msgs = gate_wind.check_setup(
+        float(eta[-1] - eta[0]), delta_ref, float(tol["g9a"]["setup_tol_rel"]), "g9a")
+    p_ok, p_msgs = gate_wind.check_profile(
+        eta, h_ref - 2.0, delta_ref, float(tol["g9a"]["profile_tol_fraction"]), "g9a")
+    ok &= report("a", s_ok and d_ok and p_ok, s_msgs + d_msgs + p_msgs)
+
+    # (b) linear regime, Garratt law through the component form.
+    config_b = case_dir / "g9b-linear.yaml"
+    if not validate_config(args.frehg, config_b):
+        ok &= report("b", False,
+                     ["capability absent: the schema rejects the Q6 wind "
+                      "law/cap/u10/v10 keys (expected until the Q6 "
+                      "capability lands — plan §6.1)"])
+    else:
+        run_case(args.frehg, config_b, case_dir, args.mpiexec, args.ranks)
+        out_b = case_dir / "out" / "g9b.h5"
+        shutil.move(case_dir / "out" / "output.h5", out_b)
+        u10 = 15.0
+        cd = gate_wind.cd_garratt(u10)  # independent python reference
+        taup = gate_wind.kinematic_stress(cd, u10)
+        nx, dx = 50, 100.0
+        x_c = (np.arange(nx) + 0.5) * dx
+        h_ref = gate_wind.setup_flat(taup, nx * dx, 10.0, x_c)
+        with h5py.File(out_b, "r") as handle:
+            eta = surface_eta(handle, 40000, 1, nx)[0]
+            tm, vm = monitor_series(handle, "eta_east")
+        delta_ref = float(h_ref[-1] - h_ref[0])
+        s_ok, s_msgs = gate_wind.check_steady(
+            tm, vm, 0.1, float(tol["g9b"]["steady_tol_m"]), "g9b")
+        d_ok, d_msgs = gate_wind.check_setup(
+            float(eta[-1] - eta[0]), delta_ref, float(tol["g9b"]["setup_tol_rel"]),
+            "g9b (Garratt Cd computed offline)")
+        ok &= report("b", s_ok and d_ok, s_msgs + d_msgs)
+
+    # (c) sloping bottom vs the quadrature reference.
+    config_c = case_dir / "g9c-slope.yaml"
+    if not validate_config(args.frehg, config_c):
+        ok &= report("c", False,
+                     ["capability absent: the schema rejects the Q6 wind "
+                      "law/cap/u10/v10 keys (expected until the Q6 "
+                      "capability lands — plan §6.1)"])
+    else:
+        run_case(args.frehg, config_c, case_dir, args.mpiexec, args.ranks)
+        out_c = case_dir / "out" / "g9c.h5"
+        shutil.move(case_dir / "out" / "output.h5", out_c)
+        u10 = 12.0
+        taup = gate_wind.kinematic_stress(gate_wind.cd_garratt(u10), u10)
+        nx, dx = 200, 5.0  # the convergence-study resolution (case README)
+
+        x_c = (np.arange(nx) + 0.5) * dx
+
+        def bed_at(xx):
+            return -(0.12 + 1.88 * np.asarray(xx, dtype=float) / 1000.0)
+
+        xq, eta_q = gate_wind.setup_slope(taup, nx * dx, bed_at)
+        eta_ref = np.interp(x_c, xq, eta_q)
+        with h5py.File(out_c, "r") as handle:
+            eta = surface_eta(handle, 40000, 1, nx)[0]
+            # Steadiness gates at the deep end; the shallow tip carries the
+            # P3-documented thin-layer drag limit cycle, recorded below.
+            tm, vm = monitor_series(handle, "eta_east")
+            tw, vw = monitor_series(handle, "eta_west")
+        rng = float(eta_ref[-1] - eta_ref[0])
+        h_min = float(np.min(eta - bed_at(x_c)))
+        s_ok, s_msgs = gate_wind.check_steady(
+            tm, vm, 0.1, float(tol["g9c"]["steady_tol_m"]), "g9c (deep end)")
+        tip = vw[tw >= tw[-1] * 0.9]
+        s_msgs.append(f"recorded (not gated): shallow-tip trailing span "
+                      f"{float(np.max(tip) - np.min(tip)):.2e} m (the thin-layer "
+                      f"drag limit cycle)")
+        p_ok, p_msgs = gate_wind.check_profile_rms(
+            eta, eta_ref, rng, float(tol["g9c"]["profile_tol_fraction"]), "g9c")
+        graze = h_min < float(tol["g9c"]["graze_max_depth_m"])
+        g_msgs = [f"g9c grazing: h_min = {h_min:.4f} m "
+                  f"(must stay wet and < {tol['g9c']['graze_max_depth_m']} m) "
+                  f"{'ok' if graze and h_min > 0 else 'FAIL'}"]
+        ok &= report("c", s_ok and p_ok and graze and h_min > 0,
+                     s_msgs + p_msgs + g_msgs)
+
+    print("g9 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_g10(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "g9-wind", args.work)
+    with open(HERE / "tolerances" / "g9-wind.yaml", encoding="utf-8") as handle:
+        tol = yaml.safe_load(handle)
+    config = case_dir / "g10-seiche.yaml"
+    if not validate_config(args.frehg, config):
+        print("g10 gate: capability absent — the schema rejects the Q6 wind "
+              "law/cap/u10/v10 keys (expected until the Q6 capability lands)")
+        print("g10 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        tm, vm = monitor_series(handle, "eta_east")
+    period, amps = gate_wind.seiche_metrics(tm, vm, float(tol["g10"]["release_time_s"]))
+    merian = gate_wind.merian_period(5000.0, 10.0)
+    courant = float(np.sqrt(gate_wind.GRAVITY * 10.0) * 5.0 / 100.0)
+    ok, msgs = gate_wind.check_seiche(period, merian,
+                                      float(tol["g10"]["period_tol_rel"]),
+                                      amps, courant)
+    for msg in msgs:
+        print(f"  {msg}")
+    print("g10 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_wind_orient(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "g9-wind", args.work)
+    with open(HERE / "tolerances" / "g9-wind.yaml", encoding="utf-8") as handle:
+        tol = yaml.safe_load(handle)
+    base = case_dir / "orient-base.yaml"
+    if not validate_config(args.frehg, base):
+        print("wind-orient battery: capability absent — the schema rejects "
+              "the Q6 wind law/cap/u10/v10 keys (expected until the Q6 "
+              "capability lands)")
+        print("wind-orient battery: FAIL")
+        return 1
+    u_mag = 10.0
+    fields = {}
+    for name, (ux, uy, _) in gate_wind.ORIENTATIONS.items():
+        config = case_dir / f"orient-{name}.yaml"
+        with open(base, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        doc["simulation"]["id"] = f"g9-orient-{name}"
+        doc["surface_water"]["wind"]["u10"] = {"constant": ux * u_mag}
+        doc["surface_water"]["wind"]["v10"] = {"constant": uy * u_mag}
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            fields[name] = surface_eta(handle, 6000, 20, 20)
+        (case_dir / "out" / "output.h5").unlink()
+    ok, msgs = gate_wind.check_orientations(fields, float(tol["orient"]["tol_abs_m"]))
+    for msg in msgs:
+        print(f"  {msg}")
+    print("wind-orient battery:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
 
 def output_times(handle, group: str) -> list[int]:
     """Sorted integer-second output times of an HDF5 field group."""
@@ -1636,7 +1836,8 @@ def main() -> int:
                                          "b2-restart", "b5-restart", "b6-restart",
                                          "rank-invariance", "rank-invariance-b2",
                                          "rank-invariance-b5", "b6-gw-smoke",
-                                         "smoke-b5", "smoke-b6", "g4", "g5"])
+                                         "smoke-b5", "smoke-b6", "g4", "g5",
+                                         "g9", "g10", "wind-orient"])
     parser.add_argument("--frehg", type=Path, required=True)
     parser.add_argument("--mpiexec", type=Path, required=True)
     parser.add_argument("--repo", type=Path, required=True)
@@ -1719,6 +1920,12 @@ def main() -> int:
         return gate_g4(args)
     if args.gate == "g5":
         return gate_g5(args)
+    if args.gate == "g9":
+        return gate_g9(args)
+    if args.gate == "g10":
+        return gate_g10(args)
+    if args.gate == "wind-orient":
+        return gate_wind_orient(args)
     return gate_rank_invariance(args)
 
 

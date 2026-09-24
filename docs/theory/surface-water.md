@@ -165,6 +165,29 @@ of the algorithm, not defects.
 Dead legacy code found during the port is recorded in
 [removed-features.md](removed-features.md).
 
+## Wind stress (v2 Q6, plan §5.2)
+
+The quadratic relative-velocity stress with thin-layer attenuation is
+unchanged from v1 (legacy wind_source); what Q6 added is validation and
+generality. Cd(U₁₀) is selectable (`wind.law`: the uncapped legacy
+constant Cw, or Garratt / Smith & Banke / Wu / Large & Pond capped at
+`wind.cap`), the wind may be given as grid-frame `(u10, v10)` components
+(wrap-free; `north_angle` is compass-only), and direction *series*
+interpolate on the circle — sampled angles become unit vectors at load,
+interpolate linearly, and atan2 recovers the angle, so 350°→10° passes
+through 0°, never 180° (chord interpolation: within O(Δ²/8) of constant
+rate; a 180° step between samples is degenerate). The legacy
+constant-direction arithmetic (truncated π literal) is preserved
+bitwise. Per-step evaluation lives in `WindForcing.hpp` (host); the
+momentum kernel consumes three scalars.
+
+Validation (the g9/g10 gates, `benchmarks/g9-wind/`): the steady-setup
+closed form to 0.22 % (with a first-order convergence study — the
+discretization bias is the face-depth evaluation in the stress term),
+the Garratt law end-to-end to 0.17 %, the sloping-bottom quadrature to
+0.40 % RMS, the Merian seiche period to 0.06 %, and exact 8-orientation
+symmetry (≤ 1e-15 m). Until Q6, no gate had ever exercised this path.
+
 ## Evaporation modes (v2 Q4, plan §3.2)
 
 `surface_water.evaporation` grew two capabilities in v2 Q4 while keeping

@@ -262,12 +262,21 @@ Spec buildRootSchema() {
             {"viscosity", map({{"x", realNonNegative(false)}, {"y", realNonNegative(false)}})},
             {"min_depth", realPositive(true)},
             {"wetting_face_depth", realPositive(true)},
+            // wind (v2 Q6 §5.2): selectable Cd(U10) law with cap, and
+            // either the legacy compass speed/direction pair or the
+            // grid-frame (u10, v10) component pair — exclusivity and the
+            // cap-vs-constant rule are cross-field checks.
             {"wind", map({{"enabled", boolean(false)},
+                          {"law", enumeration(false, {"constant", "garratt", "smith-banke",
+                                                      "wu", "large-pond"})},
                           {"cd", realNonNegative(false)},
+                          {"cap", realPositive(false)},
                           {"attenuation_depth", realPositive(false)},
                           {"north_angle", real(false)},
                           {"speed", seriesOrConstant(false)},
-                          {"direction", seriesOrConstant(false)}})},
+                          {"direction", seriesOrConstant(false)},
+                          {"u10", seriesOrConstant(false)},
+                          {"v10", seriesOrConstant(false)}})},
             // rainfall additionally accepts an exclusion region (no rain
             // inside; the legacy hardcoded last-row skip, made explicit);
             // the constant/series exclusivity is a cross-field check.
@@ -691,6 +700,38 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
         ctx.addError("surface_water.rainfall",
                      "exactly one of {constant, series} must be given (found " +
                          std::to_string(present) + ")");
+      }
+    }
+  }
+
+  // v2 Q6 wind cross-field rules (plan §5.2).
+  {
+    const YAML::Node wind = sub(root, "surface_water", "wind");
+    if (wind.IsDefined() && wind.IsMap()) {
+      const bool components = wind["u10"].IsDefined() || wind["v10"].IsDefined();
+      const bool compass = wind["speed"].IsDefined() || wind["direction"].IsDefined();
+      if (components && compass) {
+        ctx.addError("surface_water.wind",
+                     "give either the (u10, v10) component pair or the "
+                     "speed/direction pair, not both");
+      }
+      if (components && (!wind["u10"].IsDefined() || !wind["v10"].IsDefined())) {
+        ctx.addError("surface_water.wind",
+                     "the component form requires both u10 and v10");
+      }
+      const std::string law =
+          (wind["law"].IsDefined() && wind["law"].IsScalar())
+              ? wind["law"].as<std::string>()
+              : std::string("constant");
+      if (law == "constant" && wind["cap"].IsDefined()) {
+        ctx.addError("surface_water.wind.cap",
+                     "the cap applies to the U10 laws only (the constant law is "
+                     "the uncapped legacy Cw)");
+      }
+      if (law != "constant" && wind["cd"].IsDefined()) {
+        ctx.addError("surface_water.wind.cd",
+                     "cd is the constant law's coefficient; the U10 laws compute "
+                     "Cd from the wind speed");
       }
     }
   }

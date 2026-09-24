@@ -1,0 +1,18 @@
+# g9/g10 — wind setup and seiche gates (v2 plan §5.3). Steadiness bounds
+# are asserted in-gate so no criterion can gate a still-sloshing basin.
+g9a:                               # nonlinear TELEMAC case-10 replica
+  setup_tol_rel: 0.005            # end-to-end setup vs closed form (plan: 0.5%)
+  profile_tol_fraction: 0.01      # max profile deviation vs the 0.815 m range
+  steady_tol_m: 2.0e-3            # trailing-10% span of the end monitor
+g9b:                               # linear regime, Garratt law
+  setup_tol_rel: 0.01             # plan: 1%
+  steady_tol_m: 1.0e-4
+g9c:                               # sloping bottom vs quadrature
+  profile_tol_fraction: 0.01      # plan: 1% (of the end-to-end range)
+  steady_tol_m: 3.0e-4
+  graze_max_depth_m: 0.15         # h_min must graze below this (and stay wet)
+g10:
+  period_tol_rel: 0.02            # plan: 2% of the Merian period
+  release_time_s: 30500.0         # crossings measured after the cutoff
+orient:
+  tol_abs_m: 1.0e-7               # field mapping tolerance (setup ~3.6e-3 m)

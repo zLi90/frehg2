@@ -1,0 +1,65 @@
+# g10 — seiche relaxation vs the Merian formula (v2 plan §5.3, basis
+# moved from g9(a) to the g9(b) basin by amendment V2-A16: the (a) state
+# is a 0.8 m setup in 2 m of water — a 40 %-of-depth nonlinear seiche
+# where the linear Merian period does not apply at the 2 % tolerance;
+# the (b) setup is 0.25 % of depth, squarely linear).
+# The wind u10 series ramps up (quasi-static), holds, and steps to zero
+# at t = 30000 s — also gating the forcing-series edge handling. The run
+# is FRICTIONLESS so the released seiche decays only by theta-scheme
+# dissipation; the fundamental period from zero-crossings of eta at the
+# basin end must match T = 2L/sqrt(gH) = 1009.7 s within 2 % at
+# Cr = sqrt(gH) dt/dx = 0.495; the amplitude decay per period is
+# recorded, not gated (scheme dissipation).
+simulation:
+  id: g10-seiche
+  title: g10 seiche relaxation (Merian period)
+
+domain:
+  nx: 50
+  ny: 1
+  nz: 1
+  dx: 100.0
+  dy: 100.0
+  dz: 0.5
+  bottom_elevation: {constant: -10.0}
+
+time:
+  dt: 5.0
+  t_end: 38200.0
+  output_interval: 3820.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.0}
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+  wind:
+    enabled: true
+    law: garratt
+    cap: 3.5e-3
+    attenuation_depth: 5.0
+    u10: {series: {file: input/wind_u10_cutoff.dat}}
+    v10: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+
+boundary_conditions:
+  - name: walls
+    region: {polygon: [[-1.0, -1.0], [5001.0, -1.0], [5001.0, 101.0], [-1.0, 101.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta]
+  monitors:
+    - {name: eta_west, i: 0, j: 0, variables: [eta]}
+    - {name: eta_east, i: 49, j: 0, variables: [eta]}

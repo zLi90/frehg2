@@ -84,12 +84,8 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
     met_ = atm::MetForcing(config.atmosphere, config);
   }
   if (windCfg_.enabled) {
-    if (windCfg_.speed.fromSeries) {
-      windSpeedSeries_ = TimeSeries::fromFile(config.resolvePath(windCfg_.speed.file));
-    }
-    if (windCfg_.direction.fromSeries) {
-      windDirectionSeries_ = TimeSeries::fromFile(config.resolvePath(windCfg_.direction.file));
-    }
+    windForcing_ = WindForcing(
+        windCfg_, [&config](const std::string& file) { return config.resolvePath(file); });
   }
 
   const auto ny2 = static_cast<std::size_t>(grid_.nyLocal()) + 2;
@@ -514,9 +510,10 @@ void SurfaceSolver::beginStep(real_t t) {
     evap_ = evapIsSeries_ ? evapSeries_.value(t) : evapConstant_;
   }
   if (windCfg_.enabled) {
-    windSpeed_ = windCfg_.speed.fromSeries ? windSpeedSeries_.value(t) : windCfg_.speed.constant;
-    windDirection_ = windCfg_.direction.fromSeries ? windDirectionSeries_.value(t)
-                                                   : windCfg_.direction.constant;
+    const WindSample wind = windForcing_.sample(t);
+    windSpeed_ = wind.speed;
+    windOmega_ = wind.omega;
+    windCd_ = wind.dragCd;
   }
 
   for (DeviceBcList& list : etaBcs_) {

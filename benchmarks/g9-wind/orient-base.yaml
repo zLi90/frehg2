@@ -1,0 +1,58 @@
+# The Q6 x-battery base case (v2 plan §8.1/§9: "the 8-orientation setup
+# case is itself the symmetry gate"): a square 200 x 200 m basin, 1 m
+# deep, Garratt wind at U10 = 10 m/s. The harness rewrites (u10, v10)
+# for the 8 compass directions and asserts the steady eta fields map
+# onto each other under the corresponding rotation/reflection (the
+# comparisons hold at any time, but friction-settled steady fields make
+# the tolerance sharp). Q6 target schema — red until the capability
+# lands.
+simulation:
+  id: g9-orient
+  title: Q6 8-orientation wind-setup symmetry battery
+
+domain:
+  nx: 20
+  ny: 20
+  nz: 1
+  dx: 10.0
+  dy: 10.0
+  dz: 0.5
+  bottom_elevation: {constant: -1.0}
+
+time:
+  dt: 1.0
+  t_end: 6000.0
+  output_interval: 6000.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    coefficient: {constant: 0.02}
+  min_depth: 1.0e-6
+  wetting_face_depth: 1.0e-6
+  wind:
+    enabled: true
+    law: garratt
+    cap: 3.5e-3
+    attenuation_depth: 5.0
+    u10: {constant: 10.0}
+    v10: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+
+boundary_conditions:
+  - name: walls
+    region: {polygon: [[-1.0, -1.0], [201.0, -1.0], [201.0, 201.0], [-1.0, 201.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta]
