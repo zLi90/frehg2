@@ -52,7 +52,9 @@ class TimeSeries {
   /// \name Raw sample access (v2 Q6: the wind module rebuilds direction
   /// series as unit-vector component series for circle-safe interpolation)
   ///@{
+  /// The sample times, strictly increasing.
   const std::vector<real_t>& times() const { return times_; }
+  /// The sample values, parallel to times().
   const std::vector<real_t>& values() const { return values_; }
   ///@}
 

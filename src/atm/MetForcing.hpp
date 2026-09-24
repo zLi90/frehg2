@@ -43,6 +43,8 @@ class MetForcing {
     load(atm_.windSpeed, windSpeed_);
   }
 
+  /// True when an atmosphere block was configured (sample() is only
+  /// meaningful then).
   bool present() const { return atm_.present; }
 
   /// The met state at time \p t.
