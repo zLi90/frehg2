@@ -5,7 +5,7 @@ layout (all field datasets are `float64`, snapshot times are keyed by integer
 seconds):
 
 ```
-/frehg2                     root group; attrs: version, git sha, config text, created
+/frehg2                     root group; attrs: version, git_sha (revision stamp), config text, created
 /grid/x_center     [NX]     cell-center x coordinates [m]
 /grid/y_center     [NY]     cell-center y coordinates [m]
 /grid/z_center     [NZ]     layer-center depths
@@ -164,7 +164,7 @@ Top-level sections:
 
 | Key | Contents |
 |---|---|
-| `provenance` | frehg2 version + git SHA, build type, hostname, MPI ranks and `[px, py]` decomposition, OpenMP threads, Kokkos backend, ISO-8601 start/end times, wall seconds, the input YAML path and its SHA-256, restart parentage (`restart_from`, `restart_time`) when restarted, `finished` |
+| `provenance` | frehg2 `version` + `git_sha` (the revision stamp, below), build type, hostname, MPI ranks and `[px, py]` decomposition, OpenMP threads, Kokkos backend, ISO-8601 start/end times, wall seconds, the input YAML path and its SHA-256, restart parentage (`restart_from`, `restart_time`) when restarted, `finished` |
 | `configuration` | the fully **resolved** configuration — every default materialized; exactly what `frehg --resolve <input>` prints, byte-comparable against a re-resolve of the input |
 | `modules` | module flags, coupling mode, density-coupling state |
 | `boundary_conditions` | per BC: name, target, kind, value (series files carry their SHA-256), polygon vertex count and bounding box, global member-cell count |
@@ -177,3 +177,22 @@ sentinel lines; `tools/check_run_record.py` validates a record (schema,
 launch geometry, configuration round-trip) and is applied to every
 regression gate run automatically (gate r1). `scripts/run_scaling.py` reads
 its timings from the record rather than scraping stdout.
+
+**Revision stamp.** `provenance.git_sha` names the source tree the binary
+was built from; the HDF5 `/frehg2` `git_sha` attribute, the log header
+(`frehg2 <version> (git <stamp>), ...`) and the usage text of `frehg` run
+without arguments carry the same value. It is one of:
+
+| Stamp | Meaning |
+|---|---|
+| `<sha12>` | the 12-digit abbreviated commit SHA (never a tag name); the tracked files matched that commit |
+| `<sha12>-dirty` | tracked files differed from that commit, staged or not: the output cannot be reproduced from the commit alone. Untracked files do not count |
+| `unknown` | the build found no git, or the source tree has no `.git` of its own (a release tarball, even one unpacked inside another checkout) |
+
+The stamp is taken as each build starts, not when CMake configures, so an
+incremental rebuild after a commit or an edit restamps the binary (v2 plan
+V2-A20 finding 5); an unchanged stamp is not rewritten, so a no-op build
+recompiles nothing. An edit made while a build runs shows up in the next
+build's stamp. `check_run_record.py` (r1) checks that the field is present,
+not that it is current; the unit test `unit.git_revision_stamp` gates its
+currency.

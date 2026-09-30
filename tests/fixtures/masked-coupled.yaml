@@ -1,0 +1,76 @@
+# §8.4 negative fixture (Q7): a COUPLED run whose bathymetry masks one
+# column adjacent to the west edge (bed at -999 m, far below the
+# subsurface box -> ktop = nz, the fully-masked marker). Coupled runs
+# require every column active in the surface system, so the Simulation
+# constructor must refuse this loudly (the P3 scope guard).
+# unit.masked_coupled_fatal passes exactly when the named fatal fires —
+# this pins "accepted config, loud runtime rejection" as the documented
+# disposition of the masked x coupled cell (the §8.3 rule's rejection
+# arm; a silent no-op is the forbidden outcome). Note a NODATA bed does
+# NOT mask: it is NaN and aborts the first solve (user-guide/migration.md
+# documents the deep-bed masking convention).
+simulation:
+  id: masked-coupled-fixture
+  title: coupled run with a fully masked edge-adjacent column (must refuse)
+
+domain:
+  nx: 3
+  ny: 3
+  nz: 4
+  dx: 1.0
+  dy: 1.0
+  dz: 0.25
+  bottom_elevation: {file: masked_dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 1.0
+  t_end: 10.0
+  output_interval: 10.0
+
+modules:
+  surface_water: true
+  groundwater: true
+
+coupling:
+  mode: sync
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.02}
+  min_depth: 1.0e-06
+  wetting_face_depth: 1.0e-06
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+groundwater:
+  specific_storage: 1.0e-5
+  timestep:
+    dt_init: 1.0
+    dt_min: 1.0
+    dt_max: 1.0
+
+soil:
+  types:
+    - name: sand
+      ksx: 1.0e-4
+      ksy: 1.0e-4
+      ksz: 1.0e-4
+      theta_s: 0.35
+      theta_r: 0.02
+      vg_alpha: 3.0
+      vg_n: 2.0
+  map: {constant: sand}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.1}
+  groundwater:
+    water_table: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta]

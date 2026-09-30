@@ -465,6 +465,76 @@ TEST(GwModule, ReallocateRestoresIsolatedHeadConsistency) {
   }
 }
 
+TEST(GwModule, FullyMaskedColumnAdjacentToEachEdgeConserves) {
+  // The §8.4 masked-column row: masking has NO yaml key — it derives from
+  // the bathymetry (TerrainMetric buildRegularMesh: a bed below the
+  // subsurface box bottom leaves no active layer, ktop == nz; Grid.hpp:
+  // ktop == nz marks a fully inactive column). For each of the four
+  // edges, one edge-adjacent column is fully masked; the closed domain
+  // drains internally under gravity (the ClosedColumn forcing) and must
+  // (a) leave the masked column inert and (b) close the gw mass audit.
+  struct Position {
+    const char* name;
+    int gj;
+    int gi;
+  };
+  const Position positions[4] = {
+      {"west", 1, 0}, {"east", 1, 2}, {"south", 0, 1}, {"north", 2, 1}};
+  for (const Position& pos : positions) {
+    std::vector<real_t> bath(9, 0.0);
+    bath[static_cast<std::size_t>(pos.gj * 3 + pos.gi)] = -1.0;  // below the box
+    const std::string dir = writeFlatFile("bath.dat", bath);
+    MiniGw sim;
+    sim.cfg = gwBaseConfig(3, 3, 4, 0.05, 0.5);
+    sim.cfg.configDir = dir;
+    sim.cfg.domain.bottomElevation.fromFile = true;
+    sim.cfg.domain.bottomElevation.file = "bath.dat";
+    sim.build();
+
+    // The bathymetry-derived mask: no active layer, gid compressed out.
+    EXPECT_EQ(sim.mesh->ktop()(pos.gj, pos.gi), 4) << pos.name;
+    EXPECT_EQ(sim.grid->gid3Host()(static_cast<std::size_t>(pos.gj) + 1,
+                                   static_cast<std::size_t>(pos.gi) + 1, 0),
+              -1)
+        << pos.name;
+    EXPECT_EQ(sim.grid->activeCount3Local(), 32) << pos.name;
+
+    // Record the masked column's state; it must not move at all.
+    real_t wcMasked[4];
+    real_t hMasked[4];
+    for (int k = 0; k < 4; ++k) {
+      wcMasked[k] = interior3(sim.gw->waterContent(), pos.gj + 1, pos.gi + 1, k);
+      hMasked[k] = interior3(sim.gw->head(), pos.gj + 1, pos.gi + 1, k);
+    }
+
+    const real_t v0 = sim.volume();
+    real_t prev = v0;
+    for (int n = 0; n < 30; ++n) {
+      sim.step();
+      const real_t v = sim.volume();
+      const frehg::gw::GwStepAudit& a = sim.gw->audit();
+      const real_t residual =
+          (v - prev) - (a.boundaryIn - a.ssStorage + a.reallocAdjust - a.vloss);
+      ASSERT_LE(std::fabs(residual), 1.0e-12) << pos.name << " step " << n;
+      EXPECT_EQ(a.boundaryIn, 0.0) << pos.name << " step " << n;
+      EXPECT_LE(std::fabs(v - prev), 1.0e-8 * v0) << pos.name << " step " << n;
+      prev = v;
+    }
+
+    // (a) the masked column is inert — bit-identical state.
+    for (int k = 0; k < 4; ++k) {
+      EXPECT_EQ(interior3(sim.gw->waterContent(), pos.gj + 1, pos.gi + 1, k), wcMasked[k])
+          << pos.name << " k=" << k;
+      EXPECT_EQ(interior3(sim.gw->head(), pos.gj + 1, pos.gi + 1, k), hMasked[k])
+          << pos.name << " k=" << k;
+    }
+    // (b) the active domain genuinely evolved around it (the center column
+    // drains top-down, never masked in any of the four layouts).
+    EXPECT_GT(interior3(sim.gw->waterContent(), 2, 2, 3), 0.2) << pos.name;
+    EXPECT_LT(interior3(sim.gw->waterContent(), 2, 2, 0), 0.2) << pos.name;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Subsurface mesh geometry (TerrainMetric; legacy map.c:196-616).
 // ---------------------------------------------------------------------------

@@ -79,19 +79,22 @@ struct ScalarSpec {
   BcScalar field = BcScalar::Salinity;  ///< which scalar_value conditions bind
   bool isTemperature = false;           ///< thermal physics switches
   bool superbee = false;                ///< advection scheme
-  real_t difuX = 0.0, difuY = 0.0;      ///< surface diffusivities [m^2/s]
-  real_t dispLon = 0.0, dispLat = 0.0;  ///< dispersivities [m]
+  real_t difuX = 0.0;                   ///< surface x-diffusivity [m^2/s]
+  real_t difuY = 0.0;                   ///< surface y-diffusivity [m^2/s]
+  real_t dispLon = 0.0;                 ///< longitudinal dispersivity [m]
+  real_t dispLat = 0.0;                 ///< transverse dispersivity [m]
   /// Molecular slot of the dispersion tensor: solute tau*Dm for
   /// salinity (times theta_s in the tensor), alpha_e = lambda/(rho c)_w
   /// for temperature (used as-is).
   real_t dispMol = 0.0;
   bool hasBoundMin = true;              ///< salinity: always (legacy 0)
-  real_t boundMin = 0.0;
-  bool hasBoundMax = false;
-  real_t boundMax = 0.0;
+  real_t boundMin = 0.0;                ///< lower clamp when hasBoundMin
+  bool hasBoundMax = false;             ///< upper clamp configured?
+  real_t boundMax = 0.0;                ///< upper clamp when hasBoundMax
   bool legacyEvapAllowance = false;     ///< salinity only
   real_t kappaFactor = 0.0;             ///< (rho c)_s / (rho c)_w
   real_t heatCapacityWater = 0.0;       ///< (rho c)_w [J/m^3/K]
+  /// Surface heat-exchange source (temperature spec; None for salinity).
   SurfaceExchangeConfig::Mode exchange = SurfaceExchangeConfig::Mode::None;
   real_t equilibriumT = 0.0;            ///< T_e [C]
   real_t equilibriumK = 0.0;            ///< K_e [W/m^2/K]

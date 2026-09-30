@@ -100,7 +100,10 @@ set(_mpi_test_env "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;UCX_TLS=tcp,self,sm")
 # singletons race on one shared filename and flake. The assertion turns that
 # into a deterministic, named failure. mpiexec (hydra) forwards the variable
 # to the ranks.
-foreach(nranks 1 2 4)
+# 3 ranks joined the loop at Q7 (§8.4 non-divisible splits): a prime rank
+# count forces the odd-block remainder paths (7 = 3+2+2, 101 = 34+34+33)
+# and the strip decompositions no power-of-two lane visits.
+foreach(nranks 1 2 3 4)
   add_test(NAME mpi.halo.n${nranks}
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${nranks}
             $<TARGET_FILE:frehg_mpi_halo>)
@@ -130,12 +133,45 @@ add_test(NAME unit.parameter_docs
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/check_parameter_docs.py)
 set_tests_properties(unit.parameter_docs PROPERTIES LABELS "unit")
 
+# §8.2 BC-matrix lockstep (Q7): the canonical kind x target x coupling
+# enumeration is complete, every cited test exists, zero limitation rows
+# (release rule), and the schema's kind/target vocabularies cannot grow
+# without extending the matrix.
+add_test(NAME unit.bc_matrix
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/check_bc_matrix.py)
+set_tests_properties(unit.bc_matrix PROPERTIES LABELS "unit")
+
+# §8.3 feature-interaction lockstep (Q7): the coverage table has zero
+# empty/GAP cells, every cited test exists, and every GPU row is marked
+# experimental or supported.
+add_test(NAME unit.feature_coverage
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/check_feature_coverage.py)
+set_tests_properties(unit.feature_coverage PROPERTIES LABELS "unit")
+
 # Run-record checker sensitivity (v2 plan §2A gate r1, §6.3 negative tests):
 # a synthetic valid record passes; every structural corruption fails.
 add_test(NAME unit.run_record_checker
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/test_run_record_checker.py
           --checker ${CMAKE_SOURCE_DIR}/tools/check_run_record.py)
 set_tests_properties(unit.run_record_checker PROPERTIES LABELS "unit")
+
+# Revision-stamp currency (v2 plan V2-A20 finding 5): the git revision that
+# the run record, the HDF5 /frehg2 attributes and the log header carry must
+# follow the source tree on every build: new commit -> new SHA, tracked edit ->
+# "-dirty", no git -> "unknown", and an unchanged stamp is never rewritten
+# (no-op builds recompile nothing). r1 checks the record's structure, not the
+# stamp's currency. Drives the real cmake/FrehgGitRevision.cmake in a throwaway
+# git repository; needs git, no compiler.
+add_test(NAME unit.git_revision_stamp
+  COMMAND "${CMAKE_COMMAND}"
+          "-DFREHG_CMAKE_MODULE_DIR=${CMAKE_SOURCE_DIR}/cmake"
+          "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+          "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/git_revision_stamp"
+          "-DTEST_GENERATOR=${CMAKE_GENERATOR}"
+          "-DTEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_git_revision.cmake")
+set_tests_properties(unit.git_revision_stamp PROPERTIES LABELS "unit"
+  PROCESSORS 1 TIMEOUT 300 SKIP_REGULAR_EXPRESSION "git_revision_stamp: SKIPPED")
 
 # p2/p3 gate-logic negative battery (v2 plan §6.3): each p-gate assertion is
 # provably able to fail on synthetic result sets.
@@ -185,6 +221,13 @@ foreach(case
     g4-evap/g4b-concentration
     g4-evap/g4d-drain
     g9-wind/g9a-setup
+    g9-wind/g9b-linear
+    g9-wind/g9c-slope
+    g9-wind/g10-seiche
+    x-orient/swe-orient-base
+    x-orient/gw-orient-base
+    x-orient/transport-orient-base
+    x-orient/conveyor-base
     g6-heat/g6a-bp
     g6-heat/g6b-ogata
     g6-heat/g6c-stallman
@@ -204,6 +247,13 @@ foreach(case
             ${CMAKE_SOURCE_DIR}/benchmarks/${case}.yaml)
   set_tests_properties(validate.${case_name} PROPERTIES LABELS "unit")
 endforeach()
+
+# The wind battery base shares the file name orient-base.yaml with the heat
+# battery's (already in the loop above), so it gets a disambiguated entry.
+add_test(NAME validate.wind-orient-base
+  COMMAND $<TARGET_FILE:frehg> --validate
+          ${CMAKE_SOURCE_DIR}/benchmarks/g9-wind/orient-base.yaml)
+set_tests_properties(validate.wind-orient-base PROPERTIES LABELS "unit")
 
 # ---------------------------------------------------------------------------
 # Regression gates (plan §8.3, §9): P1 gates b1 and b4. Goldens are fetched
@@ -424,6 +474,118 @@ add_test(NAME regression.g5.transposed
           --work ${CMAKE_BINARY_DIR}/regression/g5-transposed)
 set_tests_properties(regression.g5.transposed PROPERTIES
   LABELS "regression_nightly" ENVIRONMENT "${_regress_env}" TIMEOUT 43200)
+
+# ---------------------------------------------------------------------------
+# v2 Q7 x-gates (plan §8.2, amendment V2-A11; authored FAILING per §6.1).
+# The Outflow x {W,S} BC-matrix cells: the west staircase pair as committed
+# in validation/swe-outflow-staircase plus its generated south transpose.
+# Four ~10 s serial runs with an analytic answer; per-PR sized. Red against
+# the stock WetDry.cpp west/south ghost rules; green once the two face-area
+# copies are deleted behind this gate.
+# ---------------------------------------------------------------------------
+add_test(NAME regression.outflow_staircase
+  COMMAND ${_regress} outflow-staircase ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/outflow-staircase)
+set_tests_properties(regression.outflow_staircase PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# The §8.1 v1-module dihedral batteries (Q7 backfill; the designated set's
+# b1-derived SWE, b3-derived gw and tracer-advection transport cases,
+# benchmarks/x-orient/). 8 strict-mode runs of a ~0.1 s case each; per-PR.
+# The swe battery rotates its single-cell `outflow` outlet through all four
+# edges, so it lands RED with the stock V2-A11 ghost rules and is turned
+# green by the same fix as regression.outflow_staircase.
+foreach(battery swe gw transport)
+  add_test(NAME regression.${battery}_orient
+    COMMAND ${_regress} ${battery}-orient ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/${battery}-orient)
+  set_tests_properties(regression.${battery}_orient PROPERTIES
+    LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+endforeach()
+
+# The §8.2 side sweep for the surface footprint kinds (discharge, the
+# inflow-riding scalar_value, eta): the conveyor case in four rotations,
+# absolute per-side criteria. Per-PR (~2 min serial).
+add_test(NAME regression.surface_bc_sides
+  COMMAND ${_regress} surface-bc-sides ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/surface-bc-sides)
+set_tests_properties(regression.surface_bc_sides PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# §8.4 restart-mid-transient rows: wind checkpointed before its cutoff
+# step-down (g10) and evaporation checkpointed mid-drying (g4d). Both are
+# bitwise-class determinism gates, per-PR.
+add_test(NAME regression.wind_restart
+  COMMAND ${_regress} wind-restart ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/wind-restart)
+set_tests_properties(regression.wind_restart PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+add_test(NAME regression.evap_restart
+  COMMAND ${_regress} evap-restart ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/evap-restart)
+set_tests_properties(regression.evap_restart PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# §8.3 pair closures: subcycling + transport (shortened b6-ss under
+# coupling.mode: subcycled, ledger/bounds criteria — the first exercise of
+# the pair), AMG hierarchy reuse across a restart (documented 1e-6 bound;
+# the straight and restarted legs rebuild on different solve counters),
+# and aijkokkos across a restart (measured exactly deterministic).
+add_test(NAME regression.b6_subcycled
+  COMMAND ${_regress} b6-subcycled ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/b6-subcycled)
+set_tests_properties(regression.b6_subcycled PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+add_test(NAME regression.g1.b1_restart.amg
+  COMMAND ${_regress} b1-restart --solver amg ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/g1-b1-restart-amg)
+set_tests_properties(regression.g1.b1_restart.amg PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+add_test(NAME regression.p1.b1_restart.aijkokkos
+  COMMAND ${_regress} b1-restart --mat-type aijkokkos ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/p1-b1-restart-aijkokkos)
+set_tests_properties(regression.p1.b1_restart.aijkokkos PROPERTIES
+  LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# The §7.1 decomposition lane for the salinity transport module (the b6
+# gate is serial by design and g5 runs at one rank, so salinity halo /
+# limiter staging under decomposition had no lane until Q7).
+foreach(mode strict default)
+  add_test(NAME regression.tracer_rank_invariance.${mode}
+    COMMAND ${_regress} rank-invariance-tracer --mode ${mode} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/rank-tracer-${mode})
+  set_tests_properties(regression.tracer_rank_invariance.${mode} PROPERTIES
+    LABELS "regression;mpi" ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 1800)
+endforeach()
+
+# §8.3 pair-closure gates (Q7): each cell of the feature-interaction table
+# that had no covering gate gets one — wind over a really drying tip, heat
+# on the scaled terrain mesh, the two registered scalars co-resident (with
+# both density betas) through a restart, both atmosphere consumers
+# co-active, and temperature under subcycled coupling. All per-PR-sized.
+foreach(pair wind-drydown terrain-heat two-scalar-restart evap-heat
+        heat-subcycled)
+  string(REPLACE "-" "_" pair_name ${pair})
+  add_test(NAME regression.${pair_name}
+    COMMAND ${_regress} ${pair} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/${pair})
+  set_tests_properties(regression.${pair_name} PROPERTIES
+    LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+endforeach()
+
+# §8.4: a coupled run with a fully masked column is refused loudly (the
+# P3 scope guard, Simulation.cpp); the fixture masks an edge-adjacent
+# column via bathymetry nodata. PASS_REGULAR_EXPRESSION overrides the
+# nonzero exit: the test passes exactly when the named fatal fires.
+add_test(NAME unit.masked_coupled_fatal
+  COMMAND $<TARGET_FILE:frehg>
+          ${CMAKE_SOURCE_DIR}/tests/fixtures/masked-coupled.yaml)
+set_tests_properties(unit.masked_coupled_fatal PROPERTIES LABELS "unit"
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests/fixtures
+  PASS_REGULAR_EXPRESSION "fully masked columns are not part of the P3-validated scope")
 
 # ---------------------------------------------------------------------------
 # Sanitized builds run 3-10x slower than the timeouts above assume; the

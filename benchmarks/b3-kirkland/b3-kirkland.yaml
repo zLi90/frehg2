@@ -88,4 +88,4 @@ boundary_conditions:
 output:
   filename: out/output.h5      # pinned by b3-kirkland/makeplot.py (plan §2.3)
   variables:
-    groundwater: [hydraulic_head, water_content]
+    groundwater: [hydraulic_head, water_content, qx, qy]

@@ -172,4 +172,25 @@ TEST(GridSerial, ExplicitDecompositionMismatchIsFatal) {
   EXPECT_THROW(Grid(MPI_COMM_SELF, dom), frehg::FatalError);
 }
 
+TEST(GridSerial, ExplicitDecompositionHonoredAndMismatchFatal) {
+  // Q7 §8.4: the explicit domain.decomposition path (mpi_nx/mpi_ny given)
+  // had no test on any of its branches. At one rank, 1 x 1 must be
+  // honored and every mismatched request must fail loudly.
+  frehg::DomainConfig dom = smallDomain();
+  dom.decomposition.mpiNx = 1;
+  dom.decomposition.mpiNy = 1;
+  const Grid explicitGrid(MPI_COMM_SELF, dom);
+  EXPECT_EQ(explicitGrid.nxLocal(), dom.nx);
+  EXPECT_EQ(explicitGrid.nyLocal(), dom.ny);
+
+  dom.decomposition.mpiNx = 2;
+  dom.decomposition.mpiNy = 2;
+  EXPECT_THROW(Grid(MPI_COMM_SELF, dom), frehg::FatalError);
+  dom.decomposition.mpiNy = 0;  // mpi_nx alone must divide the rank count
+  EXPECT_THROW(Grid(MPI_COMM_SELF, dom), frehg::FatalError);
+  dom.decomposition.mpiNx = 0;
+  dom.decomposition.mpiNy = 3;
+  EXPECT_THROW(Grid(MPI_COMM_SELF, dom), frehg::FatalError);
+}
+
 }  // namespace

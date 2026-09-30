@@ -52,8 +52,12 @@ CASES = [
 ]
 
 
-def check(name, path):
-    """Return a list of failure strings for one case ([] = pass)."""
+def check(name, path, outlet=0, neighbor=1):
+    """Return a list of failure strings for one case ([] = pass).
+
+    `outlet`/`neighbor` are ravel indices of the outlet cell and its
+    upslope neighbour — 0/1 for the committed west pair; the regression
+    harness passes 9/8 for the generated east/north variants."""
     fails = []
     with h5py.File(HERE / path, "r") as f:
         audit = f["/monitor/mass_audit"]
@@ -72,8 +76,8 @@ def check(name, path):
     bout = float(outflow[-1])
     bc_in = float(ma[-1, cols["bc_inflow"]])
     clamped = float(ma[-1, cols["clamped"]])
-    bed_step = float(bottom[1] - bottom[0])
-    outlet_depth = float(depth[0])
+    bed_step = abs(float(bottom[neighbor] - bottom[outlet]))
+    outlet_depth = float(depth[outlet])
 
     print(f"  {name}")
     print(f"    outlet depth   : {outlet_depth:.6e} m   (normal {NORMAL_DEPTH:.6e} m, "

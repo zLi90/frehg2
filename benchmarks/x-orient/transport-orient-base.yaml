@@ -1,0 +1,86 @@
+# The v2 §8.1 transport dihedral battery base (Q7 x-gate backfill; the
+# tracer-advection transport case of the plan's designated set, realized as
+# a closed problem). A 24 x 24 m, ~0.5 m deep walled basin; the initial
+# stage carries a small x-tilt and the tracer an off-axis blob (both
+# harness-transformed rasters, input/tr_*.dat), so the sloshing flow
+# advects the blob back and forth under superbee. No boundary throughflow:
+# this battery gates the advection/limiter machinery's OWN orientation
+# symmetry at near-machine precision. The BC-kind side sweep the plan §8.2
+# matrix needs lives in the absolute-criteria gates instead
+# (regression.outflow_staircase and regression.surface_bc_sides), because
+# the preserved legacy plus/minus edge arithmetic makes mirror-equality of
+# boundary-DRIVEN surface flow a documented exemption
+# (docs/theory/symmetry-exemptions.md), not a gateable identity.
+simulation:
+  id: transport-orient
+  title: Q7 8-orientation surface-transport symmetry battery
+
+domain:
+  nx: 12
+  ny: 12
+  nz: 1
+  dx: 2.0
+  dy: 2.0
+  dz: 1.0
+  bottom_elevation: {constant: -0.5}
+  follow_terrain: false
+
+time:
+  dt: 0.5
+  t_end: 60.0
+  output_interval: 60.0
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.02}
+  viscosity: {x: 0.0, y: 0.0}
+  min_depth: 1.0e-06
+  wetting_face_depth: 1.0e-06
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+transport:
+  scheme: {advection: superbee}
+  surface_diffusivity: {x: 1.0e-10, y: 1.0e-10}
+  bounds: {min: 0.0, max: 1.0}
+
+initial_conditions:
+  surface:
+    eta: {file: input/tr_eta0.dat}
+  transport:
+    surface: {file: input/tr_blob.dat}
+
+boundary_conditions:
+  - name: wall-w
+    region: {polygon: [[-0.1, -0.1], [2.1, -0.1], [2.1, 24.1], [-0.1, 24.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-e
+    region: {polygon: [[21.9, -0.1], [24.1, -0.1], [24.1, 24.1], [21.9, 24.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-s
+    region: {polygon: [[-0.1, -0.1], [24.1, -0.1], [24.1, 1.9], [-0.1, 1.9]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-n
+    region: {polygon: [[-0.1, 22.1], [24.1, 22.1], [24.1, 24.1], [-0.1, 24.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta]
+    transport: [concentration_surface]

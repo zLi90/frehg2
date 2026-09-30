@@ -8,6 +8,7 @@
 /// jacobi for the strict rank-invariance mode of plan §8.2).
 
 #include "core/Config.hpp"
+#include "core/GitRevision.hpp"
 #include "core/Logger.hpp"
 #include "core/PetscSession.hpp"
 #include "core/Timer.hpp"
@@ -23,7 +24,7 @@
 namespace {
 
 int printUsage() {
-  std::cout << "frehg " << FREHG_VERSION << " (git " << FREHG_GIT_SHA << ")\n"
+  std::cout << "frehg " << FREHG_VERSION << " (git " << frehg::gitRevision() << ")\n"
             << "usage:\n"
             << "  frehg <config.yaml> [petsc options]   run a simulation\n"
             << "  frehg --validate <config.yaml>        validate a configuration and exit\n"
@@ -61,8 +62,9 @@ int runResolve(const std::string& path) {
 
 int runSimulation(const std::string& path) {
   const frehg::FrehgConfig config = frehg::loadConfig(path);
-  frehg::log::info(frehg::log::msg() << "frehg " << FREHG_VERSION << " (git " << FREHG_GIT_SHA
-                                     << ") running " << config.simulation.id);
+  frehg::log::info(frehg::log::msg() << "frehg " << FREHG_VERSION << " (git "
+                                     << frehg::gitRevision() << ") running "
+                                     << config.simulation.id);
   frehg::log::info(frehg::describeConfig(config));
   frehg::driver::Simulation simulation(MPI_COMM_WORLD, config, path);
   simulation.run();

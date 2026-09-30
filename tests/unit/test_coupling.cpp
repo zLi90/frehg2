@@ -16,12 +16,16 @@
 #include "gw/RichardsSolver.hpp"
 #include "gw/TerrainMetric.hpp"
 #include "swe/SurfaceSolver.hpp"
+#include "transport/ScalarSolver.hpp"
 
 #include <gtest/gtest.h>
 #include <mpi.h>
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace {
@@ -39,6 +43,9 @@ struct MiniCoupled {
   std::unique_ptr<frehg::swe::SurfaceSolver> surface;
   std::unique_ptr<frehg::gw::RichardsSolver> gw;
   std::unique_ptr<frehg::coupling::Coupler> coupler;
+  /// Optional temperature-transport instance (item: the coupled thermal
+  /// side-Dirichlet admission); built by buildTemperature() after build().
+  std::unique_ptr<frehg::transport::ScalarSolver> temperature;
   real_t t = 0.0;
 
   void build() {
@@ -53,11 +60,63 @@ struct MiniCoupled {
     coupler = std::make_unique<frehg::coupling::Coupler>(*grid, cfg, *surface, *gw);
   }
 
+  /// Wire the temperature ScalarSolver exactly as the driver does
+  /// (Simulation::buildTransport with modules.temperature).
+  void buildTemperature() {
+    frehg::transport::SurfaceWiring sw;
+    sw.active = true;
+    sw.minDepth = surface->minDepth();
+    sw.dept = surface->depth();
+    sw.etan = surface->etaStart();
+    sw.bottom = surface->bottom();
+    sw.uu = surface->uu();
+    sw.vv = surface->vv();
+    sw.fu = surface->flowRateX();
+    sw.fv = surface->flowRateY();
+    sw.asx = surface->faceAreaX();
+    sw.asy = surface->faceAreaY();
+    sw.rainMask = surface->rainApplyMask();
+    frehg::transport::SubsurfaceWiring gwW;
+    gwW.active = true;
+    gwW.wc = gw->waterContent();
+    gwW.wcn = gw->waterContentStart();
+    gwW.qx = gw->fluxXVolumetric();
+    gwW.qy = gw->fluxYVolumetric();
+    gwW.qzF = gw->fluxZFaceVolumetric();
+    gwW.kx = gw->faceConductivityX();
+    gwW.ky = gw->faceConductivityY();
+    gwW.kzF = gw->faceConductivityZFace();
+    gwW.wcs = gw->soilThetaS();
+    gwW.ksz = gw->soilKsz();
+    gwW.dz3d = mesh->dz3d();
+    gwW.ax = mesh->areaX();
+    gwW.ay = mesh->areaY();
+    gwW.cosx = mesh->cosX();
+    gwW.cosy = mesh->cosY();
+    gwW.az = mesh->areaZ();
+    gwW.topCode = gw->topBcCode();
+    gwW.topValue = gw->topBcValue();
+    gwW.sideCodeYp = gw->sideBcCodeYp();
+    gwW.sideCodeYm = gw->sideBcCodeYm();
+    gwW.sideCodeXm = gw->sideBcCodeXm();
+    gwW.sideCodeXp = gw->sideBcCodeXp();
+    frehg::transport::CouplingWiring cw;
+    cw.active = true;
+    cw.qss = coupler->seepageRate();
+    temperature = std::make_unique<frehg::transport::ScalarSolver>(
+        *grid, cfg, *boundaries, *halo, sw, gwW, cw,
+        frehg::transport::ScalarSpec::temperature(cfg));
+  }
+
   /// One coupled step at the coupler's own step size; returns the dt taken.
   real_t step() {
     const real_t dt = coupler->nextDt();
     t += dt;
     coupler->step(t, dt);
+    if (temperature) {
+      temperature->step(t, dt, gw->lastDtg(), surface->currentRain(),
+                        surface->currentEvaporation());
+    }
     return dt;
   }
 
@@ -158,6 +217,21 @@ real_t interior3(const frehg::Field3<real_t>& field, int j, int i, int k) {
   Kokkos::deep_copy(host, field);
   return host(static_cast<std::size_t>(j), static_cast<std::size_t>(i),
               static_cast<std::size_t>(k));
+}
+
+/// Writes a flat-list data file into a fresh temp directory; returns the
+/// dir (the test_gw.cpp pattern).
+std::string writeFlatFile(const std::string& name, const std::vector<real_t>& values) {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() /
+      ("frehg_coupling_test_" + std::to_string(::getpid()) + "_" + name);
+  std::filesystem::create_directories(dir);
+  std::ofstream out(dir / name);
+  out.precision(17);
+  for (const real_t v : values) {
+    out << v << "\n";
+  }
+  return dir.string();
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +479,221 @@ TEST(CoupledModule, SyncModeMarchesOnTheCommonAdaptiveStep) {
     expected = std::min(expected * 1.25, 2.0);
     EXPECT_NEAR(sim.step(), expected, 1.0e-12) << "step " << n;
   }
+}
+
+// ---------------------------------------------------------------------------
+// v2 Q7 §8.2 backfill: coupled surface boundary conditions under an active
+// exchange, and the coupled branch of the hydrostatic side ghost.
+// ---------------------------------------------------------------------------
+
+TEST(CoupledModule, DischargeInflowClosesBudgetUnderExchange) {
+  // A ponded coupled column set fed by a surface discharge inflow while the
+  // pond infiltrates: the injected volume is measured into bcInflow
+  // (Q dt / global member count per cell, FreeSurface.cpp assembleRhs) and
+  // the coupled per-step closure identity holds with the exchange active.
+  MiniCoupled sim;
+  sim.cfg = coupledBaseConfig(3, 10, 0.05, 0.5);
+  sim.cfg.initialConditions.surface.eta.constant = 0.02;  // pond: exchange on
+  frehg::BoundaryConditionConfig inlet;
+  inlet.name = "inlet";
+  inlet.polygon = {{-0.1, -0.1}, {1.1, -0.1}, {1.1, 1.1}, {-0.1, 1.1}};  // cell i = 0
+  inlet.target = frehg::BcTarget::Surface;
+  inlet.kind = frehg::BcKind::Discharge;
+  inlet.value.form = frehg::BcValueConfig::Form::Constant;
+  inlet.value.constant = 2.0e-4;  // total inflow [m^3/s] over the region
+  sim.cfg.boundaryConditions = {inlet};
+  sim.build();
+  const real_t vTotal = sim.surfaceVolume() + sim.gwVolume();
+  real_t vs = sim.surfaceVolume();
+  real_t vg = sim.gwVolume();
+  real_t accum = 0.0;
+  real_t inflowSum = 0.0;
+  real_t exchangedSum = 0.0;
+  for (int n = 0; n < 40; ++n) {
+    sim.step();
+    const frehg::coupling::CouplingAudit& c = sim.coupler->audit();
+    const frehg::swe::SurfaceStepAudit& s = sim.surface->audit();
+    EXPECT_LE(std::fabs(sim.closureResidual(vs, vg, accum)), 1.0e-10 * vTotal) << "step " << n;
+    // The discharge volume is exact: Q dt into the single member cell.
+    EXPECT_NEAR(s.bcInflow, 2.0e-4 * 0.5, 1.0e-15) << "step " << n;
+    inflowSum += s.bcInflow;
+    exchangedSum += c.gw.cplExchanged;
+    vs = sim.surfaceVolume();
+    vg = sim.gwVolume();
+    accum = c.accumVolume;
+  }
+  EXPECT_NEAR(inflowSum, 2.0e-4 * 0.5 * 40, 1.0e-12);
+  // Infiltration really ran alongside the inflow (net top-face flux down).
+  EXPECT_LT(exchangedSum, -1.0e-4);
+  EXPECT_GT(interior3(sim.gw->waterContent(), 1, 2, 0), 0.2);
+  // The injected volume stayed in the coupled system (closed edges).
+  EXPECT_GT(sim.surfaceVolume() + sim.gwVolume(), vTotal + 1.0e-3);
+}
+
+TEST(CoupledModule, OutflowEdgeDrainsCoupledPondConservatively) {
+  // A coupled pond over a bed sloping down to a WEST free-outflow edge
+  // (kind outflow continues the bed slope across the boundary face; the
+  // west/south faces read the halo-column face geometry — the V2-A11 face
+  // fix). The budget closes per step, the pond genuinely drains through
+  // the edge, and the below-bed clamp mints nothing.
+  const std::string dir =
+      writeFlatFile("bath.dat", {0.0, 0.05, 0.10, 0.0, 0.05, 0.10, 0.0, 0.05, 0.10});
+  MiniCoupled sim;
+  sim.cfg = coupledBaseConfig(3, 6, 0.05, 0.5);
+  sim.cfg.domain.ny = 3;
+  sim.cfg.configDir = dir;
+  sim.cfg.domain.bottomElevation.fromFile = true;
+  sim.cfg.domain.bottomElevation.file = "bath.dat";
+  sim.cfg.initialConditions.surface.eta.constant = 0.15;  // 5 cm over the crest
+  // The closure identity is asserted at 1e-10 of the coupled volume; the
+  // outflow correction is an assembly-side booking, so the eta solve must
+  // converge past the assertion floor (the default rtol 1e-8 leaves
+  // solver-residual-sized closure defects in this actively draining toy,
+  // unlike the quiescent ponds above).
+  sim.cfg.solver.surface.rtol = 1.0e-13;
+  frehg::BoundaryConditionConfig out;
+  out.name = "outlet";
+  out.polygon = {{-0.1, -0.1}, {0.9, -0.1}, {0.9, 3.1}, {-0.1, 3.1}};  // west column
+  out.target = frehg::BcTarget::Surface;
+  out.kind = frehg::BcKind::Outflow;
+  sim.cfg.boundaryConditions = {out};
+  sim.build();
+  const real_t vSurf0 = sim.surfaceVolume();
+  const real_t vTotal = vSurf0 + sim.gwVolume();
+  real_t vs = vSurf0;
+  real_t vg = sim.gwVolume();
+  real_t accum = 0.0;
+  real_t outflowSum = 0.0;
+  real_t clampSum = 0.0;
+  // 40 steps drain most of the pond while every cell stays wet; the final
+  // dry-out (around step 50 at this slope) carries a ~4e-10 absolute
+  // closure spike at the wet/dry transition steps, which is drying-front
+  // bookkeeping, not the outflow condition under test.
+  for (int n = 0; n < 40; ++n) {
+    sim.step();
+    const frehg::coupling::CouplingAudit& c = sim.coupler->audit();
+    const frehg::swe::SurfaceStepAudit& s = sim.surface->audit();
+    EXPECT_LE(std::fabs(sim.closureResidual(vs, vg, accum)), 1.0e-10 * vTotal) << "step " << n;
+    outflowSum += s.boundaryOutflow;
+    clampSum += std::fabs(s.clampVolume);
+    vs = sim.surfaceVolume();
+    vg = sim.gwVolume();
+    accum = c.accumVolume;
+  }
+  // The edge really released the pond (measured 0.851 of the 0.9 m^3)...
+  EXPECT_GT(outflowSum, 0.5);
+  // ...the pond drained (measured 0.025 m^3 remaining)...
+  EXPECT_LT(sim.surfaceVolume(), 0.1 * vSurf0);
+  // ...and the below-bed clamp minted nothing.
+  EXPECT_EQ(clampSum, 0.0);
+}
+
+TEST(CoupledModule, HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled) {
+  // The coupled branch of ghostHead (gw/Predictor.cpp): a hydrostatic side
+  // stage ABOVE the edge bed is a ponded/tidal boundary, and in a coupled
+  // run its ghost follows the LIVE local surface — (bed - zc) + dept —
+  // rather than the configured stage (the uncoupled fixed form
+  // (value - zc), pinned by GwModule.HydrostaticSideHoldsEquilibrium).
+  // Bed 0, nz = 5 x dz = 0.1; west-middle cell; mid-depth cell k = 2 has
+  // zc = -0.25.
+  const auto makeSim = [](real_t eta0, real_t stage) {
+    MiniCoupled sim;
+    sim.cfg = coupledBaseConfig(3, 5, 0.1, 0.5);
+    sim.cfg.domain.ny = 3;
+    sim.cfg.initialConditions.surface.eta.constant = eta0;
+    frehg::BoundaryConditionConfig side;
+    side.name = "sea";
+    side.polygon = {{-0.1, 1.1}, {0.9, 1.1}, {0.9, 1.9}, {-0.1, 1.9}};  // west mid cell
+    side.target = frehg::BcTarget::GroundwaterSide;
+    side.kind = frehg::BcKind::Head;
+    side.value.form = frehg::BcValueConfig::Form::Hydrostatic;
+    side.value.hydrostaticEta = stage;  // above the bed: the coupled branch
+    sim.cfg.boundaryConditions = {side};
+    sim.build();
+    // Re-enforce the ghost heads now that the coupler is attached (the gw
+    // constructor ran before attachCoupling); no physics has run, so dept
+    // is exactly the initial pond depth.
+    sim.gw->refreshDerivedState();
+    return sim;
+  };
+  const real_t zc = -0.25;
+
+  MiniCoupled shallow = makeSim(0.05, 0.5);
+  const real_t ghostShallow = interior3(shallow.gw->head(), 2, 0, 2);
+  // The ghost is the live-surface hydrostatic column, not the fixed stage.
+  EXPECT_NEAR(ghostShallow, (0.0 - zc) + 0.05, 1.0e-12);
+  EXPECT_GT(std::fabs(ghostShallow - (0.5 - zc)), 0.1);
+
+  // A deeper pond moves the ghost by exactly the depth change...
+  MiniCoupled deep = makeSim(0.15, 0.5);
+  const real_t ghostDeep = interior3(deep.gw->head(), 2, 0, 2);
+  EXPECT_NEAR(ghostDeep - ghostShallow, 0.10, 1.0e-12);
+
+  // ...while the configured stage value is inert once above the bed.
+  MiniCoupled otherStage = makeSim(0.05, 0.9);
+  EXPECT_DOUBLE_EQ(interior3(otherStage.gw->head(), 2, 0, 2), ghostShallow);
+
+  // And the side flux follows the live surface the way the formula says:
+  // the deeper pond's larger ghost head drives more inflow through the
+  // west boundary face (positive q points toward -x, so inflow is
+  // negative at the west face slot i = 0).
+  shallow.step();
+  deep.step();
+  const real_t qxShallow = interior3(shallow.gw->fluxXVolumetric(), 2, 0, 2);
+  const real_t qxDeep = interior3(deep.gw->fluxXVolumetric(), 2, 0, 2);
+  EXPECT_LT(qxShallow, 0.0);
+  EXPECT_LT(qxDeep, qxShallow);
+}
+
+TEST(CoupledModule, SideThermalDirichletAdmittedUnderCoupling) {
+  // The coupled twin of the Q5 thermal side-admission fix (V2-A17): a
+  // temperature side scalar_value on a NON-y+ side (west here) is
+  // limiter-admitted in a COUPLED run — the thermal extrema branches admit
+  // prescribed side ghosts on ALL FOUR sides, where the salinity spec
+  // admits y+ only (TransportModule.SalinitySideValueIsLimiterClippedOffYPlus
+  // pins that asymmetry uncoupled). Until now the thermal admission was
+  // exercised only uncoupled (the heat 8-orientation battery).
+  MiniCoupled sim;
+  sim.cfg = coupledBaseConfig(4, 6, 0.1, 2.0);
+  sim.cfg.domain.ny = 3;
+  sim.cfg.groundwater.specificStorage = 1.0e-5;
+  sim.cfg.soil.types = {testSoil(1.0e-4)};
+  sim.cfg.initialConditions.surface.eta.constant = 0.0;  // dry surface
+  sim.cfg.initialConditions.groundwater.value.constant = 0.42;  // conductive
+  sim.cfg.modules.temperature = true;
+  sim.cfg.temperature.thermalConductivity = 1.0;
+  sim.cfg.temperature.heatCapacitySolid = 2.2e6;
+  sim.cfg.initialConditions.temperature.groundwater.constant = 10.0;
+  sim.cfg.initialConditions.temperature.surface.constant = 0.0;
+  frehg::BoundaryConditionConfig head;
+  head.name = "side-head";
+  head.polygon = {{-0.1, 1.1}, {0.9, 1.1}, {0.9, 1.9}, {-0.1, 1.9}};  // west mid cell
+  head.target = frehg::BcTarget::GroundwaterSide;
+  head.kind = frehg::BcKind::Head;
+  head.value.form = frehg::BcValueConfig::Form::Constant;
+  head.value.constant = 0.5;  // pressurized side: inflow
+  frehg::BoundaryConditionConfig heat = head;
+  heat.name = "side-heat";
+  heat.kind = frehg::BcKind::ScalarValue;
+  heat.scalarField = frehg::BcScalar::Temperature;
+  heat.value.constant = 30.0;
+  sim.cfg.boundaryConditions = {head, heat};
+  sim.build();
+  sim.buildTemperature();
+
+  const real_t heatBefore = sim.temperature->ownedSubsurfaceMass();
+  for (int n = 0; n < 40; ++n) {
+    sim.step();
+  }
+  // The prescribed ghost is written on the west side...
+  EXPECT_DOUBLE_EQ(interior3(sim.temperature->subsurfaceScalar(), 2, 0, 3), 30.0);
+  // ...and — unlike the salinity y+-only rule — the limiter ADMITS it: the
+  // edge cell warms measurably above the wet-stencil maximum (10, where a
+  // clipped update would be pinned exactly; measured 10.127), and the
+  // boundary heat enters the ledger (measured 0.081 K m^3 over 40 steps).
+  EXPECT_GT(interior3(sim.temperature->subsurfaceScalar(), 2, 1, 3), 10.05);
+  EXPECT_GT(sim.temperature->ownedSubsurfaceMass(), heatBefore + 0.02);
+  EXPECT_GT(sim.temperature->audit().subsBoundary, 0.0);
 }
 
 }  // namespace

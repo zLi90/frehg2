@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 #include <mpi.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -113,7 +114,9 @@ struct MiniTransport {
   std::unique_ptr<frehg::transport::ScalarSolver> transport;
   real_t t = 0.0;
 
-  void build() {
+  /// \param temperature build the temperature ScalarSpec instead of the
+  ///        (default) salinity spec — the v2 Q5 second registered scalar.
+  void build(bool temperature = false) {
     grid = std::make_unique<frehg::Grid>(MPI_COMM_WORLD, cfg.domain);
     halo = std::make_unique<frehg::HaloExchanger>(*grid, false);
     if (cfg.modules.groundwater) {
@@ -174,16 +177,19 @@ struct MiniTransport {
       gwW.topValue = gw->topBcValue();
       gwW.sideCodeYp = gw->sideBcCodeYp();
       gwW.sideCodeYm = gw->sideBcCodeYm();
+      gwW.sideCodeXm = gw->sideBcCodeXm();
+      gwW.sideCodeXp = gw->sideBcCodeXp();
     }
     frehg::transport::CouplingWiring cw;
     if (coupler) {
       cw.active = true;
       cw.qss = coupler->seepageRate();
     }
-    transport = std::make_unique<frehg::transport::ScalarSolver>(*grid, cfg, *boundaries, *halo,
-                                                                 sw, gwW, cw,
-                                                                 frehg::transport::ScalarSpec::salinity(cfg));
-    if (gw) {
+    transport = std::make_unique<frehg::transport::ScalarSolver>(
+        *grid, cfg, *boundaries, *halo, sw, gwW, cw,
+        temperature ? frehg::transport::ScalarSpec::temperature(cfg)
+                    : frehg::transport::ScalarSpec::salinity(cfg));
+    if (gw && !temperature) {
       gw->attachScalar(transport->subsurfaceScalar(),
                        surface ? transport->surfaceScalar() : frehg::Field2<real_t>(),
                        cfg.groundwater.densityCoupling.enabled);
@@ -560,6 +566,33 @@ TEST(TransportModule, ConfiguredUpperBoundClampsTheUpdate) {
   }
 }
 
+TEST(TransportModule, TemperatureBoundsClampTheUpdate) {
+  // The temperature.bounds twin of ConfiguredUpperBoundClampsTheUpdate:
+  // the temperature spec reads its own config block (both bounds default
+  // OPEN there, unlike salinity's legacy lower bound 0), and a configured
+  // temperature.bounds.max clamps the update the same way.
+  MiniTransport mini;
+  mini.cfg = channelConfig(20, 10.0, 0.5, 0.2);
+  mini.cfg.modules.temperature = true;
+  mini.cfg.temperature.scheme.advection = frehg::TransportSchemeConfig::Advection::Superbee;
+  mini.cfg.temperature.surfaceDiffusivityX = 0.0;
+  mini.cfg.temperature.surfaceDiffusivityY = 0.0;
+  mini.cfg.temperature.hasBoundMax = true;
+  mini.cfg.temperature.boundMax = 0.5;
+  mini.cfg.initialConditions.temperature.surface.constant = 0.0;
+  mini.build(/*temperature=*/true);
+  setSquareWave(mini, 5, 10);  // initial T = 1 exceeds the configured max
+  mini.step();
+  real_t maxValue = 0.0;
+  for (int i = 0; i < 20; ++i) {
+    const real_t v = interior2(mini.transport->surfaceScalar(), 1, i + 1);
+    EXPECT_LE(v, 0.5 + 1.0e-12);
+    maxValue = std::max(maxValue, v);
+  }
+  // The clamp really engaged: the wave interior sits exactly at the bound.
+  EXPECT_DOUBLE_EQ(maxValue, 0.5);
+}
+
 // ---------------------------------------------------------------------------
 // Scalar boundary conditions.
 // ---------------------------------------------------------------------------
@@ -641,6 +674,104 @@ TEST(TransportModule, SideScalarValueSetsSubsurfaceGhosts) {
   EXPECT_DOUBLE_EQ(interior3(mini.transport->subsurfaceScalar(), 6 + 1, 1, 4), 10.0);
   EXPECT_GT(mini.transport->ownedSubsurfaceMass(), massBefore + 1.0e-6);
   EXPECT_GT(mini.transport->audit().subsBoundary, 0.0);
+}
+
+namespace {
+
+/// The SideScalarValueSetsSubsurfaceGhosts box mirrored to either y edge:
+/// a pressurized hydrostatic side head (inflow) paired with a salinity
+/// side Dirichlet on the same edge cells.
+frehg::FrehgConfig sideSaltConfig(bool yPlusSide) {
+  frehg::FrehgConfig cfg;
+  cfg.simulation.id = "transport-side-clip";
+  cfg.domain.nx = 1;
+  cfg.domain.ny = 6;
+  cfg.domain.nz = 8;
+  cfg.domain.dx = 1.0;
+  cfg.domain.dy = 0.5;
+  cfg.domain.dz = 0.1;
+  cfg.domain.bottomElevation.constant = 0.0;
+  cfg.time.dt = 2.0;
+  cfg.time.tEnd = 1.0e4;
+  cfg.time.outputInterval = 1.0e4;
+  cfg.modules.groundwater = true;
+  cfg.modules.transport = true;
+  cfg.groundwater.timestep.dtInit = 2.0;
+  cfg.groundwater.timestep.dtMin = 2.0;
+  cfg.groundwater.timestep.dtMax = 2.0;
+  cfg.groundwater.specificStorage = 1.0e-5;
+  cfg.soil.types = {testSoil(1.0e-4)};
+  cfg.soil.map.constantName = "test";
+  cfg.initialConditions.groundwater.form = frehg::GroundwaterInitialConfig::Form::Moisture;
+  cfg.initialConditions.groundwater.value.constant = 0.3;
+  cfg.transport.scheme.advection = frehg::TransportSchemeConfig::Advection::Upwind;
+  cfg.initialConditions.transport.groundwater.constant = 0.0;
+
+  const real_t yEdge = 6.0 * 0.5;
+  frehg::BoundaryConditionConfig head;
+  head.name = "side-head";
+  head.polygon = yPlusSide
+                     ? std::vector<std::array<real_t, 2>>{{-0.1, yEdge - 0.5},
+                                                          {1.1, yEdge - 0.5},
+                                                          {1.1, yEdge + 0.1},
+                                                          {-0.1, yEdge + 0.1}}
+                     : std::vector<std::array<real_t, 2>>{
+                           {-0.1, -0.1}, {1.1, -0.1}, {1.1, 0.3}, {-0.1, 0.3}};
+  head.target = frehg::BcTarget::GroundwaterSide;
+  head.kind = frehg::BcKind::Head;
+  head.value.form = frehg::BcValueConfig::Form::Hydrostatic;
+  head.value.hydrostaticEta = 0.8;  // pressurized side: inflow
+  frehg::BoundaryConditionConfig salt = head;
+  salt.name = "side-salt";
+  salt.kind = frehg::BcKind::ScalarValue;
+  salt.value.form = frehg::BcValueConfig::Form::Constant;
+  salt.value.constant = 10.0;
+  cfg.boundaryConditions = {head, salt};
+  return cfg;
+}
+
+}  // namespace
+
+TEST(TransportModule, SalinitySideValueIsLimiterClippedOffYPlus) {
+  // The §8.1 exemption-table row's pinning test (legacy scalar.c:397-400,
+  // b6-pinned; docs/theory/symmetry-exemptions.md): enforceSubsurfaceBc
+  // writes a prescribed side ghost on ALL FOUR sides, but the salinity
+  // limiter admits the side ghost into its min/max window on y+ ONLY (the
+  // b6 sea side; SubsurfaceTransport.cpp extrema pass — the thermal spec
+  // admits all four sides, V2-A17). Off y+ the boundary concentration is
+  // advected into the ledger and then clipped straight back out to the
+  // wet-stencil range: an orientation asymmetry, pinned here as documented
+  // legacy behavior, not endorsed physics.
+  MiniTransport south;
+  south.cfg = sideSaltConfig(false);  // y- (south) side: NOT admitted
+  south.build();
+  for (int n = 0; n < 20; ++n) {
+    south.step();
+  }
+  // The ghost slot itself carries the Dirichlet value...
+  EXPECT_DOUBLE_EQ(interior3(south.transport->subsurfaceScalar(), 0, 1, 4), 10.0);
+  // ...and the inflow really advected boundary salt into the ledger...
+  EXPECT_GT(south.transport->audit().subsBoundary, 0.0);
+  // ...but the limiter window (wet-stencil extrema only: everything at 0)
+  // clips the edge-cell update back to 0 exactly: the boundary value does
+  // NOT enter the domain, and the clip delta cancels the inflow.
+  EXPECT_EQ(interior3(south.transport->subsurfaceScalar(), 1, 1, 4), 0.0);
+  EXPECT_NEAR(south.transport->ownedSubsurfaceMass(), 0.0, 1.0e-12);
+  EXPECT_LT(south.transport->audit().subsAdjust, 0.0);
+  EXPECT_NEAR(south.transport->audit().subsAdjust, -south.transport->audit().subsBoundary,
+              1.0e-12);
+
+  // The y+ twin: the identical flow and Dirichlet mirrored to the sea side
+  // — the ghost IS admitted into the window and the salt enters.
+  MiniTransport north;
+  north.cfg = sideSaltConfig(true);
+  north.build();
+  for (int n = 0; n < 20; ++n) {
+    north.step();
+  }
+  EXPECT_DOUBLE_EQ(interior3(north.transport->subsurfaceScalar(), 6 + 1, 1, 4), 10.0);
+  EXPECT_GT(interior3(north.transport->subsurfaceScalar(), 6, 1, 4), 0.01);
+  EXPECT_GT(north.transport->ownedSubsurfaceMass(), 1.0e-6);
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +914,120 @@ TEST(TransportModule, CauchyTopDilutesUnderInfiltrationWithoutClipping) {
     before = after;
   }
   EXPECT_LT(interior3(mini.transport->subsurfaceScalar(), 1, 1, 0), 25.0 - 0.1);
+}
+
+// ---------------------------------------------------------------------------
+// transport.legacy_evap_allowance (v2 Q4 §3.2): the coupled dry evaporating
+// top cell's limiter allowance — the legacy hardcoded +0.01/step
+// (scalar.c:452-458) versus the exact in-step concentration factor. The
+// toggle was authored-unexercised until this test (plan §8.3).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Coupled column under a DRY surface with a configured groundwater_top
+/// evaporation flux — the toggle's activation conditions read in
+/// SubsurfaceTransport.cpp (coupledEvapTop): coupled wiring active,
+/// k == ktop, topCode == flux, topValue > 0, dept <= 0. Uniform salinity,
+/// dispersion fully off: the only concentration change is the top face
+/// passing water but no salt.
+frehg::FrehgConfig coupledEvapAllowanceConfig(bool legacyAllowance) {
+  frehg::FrehgConfig cfg;
+  cfg.simulation.id = "transport-evap-allowance";
+  cfg.domain.nx = 1;
+  cfg.domain.ny = 1;
+  cfg.domain.nz = 8;
+  cfg.domain.dx = 1.0;
+  cfg.domain.dy = 1.0;
+  cfg.domain.dz = 0.05;
+  cfg.domain.bottomElevation.constant = 0.0;
+  cfg.time.dt = 0.5;
+  cfg.time.tEnd = 1.0e4;
+  cfg.time.outputInterval = 1.0e4;
+  cfg.modules.surfaceWater = true;
+  cfg.modules.groundwater = true;
+  cfg.modules.transport = true;
+  cfg.coupling.mode = frehg::CouplingConfig::Mode::Sync;
+  cfg.surfaceWater.gravity = 9.81;
+  cfg.surfaceWater.friction.coefficient.constant = 0.02;
+  cfg.surfaceWater.minDepth = 1.0e-6;
+  cfg.surfaceWater.wettingFaceDepth = 1.0e-6;
+  cfg.surfaceWater.friction.thinLayerDepth = 0.01;
+  cfg.groundwater.timestep.dtInit = 0.5;
+  cfg.groundwater.timestep.dtMin = 0.5;
+  cfg.groundwater.timestep.dtMax = 0.5;
+  cfg.groundwater.specificStorage = 0.0;
+  cfg.soil.types = {testSoil(1.0e-5)};
+  cfg.soil.map.constantName = "test";
+  cfg.initialConditions.surface.eta.constant = 0.0;  // dry surface (dept = 0)
+  cfg.initialConditions.groundwater.form = frehg::GroundwaterInitialConfig::Form::Moisture;
+  cfg.initialConditions.groundwater.value.constant = 0.3;
+  cfg.transport.scheme.advection = frehg::TransportSchemeConfig::Advection::Upwind;
+  cfg.transport.dispersionLongitudinal = 0.0;
+  cfg.transport.dispersionTransverse = 0.0;
+  cfg.transport.dispersionMolecular = 0.0;
+  cfg.transport.legacyEvapAllowance = legacyAllowance;
+  cfg.initialConditions.transport.surface.constant = 0.0;
+  cfg.initialConditions.transport.groundwater.constant = 25.0;
+
+  frehg::BoundaryConditionConfig evap;
+  evap.name = "top-evap";
+  evap.polygon = {{-0.1, -0.1}, {1.1, -0.1}, {1.1, 1.1}, {-0.1, 1.1}};
+  evap.target = frehg::BcTarget::GroundwaterTop;
+  evap.kind = frehg::BcKind::Flux;
+  evap.value.form = frehg::BcValueConfig::Form::Constant;
+  evap.value.constant = 5.0e-6;  // positive up: evaporation
+  cfg.boundaryConditions = {evap};
+  return cfg;
+}
+
+}  // namespace
+
+TEST(TransportModule, LegacyEvapAllowanceTogglePinsCoupledDryColumnBehavior) {
+  // Same evaporating coupled column with the toggle off (the v2 default:
+  // the exact in-step factor f = (Vgflux + dtg q_top)/Vgflux widens the
+  // window, anchored on the cell's own old value — no clipping ever) and
+  // on (the legacy +0.01: the window is neighbor-max + 0.01 with NO
+  // own-value anchor, so the top cell concentrates until it sits 0.01
+  // above its unchanged below-neighbor and is throttled there, deleting
+  // the further evaporative concentration into subsAdjust).
+  real_t top[2] = {0.0, 0.0};
+  real_t below[2] = {0.0, 0.0};
+  real_t clipped[2] = {0.0, 0.0};
+  for (const bool legacy : {false, true}) {
+    MiniTransport mini;
+    mini.cfg = coupledEvapAllowanceConfig(legacy);
+    mini.build();
+    real_t waterBefore = 0.0;
+    for (int k = 0; k < 8; ++k) {
+      waterBefore += interior3(mini.gw->waterContent(), 1, 1, k);
+    }
+    for (int n = 0; n < 60; ++n) {
+      mini.step();
+      clipped[legacy ? 1 : 0] += mini.transport->audit().subsAdjust;
+    }
+    real_t waterAfter = 0.0;
+    for (int k = 0; k < 8; ++k) {
+      waterAfter += interior3(mini.gw->waterContent(), 1, 1, k);
+    }
+    ASSERT_LT(waterAfter, waterBefore - 2.0e-3)
+        << "legacy=" << legacy;  // evaporation really ran (5e-6 * 30 s / dz)
+    top[legacy ? 1 : 0] = interior3(mini.transport->subsurfaceScalar(), 1, 1, 0);
+    below[legacy ? 1 : 0] = interior3(mini.transport->subsurfaceScalar(), 1, 1, 1);
+  }
+  // Both settings admit SOME evaporative concentration...
+  EXPECT_GT(top[0], 25.0 + 1.0e-3);
+  EXPECT_GT(top[1], 25.0 + 1.0e-3);
+  // ...but they differ measurably: the exact factor compounds while the
+  // legacy allowance caps the top cell at (below neighbor + 0.01)
+  // (measured after 60 steps: exact 25.2527, legacy 25.0100 over a below
+  // neighbor at 25.000015).
+  EXPECT_GT(top[0] - top[1], 0.02);
+  EXPECT_NEAR(top[1] - below[1], 0.01, 2.0e-3);  // the legacy +0.01 signature
+  // The exact path never clips (measured 7.5e-16); the legacy path deletes
+  // the throttled concentration into the audit (measured -3.6e-3).
+  EXPECT_NEAR(clipped[0], 0.0, 1.0e-10);
+  EXPECT_LT(clipped[1], -1.0e-4);
 }
 
 // ---------------------------------------------------------------------------

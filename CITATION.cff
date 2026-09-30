@@ -14,8 +14,8 @@ abstract: >-
 authors:
   - family-names: Li
     given-names: Zhi
-version: 1.0.0
-date-released: "2026-08-21"
+version: 2.0.0
+date-released: "2026-09-30"
 license: BSD-3-Clause
 repository-code: "https://github.com/zLi90/frehg"
 keywords:

@@ -3,6 +3,7 @@
 
 #include "core/PetscSession.hpp"
 
+#include "core/GitRevision.hpp"
 #include "core/Logger.hpp"
 #include "core/Types.hpp"
 
@@ -46,7 +47,7 @@ PetscSession::PetscSession(int& argc, char**& argv, const std::string& petscOpti
     log::info(log::msg() << "loaded PETSc options file '" << petscOptionsFile << "'");
   }
 
-  log::info(log::msg() << "frehg2 " << FREHG_VERSION << " (git " << FREHG_GIT_SHA << "), "
+  log::info(log::msg() << "frehg2 " << FREHG_VERSION << " (git " << gitRevision() << "), "
                        << size_ << " MPI rank" << (size_ > 1 ? "s" : "") << ", Kokkos backend "
                        << ExecSpace::name());
 }

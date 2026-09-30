@@ -39,8 +39,12 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 # own -L flags; a no-op when the prefix is clean (same dir the loader would pick
 # anyway). DT_RPATH in libpetsc still wins over this, so it does not mask a
 # downloaded-and-rpath'd MPI -- the diagnostics below surface that case.
+# The grep is failure-guarded: on a host whose MPI lib dir has no
+# "mpich" in its path (macOS with MPICH under a local prefix), an
+# unguarded no-match grep would kill the script under set -euo
+# pipefail before its first line of output (Q7 pipeline bring-up).
 _mpich_libdir="$( { mpicxx.mpich -show 2>/dev/null || mpicxx -show 2>/dev/null || true; } \
-  | tr ' ' '\n' | sed -n 's/^-L//p' | grep -i mpich | head -1 )"
+  | tr ' ' '\n' | sed -n 's/^-L//p' | { grep -i mpich || true; } | head -1 )"
 [ -n "$_mpich_libdir" ] && export LD_LIBRARY_PATH="$_mpich_libdir:${LD_LIBRARY_PATH}"
 
 # Constrain UCX to shared-memory/self/tcp for every test below. Ubuntu's apt

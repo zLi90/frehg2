@@ -41,28 +41,45 @@ analytical (kinematic) solution (`ReferenceData/analytical.csv`).
 frehg2's surface solver is **semi-implicit** versus SERGHEI's explicit scheme.
 This is subcritical overland flow, so the scheme difference is minor.
 
-## Known limitation: the outlet cannot drain below the upslope sill (V2-A11)
+## Resolved limitation: the south outlet throttle (V2-A11, fixed in v2.0.0)
 
-This case's `kind: outflow` BC is on the **south (-y)** edge, which runs
-through the defective west/south ghost rule diagnosed under plan item Q0.3
-(`src/swe/WetDry.cpp:158`, `Asy(0, i) = Asy(1, i)`): the boundary face is
-given the *interior* face area, gauged over the higher of the two beds rather
-than the outlet cell's own bed. The transmissive volume goes as that area
-squared, so the outlet is throttled until it fills to the upslope sill.
+Through v1 this case's south-edge `kind: outflow` BC ran through the
+defective west/south ghost rule (Q0.3 diagnosis, amendment V2-A11): the
+boundary face was given the *interior* face area, gauged over the higher of
+the two beds, and the transmissive volume goes as that area squared — so the
+outlet was throttled `(0.0121/0.192)² ≈ 1/252` and the channel outlet cells
+held a **0.192 m pool** against the 0.2 m upslope bed step (38.4 of the
+39.7 m³ standing in row j = 0 at `t_end`), inflating the recession tail
+(volume 7719 → 1151 → 690 → 451 → 318 → 253 m³ over the last outputs).
 
-Measured in `out/output.h5`: the channel cells `i = 80, 81` at `j = 0` hold
-**0.192 m** of water against a 0.2 m bed step along y, at a throttle of
-`(0.0121 / 0.192)^2 ~ 1/252`. That pool is 38.4 of the 39.7 m³ standing in
-row `j = 0` at `t_end`, and it is what the long recession tail in the `volume`
-column is draining (7719 -> 1151 -> 690 -> 451 -> 318 -> 253 m³).
+**v2.0.0 (the Q7 fix, commit `def8fba`) removes the throttle.** Rerun
+2026-09-26: the outlet row drains freely — the channel outlet cells hold
+7.4e-3 m (bed-step pools gone), row j = 0 carries 2.85 m³ total, and the
+recession trace at the same output times is 462 → 342 → 285 → 245 → 224 m³.
+The hydrograph against the Maxwell et al. (2014) intercomparison (regenerated
+figure): frehg2 peak 292.8 m³/min at t = 92 min; mean |frehg2 − model| =
+28.5 (ParFlow) / 19.2 (HGS) / 13.2 (tRIBS) m³/min. The behavior is gated by
+[`../swe-outflow-staircase/`](../swe-outflow-staircase/README.md)
+(`regression.outflow_staircase`, all four edges).
 
-The recession limb of the hydrograph and any late-time storage number from
-this case are therefore affected. The rising limb and peak, which are set
-upslope, are not. See plan amendment **V2-A11** for the derivation, the
-verified two-line fix, and why it is deferred behind an x-gate;
-[`../swere-superslab/README.md`](../swere-superslab/README.md) has the full
-write-up, and [`../swe-outflow-staircase/`](../swe-outflow-staircase/README.md)
-is the minimal reproducer with an analytic answer.
+## Known limitation: a small unaudited sink in deep thin-film recession
+
+With the throttle gone this case now exercises a regime no gate covers —
+the whole domain draining as a ~1e-4 m film for hours — and the mass audit
+does not fully close there: by `t_end` the identity
+`volume = rain − evaporation − boundary_outflow + bc_inflow + clamped`
+carries a **−70.8 m³ residual (0.27 % of rain)**, accumulated only after
+t ≈ 15000 s (rain-phase and peak-flow windows close to a few m³). Measured
+properties (2026-09-26): the `volume` column matches the field integral of
+the depth snapshots exactly, so a real sink goes unaudited; all cells stay
+wet (no dry-out truncation; the clamp column stays frozen); the loss is
+interior-distributed and roughly constant per step (~0.011 m³/step). It is
+**pre-existing, not the V2-A11 fix** — a stock (pre-fix) binary shows the
+same signature (−35.5 m³; smaller only because the throttled outlet passes
+about half the late thin-film flux). For calibration: b4's east-edge outflow
+audit closes to 1.7e-4 m³ and the staircase's steady-state budget to
+0.075 %. Affects late-recession storage numbers read from the audit, not
+the hydrograph (which is d/dt of the audited `boundary_outflow` itself).
 
 ## Cost (OMP_NUM_THREADS=1, ~1e-7 s per cell-step)
 

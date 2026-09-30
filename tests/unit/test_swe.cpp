@@ -16,11 +16,14 @@
 #include <gtest/gtest.h>
 #include <mpi.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -412,6 +415,175 @@ TEST(SweModule, OutflowConditionDrainsASlopedChannelConservatively) {
 }
 
 // ---------------------------------------------------------------------------
+// v2 Q7 §8.2/§8.4 backfill: per-side single-cell velocity conditions and the
+// outflow drain rotated onto all four edges (the working tree carries the
+// V2-A11 fix — west/south boundary face areas are no longer interior
+// copies, so west/south boundary kinds behave like east/north).
+// ---------------------------------------------------------------------------
+
+/// Volume-budget pieces of a single-cell velocity-condition run on a 5x5
+/// basin (nonzero inflow on one edge). The prescribed value is the face
+/// velocity in the uu/vv sign convention: inflow is POSITIVE on the minus
+/// (west/south) faces and NEGATIVE on the plus (east/north) faces. The
+/// budget is asserted through the mass audit only: the minus-side RHS
+/// carries dt*As*u while the plus sides carry dt*As*(E - u) by design
+/// (FreeSurface.cpp assembleRhs), and bcInflow/boundaryOutflow book the
+/// pieces so that dV = bcInflow - boundaryOutflow on every side.
+struct EdgeInflowBudget {
+  real_t v0 = 0.0;
+  real_t vEnd = 0.0;
+  real_t injected = 0.0;
+  real_t leaked = 0.0;
+};
+
+EdgeInflowBudget runSingleCellVelocityInflow(MiniSim& sim,
+                                             std::vector<std::array<real_t, 2>> polygon,
+                                             real_t u) {
+  sim.cfg = baseConfig(5, 5, 1.0, 0.1);
+  frehg::BoundaryConditionConfig bc;
+  bc.name = "edge_inflow";
+  bc.polygon = std::move(polygon);
+  bc.target = frehg::BcTarget::Surface;
+  bc.kind = frehg::BcKind::Velocity;
+  bc.value.form = frehg::BcValueConfig::Form::Constant;
+  bc.value.constant = u;
+  sim.cfg.boundaryConditions.push_back(bc);
+  sim.build();
+  EdgeInflowBudget out;
+  out.v0 = sim.swe->ownedVolume();
+  for (int n = 1; n <= 10; ++n) {
+    sim.step(0.1 * static_cast<real_t>(n));
+    out.injected += sim.swe->audit().bcInflow;
+    out.leaked += sim.swe->audit().boundaryOutflow;
+  }
+  out.vEnd = sim.swe->ownedVolume();
+  return out;
+}
+
+TEST(SweModule, VelocityConditionDrivesInflowOnWestEdge) {
+  MiniSim sim;
+  // Single-cell polygon around the west edge cell center (0.5, 2.5);
+  // u = +0.05 m/s flows eastward INTO the domain through the x- face.
+  const EdgeInflowBudget b = runSingleCellVelocityInflow(
+      sim, {{0.2, 2.2}, {0.8, 2.2}, {0.8, 2.8}, {0.2, 2.8}}, 0.05);
+  EXPECT_DOUBLE_EQ(interiorValue(sim.swe->uu(), 3, 0), 0.05);  // x- halo face slot
+  EXPECT_GT(b.injected, 0.0);
+  EXPECT_GT(b.vEnd, b.v0);  // the prescribed face feeds the basin
+  EXPECT_NEAR(b.vEnd - b.v0, b.injected - b.leaked, 1.0e-6);
+}
+
+TEST(SweModule, VelocityConditionDrivesInflowOnEastEdge) {
+  MiniSim sim;
+  // East edge cell center (4.5, 2.5); u = -0.05 m/s flows westward INTO
+  // the domain through the cell's own x+ face.
+  const EdgeInflowBudget b = runSingleCellVelocityInflow(
+      sim, {{4.2, 2.2}, {4.8, 2.2}, {4.8, 2.8}, {4.2, 2.8}}, -0.05);
+  EXPECT_DOUBLE_EQ(interiorValue(sim.swe->uu(), 3, 5), -0.05);  // x+ face of cell i = 5
+  EXPECT_GT(b.injected, 0.0);
+  EXPECT_GT(b.vEnd, b.v0);
+  EXPECT_NEAR(b.vEnd - b.v0, b.injected - b.leaked, 1.0e-6);
+}
+
+TEST(SweModule, VelocityConditionDrivesInflowOnSouthEdge) {
+  MiniSim sim;
+  // South edge cell center (2.5, 0.5); v = +0.05 m/s flows northward INTO
+  // the domain through the y- face.
+  const EdgeInflowBudget b = runSingleCellVelocityInflow(
+      sim, {{2.2, 0.2}, {2.8, 0.2}, {2.8, 0.8}, {2.2, 0.8}}, 0.05);
+  EXPECT_DOUBLE_EQ(interiorValue(sim.swe->vv(), 0, 3), 0.05);  // y- halo face slot
+  EXPECT_GT(b.injected, 0.0);
+  EXPECT_GT(b.vEnd, b.v0);
+  EXPECT_NEAR(b.vEnd - b.v0, b.injected - b.leaked, 1.0e-6);
+}
+
+TEST(SweModule, VelocityConditionDrivesInflowOnNorthEdge) {
+  MiniSim sim;
+  // North edge cell center (2.5, 4.5); v = -0.05 m/s flows southward INTO
+  // the domain through the cell's own y+ face.
+  const EdgeInflowBudget b = runSingleCellVelocityInflow(
+      sim, {{2.2, 4.2}, {2.8, 4.2}, {2.8, 4.8}, {2.2, 4.8}}, -0.05);
+  EXPECT_DOUBLE_EQ(interiorValue(sim.swe->vv(), 5, 3), -0.05);  // y+ face of cell j = 5
+  EXPECT_GT(b.injected, 0.0);
+  EXPECT_GT(b.vEnd, b.v0);
+  EXPECT_NEAR(b.vEnd - b.v0, b.injected - b.leaked, 1.0e-6);
+}
+
+TEST(SweModule, OutflowDrainsEquivalentlyOnAllFourEdges) {
+  // The east-edge sloped-channel drain of the previous test rotated onto
+  // all four edges (bed always descending toward the single-cell outlet).
+  // Each rotation must drain and close its own budget; cross-edge equality
+  // is asserted as BANDS only (docs/theory/symmetry-exemptions): the x/y
+  // rotation within an edge pair (east/north, west/south) is exact to
+  // rounding, but the preserved legacy plus/minus edge arithmetic (the
+  // west/south full-volume vs east/north averaged face-volume denominators)
+  // differs at the ~1e-3 per-step level and integrates to ~4.7% cumulative
+  // drained volume over this 600-step near-complete drain.
+  struct Rotation {
+    const char* tag;
+    int nx, ny;
+    std::vector<real_t> bed;  // raster order j*nx + i (south row first)
+    std::vector<std::array<real_t, 2>> outlet;
+    int outletJ, outletI;  // local interior indices of the outlet cell
+  };
+  const std::vector<Rotation> rotations = {
+      {"east", 5, 1, {0.4, 0.3, 0.2, 0.1, 0.0},
+       {{4.0, -0.1}, {5.1, -0.1}, {5.1, 1.1}, {4.0, 1.1}}, 1, 5},
+      {"west", 5, 1, {0.0, 0.1, 0.2, 0.3, 0.4},
+       {{-0.1, -0.1}, {1.0, -0.1}, {1.0, 1.1}, {-0.1, 1.1}}, 1, 1},
+      {"north", 1, 5, {0.4, 0.3, 0.2, 0.1, 0.0},
+       {{-0.1, 4.0}, {1.1, 4.0}, {1.1, 5.1}, {-0.1, 5.1}}, 5, 1},
+      {"south", 1, 5, {0.0, 0.1, 0.2, 0.3, 0.4},
+       {{-0.1, -0.1}, {1.1, -0.1}, {1.1, 1.0}, {-0.1, 1.0}}, 1, 1},
+  };
+
+  std::vector<real_t> drained;
+  for (const Rotation& rot : rotations) {
+    const std::string file = std::string("bed_") + rot.tag + ".dat";
+    const std::string dir = writeRaster(file, rot.bed);
+    MiniSim sim;
+    sim.cfg = baseConfig(rot.nx, rot.ny, 1.0, 0.1);
+    sim.cfg.configDir = dir;
+    sim.cfg.domain.bottomElevation.fromFile = true;
+    sim.cfg.domain.bottomElevation.file = file;
+    sim.cfg.initialConditions.surface.eta.constant = 0.6;
+    frehg::BoundaryConditionConfig bc;
+    bc.name = "outlet";
+    bc.polygon = rot.outlet;
+    bc.target = frehg::BcTarget::Surface;
+    bc.kind = frehg::BcKind::Outflow;
+    sim.cfg.boundaryConditions.push_back(bc);
+    sim.build();
+    const real_t v0 = sim.swe->ownedVolume();
+    const real_t outletDepth0 = interiorValue(sim.swe->depth(), rot.outletJ, rot.outletI);
+    real_t released = 0.0;
+    for (int n = 1; n <= 600; ++n) {
+      sim.step(0.1 * static_cast<real_t>(n));
+      released += sim.swe->audit().boundaryOutflow;
+    }
+    const real_t vEnd = sim.swe->ownedVolume();
+    EXPECT_GT(released, 0.0) << rot.tag;
+    EXPECT_LT(vEnd, 0.25 * v0) << rot.tag;                     // the channel drains
+    EXPECT_NEAR(v0 - vEnd, released, 1.0e-4 * v0) << rot.tag;  // and the budget closes
+    EXPECT_LT(interiorValue(sim.swe->depth(), rot.outletJ, rot.outletI), outletDepth0)
+        << rot.tag;  // the outlet cell itself is below its initial depth
+    drained.push_back(v0 - vEnd);
+  }
+
+  // Cross-edge equivalence bands (order: east, west, north, south).
+  // Within a plus/minus pair the drain is a pure x/y rotation of the same
+  // arithmetic: measured agreement <= 3e-15 relative; pinned at 1e-9.
+  EXPECT_NEAR(drained[0], drained[2], 1.0e-9 * drained[0]) << "east vs north";
+  EXPECT_NEAR(drained[1], drained[3], 1.0e-9 * drained[1]) << "west vs south";
+  // Across the plus/minus split the documented edge-arithmetic exemption
+  // applies: measured 4.69% spread; band 10% (2x headroom, still far below
+  // any failure-to-drain regression).
+  const auto [minIt, maxIt] = std::minmax_element(drained.begin(), drained.end());
+  EXPECT_LT(*maxIt - *minIt, 0.10 * *maxIt)
+      << "drained volumes: east " << drained[0] << " west " << drained[1] << " north "
+      << drained[2] << " south " << drained[3];
+}
+
+// ---------------------------------------------------------------------------
 // Wet/dry machinery.
 // ---------------------------------------------------------------------------
 
@@ -453,6 +625,96 @@ TEST(SweModule, ElevationOffsetLiftsNegativeBeds) {
   EXPECT_DOUBLE_EQ(interiorValue(sim.swe->bottom(), 1, 1), 0.0);
   EXPECT_DOUBLE_EQ(interiorValue(sim.swe->eta(), 1, 1), 0.3);
   EXPECT_DOUBLE_EQ(interiorValue(sim.swe->etaAbsolute(), 1, 1), -0.1);
+}
+
+// ---------------------------------------------------------------------------
+// Q7 §8.3 feature backfill: the prescribed-evaporation series form and the
+// evaporation exclusion region (the rain-symmetry keys added in Q4) had no
+// exercising test; the wind compass north_angle had never been sampled at a
+// nonzero value.
+// ---------------------------------------------------------------------------
+
+TEST(SweModule, EvaporationSeriesRemovesTheSampledRate) {
+  const std::string dir = ::testing::TempDir();
+  {
+    std::ofstream out(dir + "/evap_series.dat");
+    out << "0.0 0.0\n10.0 2.0e-4\n";  // ramp: rate(t) = 2e-5 t
+  }
+  MiniSim sim;
+  sim.cfg = baseConfig(3, 3, 1.0, 1.0);
+  sim.cfg.configDir = dir;
+  sim.cfg.surfaceWater.evaporation.fromSeries = true;
+  sim.cfg.surfaceWater.evaporation.file = "evap_series.dat";
+  // Pin every edge with zero-velocity walls: the no-BC legacy edges are
+  // NOT walls — they exchange with the pre-source ghost stage, so an
+  // evaporating pond would be refilled from its own boundary (the rain
+  // drain of report-P1 fidelity item 3, mirrored; verified against the
+  // full driver — docs/theory/symmetry-exemptions.md row 4).
+  for (const auto& poly :
+       {std::vector<std::array<frehg::real_t, 2>>{
+            {-0.1, -0.1}, {3.1, -0.1}, {3.1, 0.9}, {-0.1, 0.9}},
+        std::vector<std::array<frehg::real_t, 2>>{
+            {-0.1, 2.1}, {3.1, 2.1}, {3.1, 3.1}, {-0.1, 3.1}},
+        std::vector<std::array<frehg::real_t, 2>>{
+            {-0.1, -0.1}, {0.9, -0.1}, {0.9, 3.1}, {-0.1, 3.1}},
+        std::vector<std::array<frehg::real_t, 2>>{
+            {2.1, -0.1}, {3.1, -0.1}, {3.1, 3.1}, {2.1, 3.1}}}) {
+    frehg::BoundaryConditionConfig wall;
+    wall.name = "wall-" + std::to_string(sim.cfg.boundaryConditions.size());
+    wall.polygon = poly;
+    wall.target = frehg::BcTarget::Surface;
+    wall.kind = frehg::BcKind::Velocity;
+    wall.value.form = frehg::BcValueConfig::Form::Constant;
+    wall.value.constant = 0.0;
+    sim.cfg.boundaryConditions.push_back(wall);
+  }
+  sim.build();
+  // Steps at t = 1 and t = 2 sample the ramp at the step's end time
+  // (2e-5 and 4e-5 m/s over dt = 1 s), uniformly over the walled pond.
+  sim.step(1.0);
+  sim.step(2.0);
+  // 1e-9: the plus-side wall correction rounds differently from the
+  // minus-side form (symmetry-exemptions.md row 3), measured 7.9e-11 here.
+  EXPECT_NEAR(interiorValue(sim.swe->eta(), 2, 2), 0.5 - 2.0e-5 - 4.0e-5, 1.0e-9);
+  // the step audit resets each beginStep: this is the SECOND step's booking
+  EXPECT_NEAR(sim.swe->audit().evapVolume, 4.0e-5 * 9.0, 1.0e-11);
+}
+
+TEST(SweModule, EvaporationExclusionRegionLosesNothing) {
+  MiniSim sim;
+  sim.cfg = baseConfig(3, 3, 1.0, 1.0);
+  sim.cfg.surfaceWater.evaporation.constant = 1.0e-4;
+  // Exclude the center cell (center at (1.5, 1.5)) — the mirror of
+  // RainExclusionRegionReceivesNothing.
+  sim.cfg.surfaceWater.evaporationExcludePolygon = {
+      {1.1, 1.1}, {1.9, 1.1}, {1.9, 1.9}, {1.1, 1.9}};
+  sim.build();
+  sim.step(1.0);
+  EXPECT_NEAR(interiorValue(sim.swe->eta(), 2, 2), 0.5, 1.0e-12);  // excluded
+  EXPECT_NEAR(interiorValue(sim.swe->eta(), 1, 1), 0.5 - 1.0e-4, 1.0e-12);
+  EXPECT_NEAR(sim.swe->audit().evapVolume, 1.0e-4 * 8.0, 1.0e-12);
+}
+
+TEST(WindForcing, NorthAngleRotatesTheCompassIntoTheGrid) {
+  // omega = (direction + north_angle) * pi_legacy / 180 (WindForcing.hpp):
+  // direction 20 under north_angle 90 must equal direction 110 under 0.
+  frehg::WindConfig rotated;
+  rotated.enabled = true;
+  rotated.law = frehg::WindConfig::DragLaw::Garratt;
+  rotated.speed.constant = 9.0;
+  rotated.direction.constant = 20.0;
+  rotated.northAngle = 90.0;
+  const frehg::swe::WindForcing a(rotated, [](const std::string& f) { return f; });
+
+  frehg::WindConfig plain;
+  plain.enabled = true;
+  plain.law = frehg::WindConfig::DragLaw::Garratt;
+  plain.speed.constant = 9.0;
+  plain.direction.constant = 110.0;
+  const frehg::swe::WindForcing b(plain, [](const std::string& f) { return f; });
+
+  EXPECT_DOUBLE_EQ(a.sample(0.0).omega, b.sample(0.0).omega);
+  EXPECT_DOUBLE_EQ(a.sample(0.0).speed, b.sample(0.0).speed);
 }
 
 }  // namespace

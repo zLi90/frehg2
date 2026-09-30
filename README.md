@@ -182,20 +182,30 @@ running and gating each one.
 
 ## Status
 
+**v2.0.0** — the v2 roadmap
+([`FREHG2_V2_DEVELOPMENT_PLAN.md`](docs/developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md))
+complete: Q1 (BoomerAMG solver option, gate g2), Q2 (run-record provenance +
+resolved-config round-trip, gates r1–r2), Q3 (performance-portable
+parallelization — Kokkos linear-algebra backend, threaded solve,
+`experimental` GPU lane, gates p1–p6), Q4 (bulk-aerodynamic evaporation +
+evaporative salinization, gates g4–g5), Q5 (temperature as a second
+registered scalar with thermal density feedback and surface heat exchange,
+gates g6–g8), Q6 (wind-stress validation and Cd(U₁₀) laws, gates g9–g10),
+and Q7 (release hardening: the §8 generality batteries — dihedral
+symmetry, BC-kind × side coverage, feature-interaction coverage,
+decomposition edge cases — plus the west/south outflow face-area fix
+V2-A11 and the unconditional flow-rate halo exchange). All accuracy (b/g),
+scalability (s), and portability (p) gates run in one release pipeline
+(`scripts/ci_release_gate.sh`). The GPU lane ships `experimental`
+(compile-verified + CPU-physics-verified; on-device validation pending the
+owner-run acceptance bundle). The per-phase Definitions of Done and
+handoff reports are under
+[`docs/developer-guide/`](docs/developer-guide/).
+
 **v1.0.0** — all six benchmark gates green; phases P0 (foundation),
 P1 (surface water), P2 (groundwater), P3 (coupling), P4 (transport +
 density coupling), and P5 (hardening, performance, documentation, release)
 complete.
-
-**v2 (in progress)** — the post-1.0 roadmap
-([`FREHG2_V2_DEVELOPMENT_PLAN.md`](docs/developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md)):
-Q1 (BoomerAMG solver option, gate g2), Q2 (run-record provenance +
-resolved-config round-trip, gates r1–r2), and Q3 (performance-portable
-parallelization — Kokkos linear-algebra backend, threaded solve,
-`experimental` GPU lane, gates p1–p6) complete; Q4 (evaporation),
-Q5 (temperature), Q6 (wind), and Q7 (release) planned. The per-phase
-Definitions of Done and handoff reports are under
-[`docs/developer-guide/`](docs/developer-guide/).
 
 ## License and citation
 

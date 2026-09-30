@@ -106,4 +106,26 @@ TEST(MetForcing, EvaluatesSeries) {
   std::remove(path.c_str());
 }
 
+TEST(MetForcing, WindSpeedFloorBoundsStillAir) {
+  // Q7 §8.3: the configurable still-air floor (default 0.5 m/s, applied to
+  // every bulk consumer at MetForcing::sample) had never been set to a
+  // non-default value.
+  frehg::FrehgConfig cfg;
+  cfg.configDir = ".";
+  cfg.atmosphere.present = true;
+  cfg.atmosphere.airTemperature.constant = 20.0;
+  cfg.atmosphere.surfaceTemperature.constant = 20.0;
+  cfg.atmosphere.pressure.constant = 101.325;
+  cfg.atmosphere.specificHumidity.constant = 2.9e-3;
+  cfg.atmosphere.windSpeed.constant = 0.1;  // below every floor in play
+  const atm::MetForcing byDefault(cfg.atmosphere, cfg);
+  EXPECT_DOUBLE_EQ(byDefault.sample(0.0).windSpeed, 0.5);
+  cfg.atmosphere.windSpeedFloor = 1.25;
+  const atm::MetForcing raised(cfg.atmosphere, cfg);
+  EXPECT_DOUBLE_EQ(raised.sample(0.0).windSpeed, 1.25);
+  cfg.atmosphere.windSpeed.constant = 3.0;  // above the floor: untouched
+  const atm::MetForcing untouched(cfg.atmosphere, cfg);
+  EXPECT_DOUBLE_EQ(untouched.sample(0.0).windSpeed, 3.0);
+}
+
 }  // namespace

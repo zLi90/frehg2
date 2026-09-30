@@ -2178,3 +2178,270 @@ its first two entries when the backfill lands: the salinity y+-only
 admission (legacy-faithful, b6-pinned — exempt) and the corner-face
 spill (documented semantics, b6-load-bearing — exempt with the
 all-sides admission making it equivariant for temperature).
+
+### V2-A19 (Q7, 2026-09-26) — §8 realized: the backfill instruments, the V2-A11 fix, and a second battery-caught defect (the transport interface-flux halo)
+
+**The instruments** (authored red in `a812bc4` against stock source, per
+§6.1; green with the fixes below):
+
+- **§8.1**: dihedral batteries for the three v1 modules
+  (`regression.{swe,gw,transport}_orient`, bases in `benchmarks/x-orient/`)
+  joining the Q5/Q6 heat/wind batteries — per-PR, ~8 s each. The plan's
+  "documented-asymmetry exemption table" is realized as TWO artifacts in
+  lockstep: class-aware tolerances
+  (`tests/regression/tolerances/x-orient.yaml`; `transpose` preserves each
+  edge's minus/plus class and gates strict at 1e-12, the six mixed
+  transforms carry the measured legacy plus/minus edge-arithmetic floor)
+  and `docs/theory/symmetry-exemptions.md` (9 waived asymmetries, each per
+  term with provenance, plus the measured release floors). Measured: swe
+  transpose 4.7e-15, mixed 3.478e-3 max (per-axis and additive — x-swaps
+  2.227e-3, y-swaps 1.336e-3, both 3.478e-3; bound 1e-2); gw symmetric
+  outright (≤ 3.75e-14 on all 8, both classes gate 1e-12); transport
+  transpose 2.1e-15, mixed eta 3.09e-10 → concentration 2.17e-9 (x-swaps
+  only; bound 1e-6 absorbs limiter branch-flip amplification).
+- **§8.2**: `tests/coverage/bc_matrix.csv` — 117 canonical kind × target
+  × coupling cells, 117 rows, every cell `tested` (ids cross-referenced
+  against the gtest/ctest/validation universes) or `schema-rejected`
+  (rejection + message pinned by a test), ZERO `limitation` rows;
+  `scripts/check_bc_matrix.py` (ctest `unit.bc_matrix`) enforces
+  completeness, cross-reference, the release rule, and a schema-vocabulary
+  drift alarm re-read from `ConfigSchema.cpp`. The unit backfill behind it:
+  four-side velocity/outflow/eta/discharge coverage, single-cell and
+  corner polygons, masked-column-per-edge conservation, explicit
+  decomposition, coupled-exchange budget closures (tests/unit, ~1300
+  lines). One new schema decision: `scalar_value` on `groundwater_top` in
+  COUPLED runs is now rejected loudly (the coupler owns the top exchange;
+  a pinned top cell under live exchange has no gated meaning) — the same
+  reasoning §4.2 applied to head-on-top.
+- **§8.3**: `docs/developer-guide/feature-coverage.md` — 90 rows (features
+  + pairwise interactions + GPU rows), zero empty cells,
+  `scripts/check_feature_coverage.py` (ctest `unit.feature_coverage`) in
+  lockstep; GPU rows carry `experimental` per §2B.4 pending the owner p6
+  bundle. The pair gates it added: `regression.{wind,evap}_restart`,
+  `regression.{b6,heat}_subcycled`, `regression.{wind_drydown,
+  terrain_heat,two_scalar_restart,evap_heat}`, and the pair lanes
+  `regression.g1.b1_restart.amg` (hierarchy reuse across a restart carries
+  a deterministic 6.9e-8 offset from the rebuild cadence, documented bound
+  1e-6) and `regression.p1.b1_restart.aijkokkos` (exactly deterministic).
+- **§8.4**: mpi lanes gain n=3 (`FREHG_EXPECT_RANKS`-guarded), the g5
+  transposed slice rides `regression.g5.transposed`, and the coupled ×
+  masked-column refusal is pinned by message (`unit.masked_coupled_fatal`).
+
+**V2-A11 lands** exactly as diagnosed at Q0.3: the two west/south
+face-area ghost copies in `WetDry.cpp::updateGeometry` are deleted —
+nothing added. Gates: `regression.outflow_staircase` (the west staircase
+pair as committed at Q0.3, extended to all four edges by
+transpose/mirror; 10 failures on stock — the west AND south V2-A11
+signatures: 385× normal depth, +38/−27 % volume, 39 % clamp minting, 25 %
+dead outlet — now PASS on absolute Manning/volume bands) and the swe
+dihedral battery (stock mirror failures up to 5.2e-3; post-fix the mixed
+floor is the pure legacy edge arithmetic at 3.478e-3). Affected
+validation cases (`swere-superslab` west, `swe-vcatchment` south) rerun
+and their READMEs/figures regenerated at Q7 close (superslab carried
+past the tag: V2-A20 scope note).
+
+**The second battery-caught defect** (after V2-A18): the §8.4 tracer
+rank-invariance lane (`regression.tracer_rank_invariance.{strict,default}`,
+salinity on a walls-only conveyor, both advection schemes) failed on
+stock with a DETERMINISTIC rank drift of 1.6e-2 (upwind) / 1.6e-3
+(superbee) while eta stayed rank-invariant at 4e-16: the transport step
+reads the flow-rate snapshot (`Fu`/`Fv`) on both sides of every
+rank-interface face, but the halo exchange for those fields ran only on
+the eta-BC path of `enforceVeloBc` — a multi-rank transport run with NO
+eta condition advected scalar with inconsistent interface fluxes. b6
+never saw it (serial 1×68 tank); every gated transport case either ran
+serial or carried an eta condition. Fix: the `swe_Fu`/`swe_Fv` exchange
+is unconditional (serial behavior and every eta-BC case bitwise
+unchanged; the flow itself never reads these halos, which is why eta was
+invariant throughout). The finding count stands: four
+vacuous-or-unexercised-gate failures (V2-A9/A10/A11/A12), two defects
+caught by §8 batteries EXECUTING (V2-A18, this).
+
+**The release pipeline** (`scripts/ci_release_gate.sh`) grows from the
+v1 six-benchmark scope to the §9 Q7 blocking criterion — all g + all b +
+s1–s4 + p1–p5 in one pipeline: the per-PR gate, the full anchored
+regression label, the adjudicated b5 record (rain/sync 86400 s), the
+nightly regression label, the nightly scaling label, and p4 (nvcc
+locally when present, else `FREHG_P4_EVIDENCE` names the CI run; the
+cuda-compile workflow must be green on the pushed release SHA before the
+official tag). The V2-A4 statement that this script gates b5 with
+`--t-end 86400` remains true verbatim.
+
+### V2-A20 (Q7, 2026-09-27) — the release pipeline's first full execution: b5 full-horizon scoping, a vacuous-evidence correction to V2-A10, and the V2-A12 residual closed
+
+**Trigger.** The v2 release pipeline's first complete execution (steps
+1–3 green; step 4 = the blanket `regression_nightly` label) failed three
+of the four full-horizon b5 envelope runs after ~25 h of wall time. The
+investigation, and the validation reruns and sanitizer matrix that ran
+alongside it, produced six durable findings.
+
+**1. The four full-horizon b5 envelope lanes are not gates, and the
+pipeline now says so.** Measured on this release tree (`f56ba96`, arm64
+M3, RelWithDebInfo, 4 ranks 2×2, the committed configs):
+
+- *rain/sync*: ponding integral over [2.3, 69.5] h **−11.8 %** vs the
+  10 % allowance — everything else green (discharge 0/84 outside the
+  envelope, peak +2.6 %, integral −0.8 %; ponding 0/81 outside, peak
+  −1.5 %; clamp 1.62 % of rain). V2-A4 archived **−11.7 %** for the same
+  metric when g1 first ran the full horizon — stable across the entire
+  Q1→Q7 tree evolution, so not a Q7 regression, and exactly the state
+  the A15/A17 adjudication decided when the owner concluded the b5
+  battery early: the **approved record is the 24 h horizon**, which the
+  pipeline's step 3 gates directly (PASS on this tree).
+- *rain/subcycled*: discharge peak **+15.9 %** vs 15 % — the A17
+  documented-failing configuration (P3 measured +16.3 % at the committed
+  fixed dt = 5 s; clamp 8.27 % of rain vs A17's ~8 %). Unchanged state,
+  never adjudicated green anywhere.
+- *norain/sync*: peak **−22.5 %**, integral **−22.9 %** — the FIRST
+  completed norain run ever (P3 stopped it mid-flight per A17; no prior
+  record exists on any platform). The surface is dry until t = 69 529 s,
+  so the entire discharge record is a ~100 h thin-film seepage-face
+  regime that no adjudication has ever looked at. **Attribution settled
+  by construction and by measurement: the V2-A11 fix is arithmetically
+  inert on b5's grid.** The DEM duplicates its boundary rows/columns
+  (row j=0 ≡ row j=1 and column i=0 ≡ column i=1 exactly), so the
+  deleted ghost copies were self-assignments — the face gauged over the
+  higher of two *equal* beds is the interior value the copy wrote. A
+  stock (`a812bc4`) binary restarted from the fixed run's t = 72 000 s
+  checkpoint reproduces the fixed run's t = 108 000 s state (first
+  wetting at t = 69 529 s falls inside the window) **bitwise on all six
+  output fields** (surface eta/depth/uu/vv, subsurface head/θ), and a
+  second restart from the t = 144 000 s checkpoint reproduces the
+  t = 180 000 s state bitwise on the same six fields — a 10 h window
+  that contains the t ≈ 42.3 h discharge peak. The −22.5 %
+  peak miss is therefore the pre-existing scheme meeting a
+  never-examined regime, not a Q7 change.
+- *norain/subcycled*: no completed measurement (two ~8 h attempts ended
+  by session restarts); not a gate; recorded as unmeasured.
+
+`ci_release_gate.sh` step 4 now runs the nightly label MINUS
+`regression.b5.{rain,norain}.*` with the exclusion printed and this
+amendment cited. Asserting never-adjudicated bounds would gate on noise;
+the b6/g5/g8/g1-amg nightly gates (all adjudicated) stay blocking.
+
+**2. V2-A10's "b1–b6 green on real runners" was vacuous for every
+golden and envelope gate — the sixth instance of the pattern.** The
+`regression-nightly` workflow history on the official remote (public
+API, 2026-09-13 → 09-27): every run ever took ≤ 2.5 h, and the
+per-step timings of the 2026-09-26 success show **"Nightly-class
+envelope gates: 0 s"** — the goldens-absent guard has skipped that step
+on every run, and the "Full regression label" step (27 min) ran the
+self-contained fallback subset (restart + rank invariance), not the
+golden comparisons. The legacy-goldens archive was never provisioned on
+the runner. What the runner nightly actually validates: build, unit,
+mpi, restart/rank-invariance, and the s-gates. All b1–b6 golden and
+envelope evidence is local (this pipeline). Structural note: at ~8 h
+per b5 full-horizon run, the four lanes cannot fit a hosted runner's
+6 h job cap at all — they are local-or-self-hosted by construction,
+which the workflow should state instead of skipping silently. Carried
+forward (release checklist): either provision the goldens on a runner
+that can hold them and split the envelope step into its own job, or
+mark the step as explicitly local-only; the silent skip-to-success is
+the same defect class as V2-A9.
+
+**3. The V2-A12 residual is closed.** The recalibrated s1 gate has run
+green on the real 4-vCPU runner in five consecutive scheduled nightlies
+(2026-09-22 → 09-26, trees 79e9d02/5af4287/aa14d20; the scaling step
+runs 1:31 h and is not goldens-guarded). The per-rank-count bound
+design (gate at the largest count with a spare performance core) works
+as intended on the hardware it was written for.
+
+**4. A pre-existing unaudited thin-film sink, found by the V2-A11
+validation rerun.** With the outlet throttle gone, `swe-vcatchment`
+drains as a whole-domain ~1e-4 m film for hours, and the surface mass
+audit misses a real sink there: −70.8 m³ (0.27 % of rain) by t_end,
+interior-distributed, all cells wet, clamp column frozen. A stock
+(pre-fix) binary shows the same signature (−35.5 m³), so it is
+pre-existing, first visible now that the regime is reachable. Recorded
+in the case README with the measurements; not a release blocker (no
+gate bound touched; b4's audit closes to 1.7e-4 m³); spun off as its
+own investigation task.
+
+**5. The run record's revision stamp is configure-time, so it can name
+code that did not run.** `FREHG_GIT_SHA` is read by `execute_process(git
+rev-parse HEAD)` when CMake configures, and there is no dirty-tree
+marker. A commit or a working-tree edit touches no CMake input, so an
+incremental rebuild keeps the old stamp. The V2-A11 validation rerun was
+first made with a `build/` binary compiled 2026-09-24 from the working
+tree that carried the fix; its record named version 1.0.0 at `e9d84cc`,
+a tree without the fix. The numbers stand — the release binary (2.0.0 at
+`f56ba96`, configured at that tree) reproduces the output bitwise, 1177
+datasets — and every release-evidence binary was configured at its own
+tree (`build-ci` at `f56ba96`; `build-asan` at `6b0baaa`, whose sources
+equal `f56ba96`'s). But the Q2 promise that every output names the code
+that produced it holds only for freshly configured builds, and no gate
+checks it: r1 asserts the record's schema, the config round-trip, and
+the launch shape, not the currency of the stamp. Carried forward:
+capture the revision at build time with a dirty flag (`git describe
+--always --dirty` into a generated header on every build), gated by a
+test that a modified tree yields a `-dirty` stamp.
+
+**Resolved** after the tag (merge `e6f82b9`, 2026-09-30; gate `28b8d86`
+authored red, fix `b31cabf`):
+the stamp is captured on every build. An always-run `frehg_git_revision`
+target rewrites the generated source behind `frehg::gitRevision()` only
+when the stamp changes, so a no-op build recompiles nothing; the run
+record, the HDF5 `/frehg2` attribute and the log header read it, and
+`FREHG_GIT_SHA` is gone. The stamp is `<sha12>`, `<sha12>-dirty` (a
+tracked file differs from HEAD, staged or not) or `unknown` (no git, or
+no `.git` of the tree's own, e.g. a tarball). It uses `git rev-parse` +
+`git status --porcelain --untracked-files=no` instead of `git describe
+--always --dirty`: describe names the annotated release tags rather than
+the SHA, and its `--dirty` takes `index.lock`. `unit.git_revision_stamp`
+failed at 5 of its 9 builds (dirty, commit, staged, untracked, tarball)
+against the configure-time stamp and passes all 9 after the fix.
+
+**6. The sanitizer matrix had not run in full since P5, and its first
+full run failed on lane composition, not on frehg code.**
+`run_sanitizers.sh --full` (Apple clang ASan+UBSan, `build-asan`) ran
+104 of the 108 unit/mpi/regression entries clean. The other four are
+two lane-composition defects that joined the regression label after P5,
+when no full run followed. (a) `regression.perf_baseline` (Q2) is a
+wall-clock gate against the uninstrumented baseline; its three
+instrumented attempts ran without a report and then failed the timing
+comparison by construction (+271 %). (b) The three `aijkokkos` lanes
+(Q3) aborted at their first solve with an ASan bad-free inside
+`VecDestroy_SeqKokkos`. The lane compiles frehg with Apple clang/libc++
+against deps-clang's Kokkos but links the main prefix's Kokkos-aware
+PETSc, which is gcc/libstdc++ with a Kokkos of its own: two Kokkos
+builds with incompatible layouts in one process, and PETSc's views are
+destroyed through the executable's copy of the destructor. The release
+binary links a single Kokkos, the one PETSc links, and the same lanes
+pass in pipeline step 2. The first run also stopped at its ctest block
+under `set -e`, so its smoke block never ran. The script now excludes
+both by name and prints the exclusion — `perf_baseline` always, the
+`aijkokkos` lanes only when the sanitized binary and PETSc link
+different C++ runtimes — and the rerun of the whole matrix ran clean:
+all 104 lanes (unit 41, mpi 20, regression 55 of 59) and all eight
+nightly-class smokes. Carried forward: the frehg-side aijkokkos staging
+path (`VecGetKokkosView`) has never run under a sanitizer; it needs an
+ABI-consistent Kokkos-aware PETSc (clang-built in the clang prefix, or a
+Linux gcc ASan lane).
+
+**Scoped at close: the `swere-superslab` regeneration moves past the
+tag.** V2-A19 scheduled both V2-A11 validation reruns for Q7 close.
+`swe-vcatchment` was rerun and regenerated (finding 4 came from it). The
+superslab rerun on the release binary started 2026-09-29, and its cost
+was measured rather than estimated: the sync common step holds at 0.5 s
+(86 400 steps), the groundwater iterations per step grow from 4 at
+t = 1 h to 22 at t = 5 h as the profile drains, and the first 5 h of
+simulated time took 6.2 h of wall time. The run takes most of a day
+serial, against the 15–30 min its README estimated; the pre-fix run of
+2026-08-30 also took about a day, which is why its file was read
+mid-write (V2-A11). Waiting would have held the tag for a validation
+record that gates nothing. The case README now marks its numbers as
+pre-fix; the rerun finishes after the tag and replaces them. Both cases
+feed manuscript figures (V2-A11), and the superslab figures on disk
+(untracked, like every validation PDF) are still the pre-fix ones: the
+manuscript waits for the regeneration.
+
+**Resolved** after the tag (2026-09-30): the rerun finished in 13.1 h of
+wall time (groundwater iterations peaked at 24 per step from t = 7 h to
+11 h), and `makeplot.py` regenerated both figures. The outlet pool is
+gone: late outlet storage is 1.40e-4 m³ against the reference codes'
+~2e-4 m³ (pre-fix 0.107 m³). The hydrograph onset and peak moved 0.66 h
+and 0.41 h earlier, to 6.54 h and 8.52 h, 0.03 h and 0.08 h after
+ParFlow, the latest reference code; the 0.404 m³/h peak is inside the
+0.288–0.456 range. Rain-phase ponding is unchanged. The case README
+carries the post-fix record, and the superslab figures can feed the
+manuscript.

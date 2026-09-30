@@ -9,6 +9,11 @@
 #include <gtest/gtest.h>
 #include <mpi.h>
 
+#include <array>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace {
 
 using frehg::Polygon;
@@ -147,6 +152,110 @@ TEST(BoundarySet, SideTargetSelectsEdgeFaces) {
   EXPECT_EQ(southFaces, 2);
   EXPECT_EQ(northFaces, 2);
   EXPECT_DOUBLE_EQ(side.value(123.0), 0.0);  // gravity form carries no value
+}
+
+/// A side condition whose polygon is a small box around one cell center
+/// (the v2 Q7 §8.2 single-cell rasterization rows).
+frehg::BoundaryConditionConfig sideCellConfig(
+    const std::string& name, std::vector<std::array<frehg::real_t, 2>> polygon) {
+  frehg::BoundaryConditionConfig bc;
+  bc.name = name;
+  bc.polygon = std::move(polygon);
+  bc.target = frehg::BcTarget::GroundwaterSide;
+  bc.kind = frehg::BcKind::Flux;
+  bc.value.form = frehg::BcValueConfig::Form::Gravity;
+  return bc;
+}
+
+int faceCount(const frehg::BoundaryCondition& bc, frehg::BcFace face) {
+  int count = 0;
+  for (const frehg::BcCell& cell : bc.cells()) {
+    if (cell.face == face) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+TEST(BoundarySet, SingleCellPolygonOnEachEdge) {
+  frehg::DomainConfig dom = b5LikeDomain();
+  dom.nx = 4;
+  dom.ny = 3;
+  const frehg::Grid grid(MPI_COMM_SELF, dom);
+
+  // Four polygons, each a +-0.2 box around exactly one NON-corner edge
+  // cell's center of the 4x3 domain (centers x = 0.5..3.5, y = 0.5..2.5):
+  // each must select exactly that cell with exactly that edge's face.
+  const frehg::BoundarySet set(
+      grid,
+      {sideCellConfig("west", {{0.3, 1.3}, {0.7, 1.3}, {0.7, 1.7}, {0.3, 1.7}}),    // (0.5, 1.5)
+       sideCellConfig("east", {{3.3, 1.3}, {3.7, 1.3}, {3.7, 1.7}, {3.3, 1.7}}),    // (3.5, 1.5)
+       sideCellConfig("south", {{2.3, 0.3}, {2.7, 0.3}, {2.7, 0.7}, {2.3, 0.7}}),   // (2.5, 0.5)
+       sideCellConfig("north", {{1.3, 2.3}, {1.7, 2.3}, {1.7, 2.7}, {1.3, 2.7}})},  // (1.5, 2.5)
+      ".");
+
+  struct Expected {
+    const char* name;
+    frehg::BcFace face;
+    int j, i;  // local interior indices (halo layout)
+  };
+  const Expected rows[] = {
+      {"west", frehg::BcFace::XMinus, 2, 1},
+      {"east", frehg::BcFace::XPlus, 2, 4},
+      {"south", frehg::BcFace::YMinus, 1, 3},
+      {"north", frehg::BcFace::YPlus, 3, 2},
+  };
+  for (const Expected& e : rows) {
+    const frehg::BoundaryCondition& bc = set.byName(e.name);
+    EXPECT_EQ(bc.globalCellCount(), 1) << e.name;
+    ASSERT_EQ(bc.cells().size(), 1u) << e.name;
+    EXPECT_EQ(bc.cells()[0].face, e.face) << e.name;
+    EXPECT_EQ(bc.cells()[0].j, e.j) << e.name;
+    EXPECT_EQ(bc.cells()[0].i, e.i) << e.name;
+  }
+}
+
+TEST(BoundarySet, CornerCellPolygonSpillsBothFaces) {
+  // A side polygon holding exactly one CORNER cell's center hands the
+  // condition BOTH domain-edge faces of that cell, one member per face —
+  // the documented corner spill b6's one-cell-wide tank relies on
+  // (docs/theory/temperature.md, "Side-ghost limiter admission").
+  frehg::DomainConfig dom = b5LikeDomain();
+  dom.nx = 4;
+  dom.ny = 3;
+  const frehg::Grid grid(MPI_COMM_SELF, dom);
+
+  const frehg::BoundarySet set(
+      grid,
+      {sideCellConfig("sw", {{0.3, 0.3}, {0.7, 0.3}, {0.7, 0.7}, {0.3, 0.7}}),   // (0.5, 0.5)
+       sideCellConfig("se", {{3.3, 0.3}, {3.7, 0.3}, {3.7, 0.7}, {3.3, 0.7}}),   // (3.5, 0.5)
+       sideCellConfig("nw", {{0.3, 2.3}, {0.7, 2.3}, {0.7, 2.7}, {0.3, 2.7}}),   // (0.5, 2.5)
+       sideCellConfig("ne", {{3.3, 2.3}, {3.7, 2.3}, {3.7, 2.7}, {3.3, 2.7}})},  // (3.5, 2.5)
+      ".");
+
+  struct Expected {
+    const char* name;
+    frehg::BcFace faceA, faceB;
+    int j, i;  // local interior indices of the corner cell
+  };
+  const Expected rows[] = {
+      {"sw", frehg::BcFace::XMinus, frehg::BcFace::YMinus, 1, 1},
+      {"se", frehg::BcFace::XPlus, frehg::BcFace::YMinus, 1, 4},
+      {"nw", frehg::BcFace::XMinus, frehg::BcFace::YPlus, 3, 1},
+      {"ne", frehg::BcFace::XPlus, frehg::BcFace::YPlus, 3, 4},
+  };
+  for (const Expected& e : rows) {
+    const frehg::BoundaryCondition& bc = set.byName(e.name);
+    // Exactly the two edge faces of the corner cell — nothing else.
+    EXPECT_EQ(bc.globalCellCount(), 2) << e.name;
+    ASSERT_EQ(bc.cells().size(), 2u) << e.name;
+    EXPECT_EQ(faceCount(bc, e.faceA), 1) << e.name;
+    EXPECT_EQ(faceCount(bc, e.faceB), 1) << e.name;
+    for (const frehg::BcCell& cell : bc.cells()) {
+      EXPECT_EQ(cell.j, e.j) << e.name;
+      EXPECT_EQ(cell.i, e.i) << e.name;
+    }
+  }
 }
 
 TEST(BoundarySet, EmptyRegionIsFatal) {

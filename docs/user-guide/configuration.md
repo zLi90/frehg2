@@ -311,22 +311,19 @@ boundary (it neither reflects nor holds back the flow) — but it needs a
 continuing bed slope; on a *flat* channel end, prescribe a `kind: eta`
 stage instead (the b5 outlet does this).
 
-!!! warning "`outflow` is defective on the west (−x) and south (−y) edges"
+!!! note "`outflow` on the west (−x) and south (−y) edges before v2.0"
 
-    Put a transmissive outlet on the **east or north** edge if you can. On
-    the west and south edges the boundary face is given the *interior* face
+    Frehg2 1.x gave a west or south transmissive outlet the *interior* face
     area, which is gauged over the higher of the two bed elevations, so the
-    outlet cannot discharge until it has filled to its upslope neighbour's
-    bed: it traps a pool roughly one bed step deep and passes nothing until
-    then. Fed from upslope the same error runs the other way and over-drains,
-    with the below-bed clamp making up the difference.
-
-    Every gate that exercises `outflow` uses an east-edge outlet, so b1–b6 do
-    not detect this. Diagnosed in plan amendment V2-A11 with a verified fix
-    pending its x-gate; `validation/swere-superslab/README.md` has the
-    measurements. If you must use a west or south outlet, check whether the
-    outlet-cell depth in your output is close to the local bed step — that is
-    the signature.
+    outlet could not discharge until it had filled to its upslope
+    neighbour's bed: it trapped a pool roughly one bed step deep and passed
+    nothing until then. Fed from upslope the same error ran the other way
+    and over-drained, with the below-bed clamp making up the difference.
+    Every gate at the time used an east-edge outlet, so b1–b6 did not
+    detect it (plan amendment V2-A11). v2.0 fixes it, and
+    `regression.outflow_staircase` gates an outlet on every edge, fed from
+    both directions. Rerun any 1.x result that used a west or south
+    `outflow` outlet.
 
 A time-varying value uses
 `value: {series: {file: bc.dat}}` instead of `constant`. The polygon must

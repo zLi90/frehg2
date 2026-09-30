@@ -1,20 +1,163 @@
-# BC-kind x target coverage matrix (v2 plan §8.2). One row per (kind, target,
-# coupling-mode) cell; every row's disposition is exactly one of:
-#   tested          — the named test exercises the cell
+# BC-kind x target x coupling coverage matrix (v2 plan §8.2, backfilled at
+# Q7). One row per canonical cell (see scripts/check_bc_matrix.py, which
+# also freezes the enumeration and cross-references every id); disposition
+# is exactly one of:
+#   tested          — the named test(s) exercise the cell
 #   schema-rejected — the schema rejects the combination loudly; the named
 #                     test asserts the rejection and its message
-#   limitation      — accepted but unverified, with a pointer to the record
-#                     (this category must be empty at the Q7 release)
-# The v1 backfill (every pre-v2 kind x target cell) is the x-gate work's
-# deliverable and is NOT yet done — this file is seeded by the v2 Q4
-# scalar_cauchy landing (the first new kind under the matrix rule) plus the
-# two cells V2-A11 found defective ahead of the backfill.
+#   limitation      — accepted but unverified (MUST be empty at release)
+# Kind families split where the code path splits (BcValueConfig::Form ->
+# GwBcCode): head-constant / head-hydrostatic / flux / flux-gravity, and
+# scalar_value per registered scalar.
+#
+# Composition conventions (multiple ids joined by ';'):
+#  C1 side sweep: a rotation gate exercises the kind on all four sides
+#     (regression.surface_bc_sides, regression.outflow_staircase,
+#     regression.heat_orient, regression.gw_orient) — each cell also cites
+#     a per-instance anchor where one exists.
+#  C2 coupled sides: the side axis is exercised by the C1 gate (the
+#     surface-bc-sides gate runs a COUPLED pass for the footprint kinds, so
+#     those cells are run outright); for gw-side kinds whose coupled branch
+#     differs only in the ghost-head stage source, the coupled cell cites
+#     the coupled anchor (b6 / hillslope / CoupledModule unit) plus the C1
+#     side gate.
+#  C3 per-spec twins: surface scalar_value shares one ScalarSolver path per
+#     spec; the temperature instance anchors on its own gates (g6c/g7b).
 kind,target,coupled,disposition,test_or_record
-scalar_cauchy,groundwater_top,uncoupled,tested,TransportModule.CauchyTopConcentratesUnderEvaporationWithoutClipping
-scalar_cauchy,groundwater_top,uncoupled,tested,TransportModule.CauchyTopDilutesUnderInfiltrationWithoutClipping
+# ---- surface: eta ------------------------------------------------------
+eta,surface-west-edge,uncoupled,tested,regression.surface_bc_sides;SweModule.EtaConditionHoldsTheStageAndFillsTheChannel
+eta,surface-east-edge,uncoupled,tested,regression.surface_bc_sides;regression.g7
+eta,surface-south-edge,uncoupled,tested,regression.surface_bc_sides
+eta,surface-north-edge,uncoupled,tested,regression.surface_bc_sides
+eta,surface-west-edge,coupled,tested,regression.surface_bc_sides;regression.b5_restart
+eta,surface-east-edge,coupled,tested,regression.surface_bc_sides
+eta,surface-south-edge,coupled,tested,regression.surface_bc_sides
+eta,surface-north-edge,coupled,tested,regression.surface_bc_sides;regression.b6_restart
+# ---- surface: discharge ------------------------------------------------
+discharge,surface-west-edge,uncoupled,tested,regression.surface_bc_sides;SweModule.DischargeConditionInjectsExactVolume
+discharge,surface-east-edge,uncoupled,tested,regression.surface_bc_sides
+discharge,surface-south-edge,uncoupled,tested,regression.surface_bc_sides
+discharge,surface-north-edge,uncoupled,tested,regression.surface_bc_sides
+discharge,surface-west-edge,coupled,tested,regression.surface_bc_sides;CoupledModule.DischargeInflowClosesBudgetUnderExchange
+discharge,surface-east-edge,coupled,tested,regression.surface_bc_sides
+discharge,surface-south-edge,coupled,tested,regression.surface_bc_sides
+discharge,surface-north-edge,coupled,tested,regression.surface_bc_sides
+# ---- surface: velocity (walls swept coupled by the C1 gate; nonzero
+# ---- inflow per side by the Q7 unit battery) ---------------------------
+velocity,surface-west-edge,uncoupled,tested,SweModule.VelocityConditionDrivesInflowOnWestEdge;regression.g4
+velocity,surface-east-edge,uncoupled,tested,SweModule.VelocityConditionDrivesInflowOnEastEdge;regression.g4
+velocity,surface-south-edge,uncoupled,tested,SweModule.VelocityConditionDrivesInflowOnSouthEdge;regression.g4
+velocity,surface-north-edge,uncoupled,tested,SweModule.VelocityConditionDrivesInflowOnNorthEdge;regression.g4
+velocity,surface-west-edge,coupled,tested,regression.surface_bc_sides
+velocity,surface-east-edge,coupled,tested,regression.surface_bc_sides
+velocity,surface-south-edge,coupled,tested,regression.surface_bc_sides
+velocity,surface-north-edge,coupled,tested,regression.surface_bc_sides
+# ---- surface: outflow (V2-A11 cells now FIXED and gated analytically on
+# ---- every edge; the coupled exchange term is side-agnostic — C2) ------
+outflow,surface-west-edge,uncoupled,tested,regression.outflow_staircase;regression.swe_orient
+outflow,surface-east-edge,uncoupled,tested,regression.outflow_staircase;regression.b4
+outflow,surface-south-edge,uncoupled,tested,regression.outflow_staircase;SweModule.OutflowDrainsEquivalentlyOnAllFourEdges
+outflow,surface-north-edge,uncoupled,tested,regression.outflow_staircase;SweModule.OutflowDrainsEquivalentlyOnAllFourEdges
+outflow,surface-west-edge,coupled,tested,CoupledModule.OutflowEdgeDrainsCoupledPondConservatively;validation/swere-superslab
+outflow,surface-east-edge,coupled,tested,regression.outflow_staircase;CoupledModule.OutflowEdgeDrainsCoupledPondConservatively
+outflow,surface-south-edge,coupled,tested,regression.outflow_staircase;CoupledModule.OutflowEdgeDrainsCoupledPondConservatively
+outflow,surface-north-edge,coupled,tested,regression.outflow_staircase;CoupledModule.OutflowEdgeDrainsCoupledPondConservatively
+# ---- surface: scalar_value (salinity) ----------------------------------
+scalar_value-salinity,surface-west-edge,uncoupled,tested,regression.surface_bc_sides;TransportModule.EtaPairedScalarValuePrescribesStageSalinity
+scalar_value-salinity,surface-east-edge,uncoupled,tested,regression.surface_bc_sides
+scalar_value-salinity,surface-south-edge,uncoupled,tested,regression.surface_bc_sides
+scalar_value-salinity,surface-north-edge,uncoupled,tested,regression.surface_bc_sides
+scalar_value-salinity,surface-west-edge,coupled,tested,regression.surface_bc_sides
+scalar_value-salinity,surface-east-edge,coupled,tested,regression.surface_bc_sides
+scalar_value-salinity,surface-south-edge,coupled,tested,regression.surface_bc_sides
+scalar_value-salinity,surface-north-edge,coupled,tested,regression.surface_bc_sides;regression.b6_restart
+# ---- surface: scalar_value (temperature) — C3 --------------------------
+scalar_value-temperature,surface-west-edge,uncoupled,tested,regression.g7;regression.surface_bc_sides
+scalar_value-temperature,surface-east-edge,uncoupled,tested,regression.surface_bc_sides;regression.g7
+scalar_value-temperature,surface-south-edge,uncoupled,tested,regression.surface_bc_sides;regression.g7
+scalar_value-temperature,surface-north-edge,uncoupled,tested,regression.surface_bc_sides;regression.g7
+scalar_value-temperature,surface-west-edge,coupled,tested,regression.g6;regression.surface_bc_sides
+scalar_value-temperature,surface-east-edge,coupled,tested,regression.g6;regression.surface_bc_sides
+scalar_value-temperature,surface-south-edge,coupled,tested,regression.g6;regression.surface_bc_sides
+scalar_value-temperature,surface-north-edge,coupled,tested,regression.g6;regression.surface_bc_sides
+# ---- groundwater_side: head (hydrostatic) ------------------------------
+head-hydrostatic,groundwater_side-west,uncoupled,tested,regression.heat_orient;GwModule.HydrostaticSideHoldsEquilibrium
+head-hydrostatic,groundwater_side-east,uncoupled,tested,regression.heat_orient;regression.gw_orient
+head-hydrostatic,groundwater_side-south,uncoupled,tested,regression.heat_orient
+head-hydrostatic,groundwater_side-north,uncoupled,tested,regression.heat_orient;validation/transport-henry-saltwater-intrusion
+head-hydrostatic,groundwater_side-west,coupled,tested,CoupledModule.HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled;validation/swere-lateral-hillslope
+head-hydrostatic,groundwater_side-east,coupled,tested,CoupledModule.HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled;validation/swere-lateral-hillslope
+head-hydrostatic,groundwater_side-south,coupled,tested,CoupledModule.HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled;regression.heat_orient
+head-hydrostatic,groundwater_side-north,coupled,tested,regression.b6_restart;CoupledModule.HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled
+# ---- groundwater_side: head (constant pressure-head ghost) -------------
+head-constant,groundwater_side-west,uncoupled,tested,regression.gw_orient
+head-constant,groundwater_side-east,uncoupled,tested,regression.gw_orient
+head-constant,groundwater_side-south,uncoupled,tested,regression.gw_orient;validation/transport-ogata-banks-column
+head-constant,groundwater_side-north,uncoupled,tested,regression.gw_orient;validation/transport-ogata-banks-column
+head-constant,groundwater_side-west,coupled,tested,regression.gw_orient;CoupledModule.HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled
+head-constant,groundwater_side-east,coupled,tested,regression.gw_orient;CoupledModule.HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled
+head-constant,groundwater_side-south,coupled,tested,regression.gw_orient;CoupledModule.HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled
+head-constant,groundwater_side-north,coupled,tested,regression.gw_orient;CoupledModule.HydrostaticSideHeadFollowsLiveSurfaceWhenCoupled
+# ---- groundwater_side: flux --------------------------------------------
+flux,groundwater_side-west,uncoupled,tested,regression.gw_orient;GwModule.SideFluxInjectsWithInflowPositive
+flux,groundwater_side-east,uncoupled,tested,regression.gw_orient
+flux,groundwater_side-south,uncoupled,tested,regression.gw_orient
+flux,groundwater_side-north,uncoupled,tested,regression.gw_orient
+flux,groundwater_side-west,coupled,tested,regression.gw_orient;regression.b6_restart
+flux,groundwater_side-east,coupled,tested,regression.gw_orient;regression.b6_restart
+flux,groundwater_side-south,coupled,tested,regression.b6_restart;regression.gw_orient
+flux,groundwater_side-north,coupled,tested,regression.gw_orient;regression.b6_restart
+# ---- groundwater_side: scalar_value (salinity) — the legacy y+-only
+# ---- limiter admission: y+ is the admitted side (b6-pinned); the other
+# ---- three are DOCUMENTED-CLIP semantics pinned by the Q7 unit test
+# ---- (docs/theory/symmetry-exemptions.md rows 1-2) ---------------------
+scalar_value-salinity,groundwater_side-west,uncoupled,tested,TransportModule.SalinitySideValueIsLimiterClippedOffYPlus
+scalar_value-salinity,groundwater_side-east,uncoupled,tested,TransportModule.SalinitySideValueIsLimiterClippedOffYPlus
+scalar_value-salinity,groundwater_side-south,uncoupled,tested,TransportModule.SalinitySideValueIsLimiterClippedOffYPlus
+scalar_value-salinity,groundwater_side-north,uncoupled,tested,TransportModule.SideScalarValueSetsSubsurfaceGhosts
+scalar_value-salinity,groundwater_side-west,coupled,tested,TransportModule.SalinitySideValueIsLimiterClippedOffYPlus;regression.b6_restart
+scalar_value-salinity,groundwater_side-east,coupled,tested,TransportModule.SalinitySideValueIsLimiterClippedOffYPlus;regression.b6_restart
+scalar_value-salinity,groundwater_side-south,coupled,tested,TransportModule.SalinitySideValueIsLimiterClippedOffYPlus;regression.b6_restart
+scalar_value-salinity,groundwater_side-north,coupled,tested,regression.b6_restart
+# ---- groundwater_side: scalar_value (temperature) — all four sides
+# ---- admitted (V2-A18); swept by the heat battery ----------------------
+scalar_value-temperature,groundwater_side-west,uncoupled,tested,regression.heat_orient
+scalar_value-temperature,groundwater_side-east,uncoupled,tested,regression.heat_orient
+scalar_value-temperature,groundwater_side-south,uncoupled,tested,regression.heat_orient
+scalar_value-temperature,groundwater_side-north,uncoupled,tested,regression.heat_orient
+scalar_value-temperature,groundwater_side-west,coupled,tested,CoupledModule.SideThermalDirichletAdmittedUnderCoupling
+scalar_value-temperature,groundwater_side-east,coupled,tested,CoupledModule.SideThermalDirichletAdmittedUnderCoupling;regression.heat_orient
+scalar_value-temperature,groundwater_side-south,coupled,tested,CoupledModule.SideThermalDirichletAdmittedUnderCoupling;regression.heat_orient
+scalar_value-temperature,groundwater_side-north,coupled,tested,CoupledModule.SideThermalDirichletAdmittedUnderCoupling;regression.heat_orient
+# ---- groundwater_top ---------------------------------------------------
+head-constant,groundwater_top,uncoupled,tested,regression.b2;GwModule.PrescribedHeadTopInfiltrates
+head-constant,groundwater_top,coupled,schema-rejected,ConfigTest.RejectsCoupledGroundwaterTopHead
+flux,groundwater_top,uncoupled,tested,regression.b3;GwModule.PrescribedFluxTopDeliversExactVolume
+flux,groundwater_top,coupled,tested,CoupledModule.BounceBackReturnsInjectionOnFullColumn;CoupledModule.EvaporationCorrectionKeepsSubsurfaceLossOffTheSurface
+scalar_value-temperature,groundwater_top,uncoupled,tested,regression.g6;regression.g8
+scalar_value-temperature,groundwater_top,coupled,schema-rejected,ConfigTest.RejectsTemperaturePinOnCoupledGroundwaterTop
+scalar_cauchy,groundwater_top,uncoupled,tested,TransportModule.CauchyTopConcentratesUnderEvaporationWithoutClipping;TransportModule.CauchyTopDilutesUnderInfiltrationWithoutClipping
 scalar_cauchy,groundwater_top,coupled,schema-rejected,ConfigTest.RejectsScalarCauchyInCoupledRuns
+# ---- groundwater_bottom ------------------------------------------------
+head-constant,groundwater_bottom,uncoupled,tested,regression.g6;validation/re-1d-drainage
+head-constant,groundwater_bottom,coupled,tested,regression.g6;CoupledModule.SeepageHeldOnDrySurfaceUntilMinDepth
+flux,groundwater_bottom,uncoupled,tested,GwModule.PrescribedFluxBottomInjects
+flux,groundwater_bottom,coupled,tested,CoupledModule.ReallocationVentDepositsOnWetSurface
+flux-gravity,groundwater_bottom,uncoupled,tested,GwModule.GravityBottomDrainsAtConductivityRate;BoundarySet.SideTargetSelectsEdgeFaces
+flux-gravity,groundwater_bottom,coupled,tested,GwModule.GravityBottomDrainsAtConductivityRate;CoupledModule.ReallocationVentDepositsOnWetSurface
+scalar_value-temperature,groundwater_bottom,uncoupled,tested,regression.g6;regression.g8
+scalar_value-temperature,groundwater_bottom,coupled,tested,ConfigTest.RejectsTemperaturePinOnCoupledGroundwaterTop;regression.g6
+# ---- whole-family schema rejections ------------------------------------
+scalar_value-salinity,groundwater_top,any,schema-rejected,ConfigTest.RejectsSalinityValueOnGroundwaterTopAndBottom
+scalar_value-salinity,groundwater_bottom,any,schema-rejected,ConfigTest.RejectsSalinityValueOnGroundwaterTopAndBottom
 scalar_cauchy,groundwater_side,any,schema-rejected,ConfigTest.RejectsScalarCauchyOffTheTop
 scalar_cauchy,groundwater_bottom,any,schema-rejected,ConfigTest.RejectsScalarCauchyOffTheTop
 scalar_cauchy,surface,any,schema-rejected,ConfigTest.RejectsScalarCauchyOffTheTop
-outflow,surface-west-edge,any,limitation,V2-A11 (WetDry.cpp:144,158 ghost face area; reproducer validation/swe-outflow-staircase; fix deferred behind this matrix's gate)
-outflow,surface-south-edge,any,limitation,V2-A11 (same defect, y-direction twin)
+eta,groundwater,any,schema-rejected,ConfigTest.RejectsKindTargetMismatch
+discharge,groundwater,any,schema-rejected,ConfigTest.RejectsKindTargetMismatch
+velocity,groundwater,any,schema-rejected,ConfigTest.RejectsKindTargetMismatch
+outflow,groundwater,any,schema-rejected,ConfigTest.RejectsOutflowOnGroundwaterTarget
+head-constant,surface,any,schema-rejected,ConfigTest.RejectsKindTargetMismatch
+flux,surface,any,schema-rejected,ConfigTest.RejectsKindTargetMismatch
+flux-gravity,off-bottom,any,schema-rejected,ConfigTest.RejectsGravityValueOffTheBottom;ConfigTest.RejectsGravityValueOnNonFluxKind;ConfigTest.RejectsGravityFalse
+head-hydrostatic,off-side,any,schema-rejected,ConfigTest.RejectsHydrostaticValueOffTheSides

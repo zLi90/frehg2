@@ -30,7 +30,6 @@ BUILTIN_STL_SUPPORT    = YES
 
 # Compile-time provenance macros injected by CMake.
 PREDEFINED             = FREHG_VERSION="\"0.1.0\"" \
-                         FREHG_GIT_SHA="\"doc\"" \
                          KOKKOS_LAMBDA=[=]
 MACRO_EXPANSION        = YES
 EXPAND_ONLY_PREDEF     = YES

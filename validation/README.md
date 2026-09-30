@@ -144,7 +144,7 @@ Most Tier-A cases cost seconds to a few minutes. **Three are HPC-tier**
 | Case | Why HPC | Rough serial cost |
 |---|---|---|
 | `re-2d-open-lateral` | 2D Richards, `dt_max = 300 s` over a long horizon | ~42 min |
-| `swere-superslab` | coupled sync run marches the small surface CFL step | ~15–30 min |
+| `swere-superslab` | coupled sync run holds `dt = 0.5 s` (86 400 steps); gw iterations grow to 24 per step | 13.1 h measured (v2.0.0; its README) |
 | `swere-lateral-hillslope` | coupled, 5-year horizon on the surface CFL step | ~2.3 h |
 
 Measured reference wall times (serial spot-runs):
@@ -279,4 +279,6 @@ Learned while building this suite — load-bearing for anyone extending it:
 Per-case provenance (the exact source `.input` files for the SERGHEI
 ports; the cited literature for the transport suite) is in each case's
 YAML header. Both suites were authored against the v1.0.0 release
-binaries.
+binaries. The two cases on the V2-A11 west/south outlet path,
+`swe-vcatchment` and `swere-superslab`, were rerun on the v2.0.0 binary
+after the fix; their READMEs carry the post-fix records.

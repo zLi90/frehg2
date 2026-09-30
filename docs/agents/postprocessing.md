@@ -16,7 +16,7 @@ One file per run at the configured `output.filename` (conventionally
 times are group keys of **integer seconds** (`str(int(t))`).
 
 ```
-/frehg2                       root group; attrs: version, git sha, full config text, created
+/frehg2                       root group; attrs: version, git_sha (revision stamp), full config text, created
 /grid/x_center      [NX]      cell-center x [m]
 /grid/y_center      [NY]      cell-center y [m]
 /grid/z_center      [NZ]      nominal layer-center depths
@@ -177,13 +177,16 @@ In coupled runs the exchange appears symmetrically: positive surface
 
 ## 6. Provenance in the file
 
-`/frehg2` root attributes carry the code version, git SHA, creation
-time, and the **complete configuration text** of the run — scripts can
-recover every parameter from the output file alone:
+`/frehg2` root attributes carry the code version, the git revision
+stamp, creation time, and the **complete configuration text** of the run —
+scripts can recover every parameter from the output file alone:
 
 ```python
 cfg_text = f["/frehg2"].attrs["config"]
 ```
 
 (Attribute names: `version`, `git_sha`, `config`, `created` — inspect
-`dict(f['/frehg2'].attrs)` if in doubt.)
+`dict(f['/frehg2'].attrs)` if in doubt.) `git_sha` is a 12-digit commit
+SHA, the same with a `-dirty` suffix when the binary was built from a tree
+whose tracked files differed from that commit, or `unknown` for a build
+without git (user guide, output reference: "Revision stamp").

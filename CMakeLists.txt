@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.23)
 
 project(frehg2
-  VERSION 1.0.0
+  VERSION 2.0.0
   DESCRIPTION "Frehg2: coupled surface-water / groundwater / transport model"
   LANGUAGES CXX)
 
@@ -112,20 +112,10 @@ if(FREHG_CLANG_TIDY)
   set(CMAKE_CXX_CLANG_TIDY "${FREHG_CLANG_TIDY_EXE};--warnings-as-errors=*")
 endif()
 
-# Embed the git revision into the binary for output-file provenance.
-find_package(Git QUIET)
-set(FREHG_GIT_SHA "unknown")
-if(GIT_FOUND)
-  execute_process(
-    COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short=12 HEAD
-    OUTPUT_VARIABLE FREHG_GIT_SHA_RAW
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE FREHG_GIT_RC)
-  if(FREHG_GIT_RC EQUAL 0)
-    set(FREHG_GIT_SHA "${FREHG_GIT_SHA_RAW}")
-  endif()
-endif()
+# Embed the git revision into the binary for output-file provenance: defines
+# the frehg_git_revision target and FREHG_GIT_REVISION_SOURCE, which
+# frehg_core compiles (src/core/GitRevision.hpp).
+include(FrehgGitRevision)
 
 add_subdirectory(src)
 

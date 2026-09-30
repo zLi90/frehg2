@@ -1,0 +1,22 @@
+# Tolerances for the Q7 §8.1 v1-module dihedral batteries (swe-orient,
+# gw-orient, transport-orient), per transform class. `transpose` preserves
+# each domain edge's minus/plus class, so it gates scheme/indexing
+# orientation symmetry at the strict-mode rounding floor. The six `mixed`
+# transforms swap minus and plus edges; for the surface module the
+# preserved legacy plus/minus edge arithmetic (live east/north default
+# faces, the wall-correction rounding path, the outflow coefficient's
+# plus-reuse vs minus-recompute) sets a measured mirror-equality floor —
+# the bounds below sit above that floor and far below any V2-A11-class
+# side defect (0.1 m). Measured values and provenance:
+# docs/theory/symmetry-exemptions.md. The groundwater module's side
+# arithmetic is symmetric, so both classes stay at the strict bound.
+orient:
+  swe:
+    tol_abs_transpose: 1.0e-12
+    tol_abs_mixed: 1.0e-2
+  gw:
+    tol_abs_transpose: 1.0e-12
+    tol_abs_mixed: 1.0e-12
+  transport:
+    tol_abs_transpose: 1.0e-6
+    tol_abs_mixed: 1.0e-6

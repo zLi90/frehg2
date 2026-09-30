@@ -1101,6 +1101,16 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
                          "scalar_value on " + target + " is temperature-only in "
                          "v2.0 (no salinity gate exercises the pinned-cell form)");
           }
+          // The coupled top face is coupler-owned (same reasoning as the
+          // head-on-top rejection above): a pinned top cell under a live
+          // exchange has no gated meaning, so the §8.2 matrix rejects the
+          // cell loudly rather than accepting it unverified (Q7).
+          if (target == "groundwater_top" && sw && gw) {
+            ctx.addError(where,
+                         "scalar_value on groundwater_top is rejected in coupled "
+                         "runs (the coupler owns the top exchange; no gate "
+                         "exercises a pinned top cell under coupling)");
+          }
         }
         if (kind == "scalar_cauchy") {
           // The v2 Q4 zero-total-scalar-flux top condition (Geng & Boufadel

@@ -26,8 +26,12 @@ add_library(frehg_core STATIC
   io/Hdf5Output.cpp
   io/Monitor.cpp
   io/Checkpoint.cpp
-  io/RunRecord.cpp)
+  io/RunRecord.cpp
+  # Generated in the build tree by cmake/FrehgGitRevision.cmake; defines
+  # frehg::gitRevision() (core/GitRevision.hpp).
+  "${FREHG_GIT_REVISION_SOURCE}")
 add_library(frehg::core ALIAS frehg_core)
+add_dependencies(frehg_core frehg_git_revision)
 
 target_include_directories(frehg_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
@@ -43,7 +47,6 @@ target_link_libraries(frehg_core
 
 target_compile_definitions(frehg_core
   PUBLIC
-    FREHG_GIT_SHA="${FREHG_GIT_SHA}"
     FREHG_VERSION="${PROJECT_VERSION}"
     FREHG_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
     # Frehg2 is double-precision only (plan §4); skipping PETSc's optional

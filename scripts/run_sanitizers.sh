@@ -51,8 +51,12 @@ export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY
 # the Kokkos .so's; a stray libmpi there would shadow the system one and every
 # rank would degrade to a size-1 MPI_COMM_WORLD, racing the parallel-HDF5 mpi
 # tests). A no-op when the prefix is clean.
+# The grep is failure-guarded: on a host whose MPI lib dir has no
+# "mpich" in its path (macOS with MPICH under a local prefix), an
+# unguarded no-match grep would kill the script under set -euo
+# pipefail before its first line of output (Q7 pipeline bring-up).
 _mpich_libdir="$( { mpicxx.mpich -show 2>/dev/null || mpicxx -show 2>/dev/null || true; } \
-  | tr ' ' '\n' | sed -n 's/^-L//p' | grep -i mpich | head -1 )"
+  | tr ' ' '\n' | sed -n 's/^-L//p' | { grep -i mpich || true; } | head -1 )"
 [ -n "$_mpich_libdir" ] && export LD_LIBRARY_PATH="$_mpich_libdir:${LD_LIBRARY_PATH}"
 
 cmake -B "$BUILD" -S "$ROOT" \
@@ -108,20 +112,58 @@ if [ "$FULL" -eq 0 ]; then
 fi
 
 # ---- P5 full matrix (amendment A21) ---------------------------------------
+# Regression lanes an instrumented build cannot adjudicate, excluded by name
+# and printed (V2-A20; the matrix's first full run since P5 failed on both):
+#  * regression.perf_baseline is a wall-clock gate against an uninstrumented
+#    baseline, so under ASan/UBSan (3-10x slower) it fails by construction.
+#  * the aijkokkos lanes make PETSc allocate Kokkos views. When the sanitized
+#    binary and the PETSc it links use different C++ runtimes (the macOS
+#    lane: Apple clang/libc++ against a gcc/libstdc++ Kokkos-aware PETSc),
+#    the process holds two Kokkos builds with incompatible layouts, and
+#    PETSc's views are destroyed through the executable's copy of the
+#    destructor — an ASan bad-free inside VecDestroy_SeqKokkos, a property
+#    of the dependency stack, not of frehg. Excluded only when the runtimes
+#    differ; an ABI-consistent Kokkos-aware PETSc runs them.
+_cxx_runtime() {
+  local deps
+  if [ "$(uname -s)" = "Darwin" ]; then deps="$(otool -L "$1" 2>/dev/null || true)"
+  else deps="$(ldd "$1" 2>/dev/null || true)"; fi
+  case "$deps" in
+    *libc++*) echo libc++ ;;
+    *libstdc++*) echo libstdc++ ;;
+  esac
+}
+if [ "$(uname -s)" = "Darwin" ]; then
+  _petsc_lib="$(otool -L "$BUILD/src/frehg" 2>/dev/null | awk '/libpetsc/ && !f {print $1; f=1}' || true)"
+else
+  _petsc_lib="$(ldd "$BUILD/src/frehg" 2>/dev/null | awk '/libpetsc/ && !f {print $3; f=1}' || true)"
+fi
+_frehg_rt="$(_cxx_runtime "$BUILD/src/frehg")"
+_petsc_rt=""
+[ -n "$_petsc_lib" ] && _petsc_rt="$(_cxx_runtime "$_petsc_lib")"
+_excl='perf_baseline'
+if [ -n "$_frehg_rt" ] && [ -n "$_petsc_rt" ] && [ "$_frehg_rt" != "$_petsc_rt" ]; then
+  _excl="$_excl|.*\\.aijkokkos"
+  echo "run_sanitizers.sh: the sanitized frehg links $_frehg_rt but PETSc"
+  echo "  ($_petsc_lib) links $_petsc_rt — the aijkokkos lanes are EXCLUDED."
+fi
+EXCLUDE="^regression\\.($_excl)\$"
+echo "run_sanitizers.sh: excluded from the matrix: $EXCLUDE"
+
 # Anchored label regex: plain 'regression' would also match the
 # regression_nightly label by substring. The golden-comparison gates need
 # the legacy archive (not distributed); without it, run the self-contained
 # subset (restart determinism, rank invariance) and say so.
 LEGACY="$(sed -n 's/^FREHG_LEGACY_BENCHMARKS:[^=]*=//p' "$BUILD/CMakeCache.txt")"
 if [ -d "$LEGACY" ]; then
-  ctest --test-dir "$BUILD" -L '^(unit|mpi|regression)$' --output-on-failure \
-    --no-tests=error
+  ctest --test-dir "$BUILD" -L '^(unit|mpi|regression)$' -E "$EXCLUDE" \
+    --output-on-failure --no-tests=error
 else
   echo "run_sanitizers.sh: legacy goldens not found at '$LEGACY' —"
   echo "  golden-comparison gates SKIPPED; running the self-contained set."
   ctest --test-dir "$BUILD" -L '^(unit|mpi)$' --output-on-failure --no-tests=error
   ctest --test-dir "$BUILD" -L '^regression$' -R "restart|rank_invariance" \
-    --output-on-failure --no-tests=ignore
+    -E "$EXCLUDE" --output-on-failure --no-tests=ignore
 fi
 
 # Nightly-class path coverage on shortened horizons. Same environment pins
@@ -143,5 +185,11 @@ for variant in ss td; do
   "${SMOKE[@]}" smoke-b6 --variant "$variant" "${SMOKE_ARGS[@]}" \
     --work "$BUILD/sanitize-smoke/b6-$variant"
 done
+# v2 nightly-class cases (plan §9 Q7 row: sanitizer matrix over the new
+# labels): bulk evaporation + evaporative concentration + density on the
+# Geng slice, and convecting subsurface temperature on the HRL box —
+# shortened horizons, same contract as the b5/b6 smokes above.
+"${SMOKE[@]}" smoke-g5 "${SMOKE_ARGS[@]}" --work "$BUILD/sanitize-smoke/g5"
+"${SMOKE[@]}" smoke-g8 "${SMOKE_ARGS[@]}" --work "$BUILD/sanitize-smoke/g8"
 
 echo "run_sanitizers.sh --full: clean"

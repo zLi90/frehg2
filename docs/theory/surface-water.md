@@ -132,16 +132,17 @@ of the algorithm, not defects.
   balance. Decided by the P1 b4 gate exactly as the plan anticipated: the
   provisional stage-sink mapping keeps the outlet column dry, and a plain
   open boundary retains ~half the rain.
-  **Known defect on the west/south edges (V2-A11):** east/north outflow faces
+  **West/south edges, fixed in v2.0 (V2-A11):** east/north outflow faces
   take their coefficient from the cell's own `Sxp`/`Syp`, but west/south faces
-  are built from `Asx(j,0)`/`Asy(0,i)`, which the legacy ghost rule below
-  overwrites with the *interior* face area. That area is gauged over the
-  higher of two beds, so on a descending bed the released volume is throttled
-  by `(deptx(j,1)/depth(j,0))²` and the outlet holds a pool about one bed step
-  deep. b4's outlet is on the east edge, so no gate sees it. The fix is to
-  delete the two `Asx(j,0)`/`Asy(0,i)` assignments — the face kernel already
-  computes the correct value over the halo column — and it is deferred behind
-  the plan §8.2 x-gate cell.
+  are built from `Asx(j,0)`/`Asy(0,i)`, which the legacy ghost rule
+  overwrote with the *interior* face area. That area is gauged over the
+  higher of two beds, so on a descending bed the released volume was
+  throttled by `(deptx(j,1)/depth(j,0))²` and the outlet held a pool about
+  one bed step deep; b4's outlet is on the east edge, so no gate saw it.
+  v2.0 deletes the two `Asx(j,0)`/`Asy(0,i)` assignments — the face kernel
+  already computes the correct value over the halo column — and
+  `regression.outflow_staircase` gates an outlet on every edge, fed from
+  both directions.
 - **Wind direction interpolates linearly.** Legacy held the direction
   piecewise-constant at the previous sample while interpolating the speed
   (`solve.c:177-188`). No benchmark exercises wind; the difference is

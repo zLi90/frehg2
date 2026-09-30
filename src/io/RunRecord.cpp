@@ -4,6 +4,7 @@
 #include "io/RunRecord.hpp"
 
 #include "bc/BoundarySet.hpp"
+#include "core/GitRevision.hpp"
 #include "core/Logger.hpp"
 #include "core/Timer.hpp"
 
@@ -208,7 +209,7 @@ RunRecord::RunRecord(MPI_Comm comm, const FrehgConfig& config, const std::string
 
   YAML::Node prov;
   prov["frehg_version"] = FREHG_VERSION;
-  prov["git_sha"] = FREHG_GIT_SHA;
+  prov["git_sha"] = gitRevision();
   prov["build_type"] = FREHG_BUILD_TYPE;
   prov["hostname"] = hostName();
   prov["mpi_ranks"] = size;

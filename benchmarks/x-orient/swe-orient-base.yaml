@@ -1,0 +1,96 @@
+# The v2 §8.1 SWE dihedral battery base (Q7 x-gate backfill; the b1-derived
+# surface-water case the plan's designated set names). An 80 x 80 m square,
+# bed = tilted plane + off-axis mound (input/swe_dem.dat — injective under
+# every dihedral transform), constant rain with an off-axis exclusion patch,
+# velocity-0 walls pinned on every edge EXCEPT a single-cell transmissive
+# `outflow` outlet on the west edge (cell j = 2). Water ponds against the
+# low corner and drains through the outlet, so the battery exercises rain
+# masking, wetting/drying on an uneven bed, wall BCs, and — because the
+# harness rotates the outlet through all four edges — the `outflow` kind on
+# W, E, S and N (the plan §8.2 Outflow x side matrix cells, incl. the two
+# V2-A11 repaired ones). Edges are pinned by explicit walls because the
+# no-BC legacy default edge behaviour is not required to be symmetric
+# (report-P1 fidelity item 3).
+# The eddy viscosity is set to zero: the preserved legacy viscous face-area
+# asymmetry (difX reads Asx(i) on both x-faces — theory/surface-water.md)
+# is documented in docs/theory/symmetry-exemptions.md, and the battery pins
+# everything else.
+simulation:
+  id: swe-orient
+  title: Q7 8-orientation SWE symmetry battery
+
+domain:
+  nx: 10
+  ny: 10
+  nz: 1
+  dx: 8.0
+  dy: 8.0
+  dz: 1.0
+  bottom_elevation: {file: input/swe_dem.dat}
+  follow_terrain: false
+
+time:
+  dt: 2.0
+  t_end: 1200.0
+  output_interval: 1200.0
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: false
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.02}
+  viscosity: {x: 0.0, y: 0.0}
+  min_depth: 1.0e-06
+  wetting_face_depth: 1.0e-06
+  rainfall:
+    constant: 2.0e-06
+    exclude: {polygon: [[40.1, 56.1], [63.9, 56.1], [63.9, 71.9], [40.1, 71.9]]}
+  evaporation: {constant: 0.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: -10.0}
+
+boundary_conditions:
+  # Walls pin every edge; the single-cell outlet replaces the west wall at
+  # j = 2 (cell centre (4, 20); the polygons select member cells by centre,
+  # with the same symmetric overhang convention as g6-heat/orient-base).
+  - name: outlet
+    region: {polygon: [[-0.1, 16.1], [8.1, 16.1], [8.1, 23.9], [-0.1, 23.9]]}
+    target: surface
+    kind: outflow
+  - name: wall-w-south
+    region: {polygon: [[-0.1, -0.1], [8.1, -0.1], [8.1, 15.9], [-0.1, 15.9]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-w-north
+    region: {polygon: [[-0.1, 24.1], [8.1, 24.1], [8.1, 80.1], [-0.1, 80.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-east
+    region: {polygon: [[71.9, -0.1], [80.1, -0.1], [80.1, 80.1], [71.9, 80.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-south
+    region: {polygon: [[-0.1, -0.1], [80.1, -0.1], [80.1, 8.1], [-0.1, 8.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-north
+    region: {polygon: [[-0.1, 71.9], [80.1, 71.9], [80.1, 80.1], [-0.1, 80.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]

@@ -114,25 +114,24 @@ void SurfaceSolver::updateGeometry() {
   // for the areas, and the legacy full-volume (not averaged) assignments
   // for the west/south face volumes.
   //
-  // KNOWN DEFECT (plan amendment V2-A11, 2026-09-21): the two face-area
-  // copies below (Asx(j, 0) and Asy(0, i)) are wrong for a transmissive
-  // outflow boundary. They hand the boundary face the *interior* face area,
-  // which the face kernel above gauged over the higher of two bed
-  // elevations; the outflow coefficient (FreeSurface.cpp:311, :317) squares
-  // it, so on a descending bed the outlet is throttled by
-  // (deptx(j,1)/depth(j,0))^2 and cannot drain below its upslope neighbour's
-  // bed. Both copies also overwrite a value that is already correct: the
-  // face kernel covers the halo column, the bed ghost is a zero-gradient
-  // copy (SurfaceSolver.cpp:214) and the outflow ghost sets
-  // eta(j,0) = eta(j,1) - drop, so deptx(j,0) is exactly the outlet cell's
-  // own depth. Deleting the two lines is the entire fix, and the per-PR
-  // regression tier is green without them -- every gate that exercises
-  // kind: outflow uses an east-edge outlet. It is left in place because
-  // changing it is capability work gated behind the plan §8.2 BC kind x side
-  // matrix cell (§6.1 gate-first). The reproducer and the analytic answer are
-  // in validation/swe-outflow-staircase/ -- its check.py is the gate, and it
-  // passes as soon as these two lines go. Do not "fix" it here without that
-  // gate.
+  // The west/south boundary FACE areas (Asx(j, 0) and Asy(0, i)) are NOT
+  // copied from the interior any more (v2.0, plan amendment V2-A11): the
+  // legacy copies handed the boundary face the interior face area — gauged
+  // over the higher of two bed elevations — and the outflow coefficient
+  // (FreeSurface.cpp applyOutflowCorrections) squares it, so a transmissive
+  // outlet on a descending west/south bed was throttled by
+  // (deptx(j,1)/depth(j,0))^2 and could not drain below its upslope
+  // neighbour's bed (and over-drained, minting volume through the below-bed
+  // clamp, when fed from upslope). The face kernel above already computes
+  // the boundary face over the halo column — the bed ghost is a
+  // zero-gradient copy (SurfaceSolver.cpp) and the outflow ghost sets
+  // eta(j,0) = eta(j,1) - drop — so the computed value is exactly the
+  // outlet cell's own depth, and removing the copies is the whole fix.
+  // Gated by regression.outflow_staircase (both feed directions on both
+  // edges, Manning normal-depth + volume-budget criteria,
+  // validation/swe-outflow-staircase) and by the regression.swe_orient
+  // dihedral battery, which rotates a single-cell outlet through all four
+  // edges.
   const bool westEdge = (grid_.rankWest() == MPI_PROC_NULL);
   const bool southEdge = (grid_.rankSouth() == MPI_PROC_NULL);
   if (westEdge) {
@@ -141,7 +140,6 @@ void SurfaceSolver::updateGeometry() {
         Kokkos::RangePolicy<ExecSpace, Kokkos::IndexType<int>>(1, nyl + 1),
         KOKKOS_LAMBDA(const int j) {
           Vs(j, 0) = Vs(j, 1);
-          Asx(j, 0) = Asx(j, 1);
           Asy(j, 0) = Asy(j, 1);
           Asz(j, 0) = Asz(j, 1);
           Vsx(j, 0) = Vs(j, 1);
@@ -155,7 +153,6 @@ void SurfaceSolver::updateGeometry() {
         KOKKOS_LAMBDA(const int i) {
           Vs(0, i) = Vs(1, i);
           Asx(0, i) = Asx(1, i);
-          Asy(0, i) = Asy(1, i);
           Asz(0, i) = Asz(1, i);
           Vsy(0, i) = Vs(1, i);
           Aszy(0, i) = Asz(1, i);
@@ -352,9 +349,20 @@ void SurfaceSolver::enforceVeloBc(VeloBcApply apply) {
   // the west/south edge-slot writes run (see VeloBcApply); the inputs are
   // the reconstructed flow rates, the restored eta^n, and the completed
   // step's dt, so the slots restore bitwise.
+  //
+  // The Fu/Fv halo exchange is UNCONDITIONAL (v2 Q7): the transport step
+  // reads the flow-rate snapshot on both sides of every rank-interface
+  // face, and swe_refresh_flow_rates recomputes owned faces after the last
+  // exchange — before Q7 the exchange ran only on this eta-BC path, so a
+  // multi-rank transport run with no eta condition advected scalar with
+  // inconsistent interface fluxes (caught red by
+  // regression.tracer_rank_invariance on the walls-only battery base;
+  // measured 1.6e-2 rank drift under upwind, 1.6e-3 under superbee, eta
+  // rank-invariant at 4e-16 throughout — the flow never reads these
+  // halos). Serial behaviour and every eta-BC case are bitwise unchanged.
+  halo_.exchange({"swe_Fu", "swe_Fv"});
   if (!etaBcs_.empty()) {
     const bool edgeOnly = (apply == VeloBcApply::Refresh);
-    halo_.exchange({"swe_Fu", "swe_Fv"});
     const real_t dt = dt_;
     const int nxGlobal = grid_.nx();
     const int nyGlobal = grid_.ny();

@@ -63,9 +63,9 @@ amendment **V2-A11**.
 `out/output.h5` was read by `makeplot.py` while the 12 h job was still
 running. Early in a dry-start run ponding, outflow and seepage *are* all ~0,
 which is exactly the degenerate-run signature the script tests for, so it
-reported a mass-balance breakdown that did not exist. The file on disk is a
-complete 43 200 s run (86 401 `mass_audit` rows) whose embedded config is
-byte-identical to `swere-superslab.yaml`, and its budget closes:
+reported a mass-balance breakdown that did not exist. The completed file was
+a 43 200 s run (86 401 `mass_audit` rows), its embedded config
+byte-identical to `swere-superslab.yaml`, and its budget closed:
 
 ```
 volume 0.1071 = rain 15.0247 - evap 0 - outflow 1.4311 + bc_inflow 0
@@ -87,13 +87,14 @@ source path is implicated.
 
 ### A real defect this case did expose: the west/south transmissive outlet
 
-The residual 0.107 m³ of surface storage at `t_end` is a **0.1034 m pool
-standing in the outlet cell** (`i = 0`), level at eta ~ 0.1035 — pinned just
+In the pre-fix run, the residual 0.107 m³ of surface storage at `t_end` was
+a **0.1034 m pool standing in the outlet cell** (`i = 0`), level at
+eta ~ 0.1035 — pinned just
 below the upslope neighbour's bed at 0.1 m. The reference codes hold ~2e-4 m³
 there, which is the Manning normal depth `h = (n q / sqrt(S))^(3/5) = 2.7e-4 m`
 for this outlet.
 
-The cause is `src/swe/WetDry.cpp:144`, the west-edge ghost rule
+The cause was the west-edge ghost rule at v1.x `src/swe/WetDry.cpp:144`
 (`Asx(j, 0) = Asx(j, 1)`, ported from `shallowwater.c:1067-1099`). It hands
 the boundary face the **interior** face area, which is gauged over the higher
 of the two beds — the 0.1 m sill — instead of over the outlet cell's own bed.
@@ -106,39 +107,54 @@ Note the override *destroys* a correct value: the face kernel
 (`WetDry.cpp:49-57`) already computes `deptx(j,0)` over the halo column, and
 because the bed ghost is a zero-gradient copy (`SurfaceSolver.cpp:214`) and
 the outflow ghost sets `eta(j,0) = eta(j,1) - drop`, that value is exactly the
-outlet cell's own depth. Deleting lines 124 and 138 is sufficient.
+outlet cell's own depth. Deleting the west and south copies is sufficient.
 
-**This is a known limitation, not a fix landed here.** Q0.3's deliverable is a
-diagnosis, and changing the west/south ghost rule is capability work that the
-plan's §6.1 gate-first rule puts behind an x-gate on BC kind x side (§1.3).
-See V2-A11 for the measurements, the scope bound, and the remaining work.
+**Fixed in v2.0.0 (Q7).** Q0.3's deliverable was the diagnosis; the fix waited
+behind the x-gate that the plan's §6.1 gate-first rule requires for BC kind ×
+side (§1.3). That gate is `regression.outflow_staircase`, built from the 10×1
+reproducer below: 10 failures on the stock code, PASS once the two ghost
+assignments were deleted (`WetDry.cpp::updateGeometry`). V2-A11 has the
+measurements; V2-A19 records the landing.
 
 ### Scope of the defect
 
-Only the **west (-x)** and **south (-y)** edges are affected; east/north
-transmissive faces use `Sxp`/`Syp`, the cell's own coefficient, and are
+Only the **west (-x)** and **south (-y)** edges were affected; east/north
+transmissive faces use `Sxp`/`Syp`, the cell's own coefficient, and were
 correct. Of the five cases in this repo that use `kind: outflow`, three are on
-the east edge — including **b4-govindaraju, the only gate that exercises the
+the east edge — including **b4-govindaraju, the only gate that exercised the
 BC at all**, which is why b1-b6 never caught this. The two on the defective
 path are both validation cases: this one (west) and `swe-vcatchment` (south),
-where the same signature appears independently — a 0.192 m pool against that
+where the same signature appeared independently — a 0.192 m pool against that
 case's 0.2 m channel bed step, holding 38 of the 39.7 m³ left in the outlet
-row.
+row (gone after the fix; see that case's README).
 
-### What the case looks like once the throttle is removed
+### The record (v2.0.0 release binary)
 
-Against the four inter-comparison codes, with the run as it stands:
+Rerun after the fix on the release binary (`2.0.0` at `f56ba96`,
+2026-09-29 → 30); `makeplot.py` regenerated both figures from it. The
+pre-fix column is the v1.x run the findings above come from. The
+hydrograph ranges span ParFlow, CATHY and Cast3M; the digitized HGS
+outflow series stays below 0.002 m³/h and is not in them.
 
-| signal | frehg2 | reference range |
-| --- | --- | --- |
-| outlet peak | 0.361 m³/h @ 8.93 h | 0.288-0.456 m³/h @ 7.50-8.44 h |
-| return-flow onset | 7.20 h | 4.78-6.51 h |
-| rain-phase ponding | 1.10e-2 m³ over i = 40..60 | 5.36e-3 (HGS) - 6.66e-3 (Cast3M) |
-| outlet storage, late | 1.07e-1 m³ | ~2e-4 m³ |
+| signal | frehg2 v2.0.0 | frehg2 pre-fix | reference range |
+| --- | --- | --- | --- |
+| outlet peak | 0.404 m³/h @ 8.52 h | 0.361 m³/h @ 8.93 h | 0.288-0.456 m³/h @ 7.50-8.44 h |
+| return-flow onset | 6.54 h | 7.20 h | 4.78-6.51 h |
+| rain-phase ponding | 1.10e-2 m³ over i = 40..60 | 1.10e-2 m³ | 5.36e-3 (HGS) - 6.66e-3 (Cast3M) |
+| outlet storage, late | 1.40e-4 m³ | 1.07e-1 m³ | ~2e-4 m³ |
 
-The hydrograph sits inside the envelope and the rain-phase ponding is ~1.8x
-high but in the right place (over the low-K block). The last row is the
-defect above. A minimal 10x1 reproducer isolates it cleanly, and is in-tree at
+The outlet pool is gone: late outlet storage falls from 0.107 m³ to
+1.40e-4 m³, the normal-depth scale the reference codes hold. The throttled
+outlet had also delayed the hydrograph. Onset and peak now come 0.66 h and
+0.41 h earlier, 0.03 h and 0.08 h after the latest reference code
+(ParFlow, 6.51 h and 8.44 h), and the peak is inside the range; the curve
+is closest to ParFlow's, with a peak about 10 % lower. Rain-phase ponding
+over the low-K block is unchanged, since no water reaches the outlet
+before 6.54 h. It stays 1.7-2.1x the reference range, in the right place.
+The surface budget closes to +1.3e-3 m³ at `t_end` (8.5e-5 of the rain),
+and 1.800 m³ leaves through the outlet against 1.431 m³ pre-fix.
+
+A minimal 10x1 reproducer isolates the defect cleanly, and is in-tree at
 [`../swe-outflow-staircase/`](../swe-outflow-staircase/README.md): fed at the
 outlet cell, the stock code traps 0.1092 m³ and passes **zero** outflow until
 t = 1001.5 s of a 4000 s run; with lines 144/158 removed the same case settles
@@ -149,13 +165,13 @@ minted by the below-bed clamp).
 
 ### Secondary observations (not defects of this case)
 
-- `gw_mass_audit` shows `ss_storage` and `vloss` each reaching ~202 m³, ~15x
-  the total water input, very nearly cancelling. This is specific-storage
-  churn in dry unsaturated soil — the P2 `Ss` + dry-clay runaway, already
-  documented.
-- `realloc_dropped` = 6.176 m³, ~46 % of the 13.5 m³ infiltrated: the
-  documented lateral-reallocation drop (the b2/b3 `reallocation_surplus`
-  fork).
+- `gw_mass_audit` shows `ss_storage` and `vloss` each reaching ~202 m³
+  (202.1 and −201.3 m³ at `t_end`; pre-fix ~202 each), ~13x the 15.0 m³
+  of rain, very nearly cancelling. This is specific-storage churn in dry
+  unsaturated soil — the P2 `Ss` + dry-clay runaway, already documented.
+- `realloc_dropped` = 6.312 m³, ~48 % of the 13.2 m³ infiltrated (pre-fix
+  6.176 m³ of 13.5 m³): the documented lateral-reallocation drop (the
+  b2/b3 `reallocation_surplus` fork).
 
 ## Caveats
 
@@ -166,18 +182,21 @@ minted by the below-bed clamp).
 - **Strong heterogeneity**: the soil `Ks` ratio spans ~1e4, which stresses the
   coupled infiltration front and the adaptive step.
 
-## Cost estimate
+## Cost
 
-Sync coupling: the 3D groundwater cell count dominates. Cells =
-`100 × 1 × 100 = 10 000`. This is a dynamic infiltration event with
-`dt_max = 1.0 s`; the wetting front through the low-K block drives the common
-step below 1 s during the 3 h rain (assume an effective `dt ≈ 0.5–1.0 s`),
-giving ≈ 43 200–86 400 steps and `10 000 × ~6e4 ≈ 6e8` gw cell-steps ×
-`2e-6 s ≈ 15–30 min` (surface is negligible by comparison).
+Measured, not estimated. On the v2.0.0 release binary (Apple M3, serial,
+sharing the machine with other pipeline lanes for most of the run), the
+sync common step holds at `dt = 0.5 s` (86 400 steps), and the groundwater
+iterations per step grow as the profile drains: 4 at t = 1 h, 14 at 3 h,
+21 at 4.5 h, 24 from 7 h to 11 h (the `gw N it` field of the log's output
+lines). The 12 h run took 13.1 h of wall time (2026-09-29 17:18 →
+09-30 07:36, less a 1.2 h pause while the release pipeline's scaling gates
+needed an idle machine). The pre-fix run on 2026-08-30 took about a day,
+which is why its file was read mid-write (Findings). The 15–30 min this
+section used to give was an unmeasured estimate.
 
-**≈ 15–30 min wall time → HPC** (over the 10-min local threshold; the small
-`dt_max` over the fine 10 000-cell grid is the cost). Run `--validate` only for
-authoring.
+**About 13 h serial on a laptop → HPC or a long unattended run.** Run
+`--validate` only for authoring.
 
 ## Validation
 

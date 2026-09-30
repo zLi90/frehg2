@@ -3,6 +3,7 @@
 
 #include "io/Hdf5Output.hpp"
 
+#include "core/GitRevision.hpp"
 #include "core/Logger.hpp"
 
 #include <chrono>
@@ -105,7 +106,7 @@ Hdf5Output::~Hdf5Output() {
 void Hdf5Output::writeRootAttributes(const std::string& configText) {
   ensureGroup("/frehg2");
   writeStringAttribute("/frehg2", "version", FREHG_VERSION);
-  writeStringAttribute("/frehg2", "git_sha", FREHG_GIT_SHA);
+  writeStringAttribute("/frehg2", "git_sha", gitRevision());
   writeStringAttribute("/frehg2", "config", configText);
   writeStringAttribute("/frehg2", "created", isoTimestamp());
 }

@@ -238,18 +238,18 @@ else:
     print(f"  surface mass residual : {residual:+.4e} m3 "
           "(rain - evap - outflow + bc_inflow + seepage + clamped - dV_surf)")
 
-# Known limitation (V2-A11): the transmissive outlet sits on the -x edge, and
-# the west/south ghost rule at WetDry.cpp:144 hands that face the *interior*
-# face area, which is gauged over the upslope neighbour's bed. On this 0.1 m
-# staircase the outlet cell cannot discharge until it fills to the upslope
-# sill, so it traps a pool ~1 bed-step deep. Report it rather than let it
-# read as physics.
+# V2-A11 tripwire: the transmissive outlet sits on the -x edge, where the
+# west/south ghost copies in WetDry.cpp::updateGeometry used to hand that face
+# the *interior* face area, gauged over the upslope neighbour's bed. On this
+# 0.1 m staircase the outlet cell then could not discharge until it filled to
+# the upslope sill, trapping a pool ~1 bed-step deep. The copies were deleted
+# in Q7 (gated by regression.outflow_staircase); a pool here is a regression.
 bed_step = float(bottom[1] - bottom[0])
 if outlet_depth is not None and bed_step > 0.0 and outlet_depth > 0.5 * bed_step:
     print(f"  outlet pool (V2-A11)  : {outlet_depth:.4f} m standing at i=0 against a "
           f"{bed_step:.3f} m bed step ({pond_vol[-1]:.4e} m3 total surface storage). "
-          "Known limitation of the west/south transmissive BC — the outlet cannot "
-          "drain below the upslope sill — not a property of the case.")
+          "This is the V2-A11 west/south outlet signature, fixed in Q7 -- its "
+          "return is a regression, not a property of the case.")
 
 # Saturation-profile sampling (containing cell for each nominal x location).
 print("  saturation profiles   :")

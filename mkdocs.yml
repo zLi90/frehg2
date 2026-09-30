@@ -50,7 +50,9 @@ nav:
       - Exchange flux: theory/exchange-flux.md
       - Transport: theory/transport.md
       - Temperature: theory/temperature.md
+      - Atmosphere: theory/atmosphere.md
       - Removed features: theory/removed-features.md
+      - Symmetry exemptions: theory/symmetry-exemptions.md
   - AI assistant guides:
       - Build guide: agents/build.md
       - Case setup: agents/case-setup.md
@@ -63,6 +65,7 @@ nav:
       - Adding a BC kind: developer-guide/adding-a-bc-kind.md
       - Adding an output variable: developer-guide/adding-an-output-variable.md
       - Testing and CI: developer-guide/testing.md
+      - Feature-interaction coverage: developer-guide/feature-coverage.md
       - Performance: developer-guide/performance.md
       - GPU acceptance protocol: developer-guide/gpu-acceptance.md
       - Upgrade plan (binding spec): developer-guide/FREHG2_UPGRADE_PLAN.md
@@ -88,5 +91,9 @@ nav:
           - Q3 report: developer-guide/report-Q3.md
           - Q4 DoD: developer-guide/dod-Q4.md
           - Q4 report: developer-guide/report-Q4.md
+          - Q5 DoD: developer-guide/dod-Q5.md
+          - Q5 report: developer-guide/report-Q5.md
           - Q6 DoD: developer-guide/dod-Q6.md
           - Q6 report: developer-guide/report-Q6.md
+          - Q7 DoD: developer-guide/dod-Q7.md
+          - Q7 report: developer-guide/report-Q7.md

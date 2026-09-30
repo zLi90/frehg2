@@ -806,4 +806,254 @@ TEST_F(ConfigTest, SolverRejectsUnknownKeys) {
   EXPECT_TRUE(hasError(result, "krylov")) << joined(result);
 }
 
+// ---------------------------------------------------------------------------
+// v2 Q7 (plan §8.2): BC-matrix backfill. Rejections the batteries above
+// covered only incidentally (or not at all), each pinned with its message.
+// ---------------------------------------------------------------------------
+
+TEST_F(ConfigTest, RejectsScalarSelectorOffScalarValue) {
+  std::string text = kBaseConfig;
+  text += R"(boundary_conditions:
+  - name: tide
+    region: {polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]}
+    target: surface
+    kind: eta
+    scalar: salinity
+    value: {constant: 0.0}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "the scalar selector applies to kind scalar_value only"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsTemperatureValueWithoutTemperatureModule) {
+  std::string text = kGwTransportConfig;
+  text += R"(boundary_conditions:
+  - name: warm-side
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_side
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 20.0}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "scalar: temperature requires modules.temperature: true"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsSalinityValueWithoutTransportModule) {
+  // No scalar key: salinity is the default selector.
+  std::string text = kGwTransportConfig;
+  const std::string needle = "modules: {groundwater: true, transport: true}";
+  text.replace(text.find(needle), needle.size(), "modules: {groundwater: true}");
+  const std::string icNeedle = "\n  transport: {groundwater: {constant: 25.0}}";
+  text.replace(text.find(icNeedle), icNeedle.size(), "");
+  text += R"(boundary_conditions:
+  - name: salt-side
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_side
+    kind: scalar_value
+    value: {constant: 25.0}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "kind scalar_value requires modules.transport: true"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsSalinityValueOnGroundwaterTopAndBottom) {
+  // Both §8.2 salinity rows ride the same rejection: the pinned-cell
+  // Dirichlet top/bottom form is the Q5 temperature battery; no salinity
+  // gate exercises it.
+  const char* kSaltPin = R"(boundary_conditions:
+  - name: salt-pin
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: groundwater_top
+    kind: scalar_value
+    scalar: salinity
+    value: {constant: 25.0}
+)";
+  for (const char* target : {"groundwater_top", "groundwater_bottom"}) {
+    std::string text = kGwTransportConfig;
+    std::string bc = kSaltPin;
+    const std::string needle = "target: groundwater_top";
+    bc.replace(bc.find(needle), needle.size(), std::string("target: ") + target);
+    text += bc;
+    const ValidationResult result = validate(text);
+    ASSERT_FALSE(result.ok()) << target;
+    EXPECT_TRUE(hasError(result, std::string("scalar_value on ") + target +
+                                     " is temperature-only in v2.0"))
+        << target << "\n"
+        << joined(result);
+  }
+}
+
+TEST_F(ConfigTest, RejectsTwoValueFormsAtOnce) {
+  {
+    std::ofstream series(dir_ / "tide.dat");
+    series << "0 0.0\n100 0.1\n";
+  }
+  std::string text = kBaseConfig;
+  text += R"(boundary_conditions:
+  - name: tide
+    region: {polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.0, series: {file: tide.dat}}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "exactly one of {constant, series, gravity, hydrostatic}"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsGravityFalse) {
+  // Free drainage is opt-in only: gravity: false is meaningless next to
+  // omitting the key.
+  std::string text = kBaseConfig;
+  text += R"(boundary_conditions:
+  - name: drain
+    region: {polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]}
+    target: groundwater_bottom
+    kind: flux
+    value: {gravity: false}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "must be true when given")) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsDuplicateBcNames) {
+  std::string text = kBaseConfig;
+  text += R"(boundary_conditions:
+  - name: tide
+    region: {polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.0}
+  - name: tide
+    region: {polygon: [[2.0, 0.0], [3.0, 0.0], [3.0, 1.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.1}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "duplicate boundary condition name 'tide'")) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsSurfaceTargetWithoutSurfaceModule) {
+  std::string text = kGwTransportConfig;
+  text += R"(boundary_conditions:
+  - name: tide
+    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.0}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "target surface requires modules.surface_water: true"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsGroundwaterTargetWithoutGroundwaterModule) {
+  std::string text = kBaseConfig;
+  text += R"(boundary_conditions:
+  - name: seaside
+    region: {polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]}
+    target: groundwater_side
+    kind: head
+    value: {constant: 0.1}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "target groundwater_side requires modules.groundwater: true"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsShortBcPolygon) {
+  std::string text = kBaseConfig;
+  text += R"(boundary_conditions:
+  - name: tide
+    region: {polygon: [[0.0, 0.0], [1.0, 1.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.0}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "boundary_conditions[0].region.polygon")) << joined(result);
+  EXPECT_TRUE(hasError(result, "needs at least 3 entries")) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsTemperaturePinOnCoupledGroundwaterTop) {
+  // Q7 §8.2: the coupled top face is coupler-owned (the head-on-top
+  // rejection's reasoning); a pinned top cell under a live exchange has no
+  // gated meaning, so the matrix rejects the cell loudly rather than
+  // accepting it unverified. The bottom pin stays accepted.
+  std::string text = kBaseConfig;
+  const std::string needle = "modules: {surface_water: true}";
+  text.replace(text.find(needle), needle.size(),
+               "modules: {surface_water: true, groundwater: true, temperature: true}");
+  const std::string ic = "initial_conditions: {surface: {eta: {constant: 0.0}}}";
+  text.replace(text.find(ic), ic.size(),
+               "initial_conditions:\n"
+               "  surface: {eta: {constant: 0.0}}\n"
+               "  groundwater: {moisture: {constant: 0.2}}\n"
+               "  temperature: {groundwater: {constant: 20.0}, surface: {constant: 20.0}}");
+  text += R"(groundwater:
+  timestep: {dt_init: 0.1, dt_min: 0.1, dt_max: 1.0}
+  specific_storage: 1.0e-5
+soil:
+  types:
+    - {name: loam, ksx: 1.0e-5, ksy: 1.0e-5, ksz: 1.0e-5,
+       theta_s: 0.4, theta_r: 0.08, vg_alpha: 6.0, vg_n: 2.0}
+  map: {constant: loam}
+temperature:
+  thermal_conductivity: 2.0
+  heat_capacity_solid: 2.0e6
+boundary_conditions:
+  - name: pinned-top
+    region: {polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]}
+    target: groundwater_top
+    kind: scalar_value
+    scalar: temperature
+    value: {constant: 20.0}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result,
+                       "scalar_value on groundwater_top is rejected in coupled runs"))
+      << joined(result);
+  const std::string top = "target: groundwater_top";
+  text.replace(text.find(top), top.size(), "target: groundwater_bottom");
+  EXPECT_TRUE(validate(text).ok()) << joined(validate(text));
+}
+
+TEST_F(ConfigTest, AcceptsPetscOptionsFilePassThrough) {
+  // Q7 §8.3: solver.petsc_options_file is a raw pass-through consumed by
+  // PetscSession at startup (it cannot be re-consumed inside this
+  // already-initialized test process); this pins the config plumbing —
+  // the schema accepts an existing file and the loaded config carries the
+  // path verbatim; a missing file is rejected loudly like every other
+  // input path.
+  {
+    std::ofstream out(dir_ / "extra_petsc.opts");
+    out << "-gw_ksp_max_it 123\n";
+  }
+  std::string text = kBaseConfig;
+  text += "solver:\n  petsc_options_file: extra_petsc.opts\n";
+  const ValidationResult result = validate(text);
+  ASSERT_TRUE(result.ok()) << joined(result);
+  frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(text));
+  EXPECT_EQ(cfg.solver.petscOptionsFile, "extra_petsc.opts");
+  std::string missing = kBaseConfig;
+  missing += "solver:\n  petsc_options_file: does_not_exist.opts\n";
+  const ValidationResult bad = validate(missing);
+  ASSERT_FALSE(bad.ok());
+}
+
 }  // namespace

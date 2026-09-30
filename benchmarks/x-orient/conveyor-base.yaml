@@ -1,0 +1,105 @@
+# The plan §8.2 surface BC side-sweep case (Q7 x-gate backfill): a walled
+# 24 x 24 m basin with a single-cell `discharge` inflow on the west edge
+# (j = 7), a salinity `scalar_value` of 1 riding it, and the full east
+# column held by `eta`. The regression harness (surface-bc-sides) runs the
+# four rotations of this configuration, sweeping discharge, the
+# inflow-riding surface scalar_value, and eta over all four edges, and
+# judges each orientation ABSOLUTELY — mass-audit closure, no clamp
+# minting, inflow-cell plateau, mid-path front arrival, scalar bounds,
+# outlet stage held. Absolute per-side criteria (not cross-side equality)
+# because the preserved legacy plus/minus edge arithmetic sets a ~1e-3
+# mirror-equality floor on boundary-driven surface flow
+# (docs/theory/symmetry-exemptions.md); a dead or throttled side fails
+# these bands by orders of magnitude regardless (the V2-A11 lesson).
+simulation:
+  id: conveyor
+  title: Q7 surface BC kind-by-side sweep (discharge / scalar_value / eta)
+
+domain:
+  nx: 12
+  ny: 12
+  nz: 1
+  dx: 2.0
+  dy: 2.0
+  dz: 1.0
+  bottom_elevation: {constant: -0.5}
+  follow_terrain: false
+
+time:
+  dt: 0.5
+  t_end: 400.0
+  output_interval: 400.0
+
+modules:
+  surface_water: true
+  groundwater: false
+  transport: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.02}
+  viscosity: {x: 0.0, y: 0.0}
+  min_depth: 1.0e-06
+  wetting_face_depth: 1.0e-06
+  rainfall: {constant: 0.0}
+  evaporation: {constant: 0.0}
+
+transport:
+  scheme: {advection: superbee}
+  surface_diffusivity: {x: 1.0e-10, y: 1.0e-10}
+  bounds: {min: 0.0, max: 1.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+  transport:
+    surface: {constant: 0.0}
+
+boundary_conditions:
+  - name: inflow
+    # single west-edge cell j = 7 (centre (1, 15)); total discharge, so the
+    # value is frame-independent and the face comes from the polygon.
+    region: {polygon: [[-0.1, 14.1], [2.1, 14.1], [2.1, 15.9], [-0.1, 15.9]]}
+    target: surface
+    kind: discharge
+    value: {constant: 0.2}
+  - name: inflow-tracer
+    region: {polygon: [[-0.1, 14.1], [2.1, 14.1], [2.1, 15.9], [-0.1, 15.9]]}
+    target: surface
+    kind: scalar_value
+    value: {constant: 1.0}
+  - name: outlet
+    region: {polygon: [[21.9, -0.1], [24.1, -0.1], [24.1, 24.1], [21.9, 24.1]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.0}
+  # Walls pin the remaining edges (the wall strips stop short of the east
+  # outlet column so no corner spill lands on the eta cells).
+  - name: wall-w-south
+    region: {polygon: [[-0.1, -0.1], [2.1, -0.1], [2.1, 13.9], [-0.1, 13.9]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-w-north
+    region: {polygon: [[-0.1, 16.1], [2.1, 16.1], [2.1, 24.1], [-0.1, 24.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-south
+    region: {polygon: [[-0.1, -0.1], [21.9, -0.1], [21.9, 1.9], [-0.1, 1.9]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-north
+    region: {polygon: [[-0.1, 22.1], [21.9, 22.1], [21.9, 24.1], [-0.1, 24.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta]
+    transport: [concentration_surface]
