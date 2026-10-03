@@ -28,12 +28,18 @@ times are group keys of **integer seconds** (`str(int(t))`).
 /groundwater/zcell/0    [NY*NX*NZ]   per-cell layer-center elevations (static; use for
                                      terrain-following/partial-cell vertical coordinates)
 /transport/<var>/<t>                 scalar snapshots (either grid; same flattening)
+/temperature/<var>/<t>               temperature snapshots (v2; either grid; same flattening)
 /monitor/<name>         (rows, 1+k)  per-time-step table; attrs: columns (CSV), i, j
 /monitor/mass_audit                  surface volume budget      (see §5)
 /monitor/gw_mass_audit               subsurface volume budget   (see §5)
 /monitor/transport_audit             scalar-mass budget         (see §5)
+/monitor/temperature_audit           heat budget                (see §5)
 /checkpoint/<t>/...                  restart state (ignore for plotting)
 ```
+
+Next to the HDF5 file every run also writes `run-record.yaml`
+(provenance, the resolved configuration, timers, solver statistics;
+see §6).
 
 Variables and units:
 
@@ -48,6 +54,8 @@ Variables and units:
 | `groundwater/qx,qy,qz` | Darcy fluxes | m/s |
 | `transport/concentration` | subsurface scalar | user units (e.g. psu) |
 | `transport/concentration_surface` | surface scalar | user units |
+| `temperature/temperature` | subsurface temperature | °C |
+| `temperature/temperature_surface` | surface water temperature | °C |
 
 Every dataset carries `units`, `long_name`, and `time` attributes.
 
@@ -136,9 +144,9 @@ plt.contour(Y, Z, S, levels=[17.5], colors="k")     # e.g. the 50 % isohaline
 
 ## 5. The audit tables (budgets and hydrographs)
 
-All three are `/monitor/*` tables (one row per step, `columns` attribute
+All four are `/monitor/*` tables (one row per step, `columns` attribute
 authoritative). Volume/mass columns other than the instantaneous
-`volume`/`*_mass` are **cumulative since t_start**.
+`volume`/`*_mass`/`*_heat` are **cumulative since t_start**.
 
 **`mass_audit`** (surface; columns
 `time,volume,rain,evaporation,boundary_outflow,bc_inflow[,seepage],clamped`
@@ -158,11 +166,15 @@ q_out = np.gradient(c["boundary_outflow"], c["time"])     # conserved outflow [m
 ```
 
 (`clamped` measures a documented legacy-scheme defect — volume created
-by the below-bed clamp; report it, don't hide it.)
+by the below-bed clamp — plus, since v2, the signed volume of the
+rain/evaporation dry clamp; report it, don't hide it.)
 
 **`gw_mass_audit`** (subsurface; columns
-`time,volume,boundary_in,ss_storage,realloc,realloc_dropped,vloss`):
-`Δvolume = boundary_in − ss_storage + realloc − vloss` to rounding.
+`time,volume,boundary_in,ss_storage,realloc,realloc_dropped,vloss`, plus
+`evaporation` when `groundwater.evaporation` is configured):
+`Δvolume = boundary_in − ss_storage + realloc − vloss` to rounding. The
+`evaporation` column is the cumulative evaporated volume, already part of
+`boundary_in`, not an extra term.
 
 **`transport_audit`** (transport runs; columns `time,surf_mass,subs_mass,
 exchange,surf_source,surf_boundary,surf_adjust,surf_anchor,subs_boundary,
@@ -171,6 +183,16 @@ subs_adjust,subs_anchor`): per-grid identities
 and `Δsubs_mass = −exchange + subs_boundary + subs_adjust + subs_anchor`.
 The `*_anchor` terms measure the preserved legacy ledger lags (see
 `docs/theory/transport.md`); they are data, not errors.
+
+**`temperature_audit`** (temperature runs, v2; columns `time,surf_heat,
+subs_heat,exchange,surf_source,surf_boundary,surf_adjust,surf_anchor,
+surf_atmos,subs_boundary,subs_adjust,subs_anchor`): the same identities on
+the temperature scalar, in K·m³ (the subsurface on the θ+κ basis that
+includes the solid matrix), with the atmospheric heat exchange in its own
+column:
+`Δsurf_heat = exchange + surf_source + surf_boundary + surf_adjust + surf_anchor + surf_atmos`.
+Multiply by `(ρc)_w` (`temperature.heat_capacity_water`, default
+4.184e6 J/m³/K) to get joules.
 
 In coupled runs the exchange appears symmetrically: positive surface
 `seepage` volume is water the subsurface gave up.
@@ -190,3 +212,21 @@ cfg_text = f["/frehg2"].attrs["config"]
 SHA, the same with a `-dirty` suffix when the binary was built from a tree
 whose tracked files differed from that commit, or `unknown` for a build
 without git (user guide, output reference: "Revision stamp").
+
+**The run record.** Every run writes `run-record.yaml` beside the HDF5
+file. It is rewritten at each output flush, so a killed run leaves a
+partial record with `provenance.finished: false`. Read it with PyYAML
+(`pip install pyyaml`):
+
+```python
+import yaml
+rec = yaml.safe_load(open("out/run-record.yaml"))
+rec["provenance"]["git_sha"], rec["provenance"]["wall_seconds"]
+rec["configuration"]          # the resolved config: every default filled in
+rec["closure"]                # final cumulative mass-audit budgets
+rec["solver"]                 # per-system solves, iterations, rebuilds
+```
+
+Its sections are `provenance`, `configuration`, `modules`,
+`boundary_conditions`, `timers`, `solver` and `closure`; the user guide's
+output reference describes each one.

@@ -31,7 +31,10 @@ mid-run); the smoke run is what catches that.
 ## 2. Universal conventions
 
 - **SI units everywhere**: meters, seconds, m/s, m²/s, m³/s. Convert the
-  user's data (mm/h rain → m/s, etc.) at file-creation time.
+  user's data (mm/h rain → m/s, etc.) at file-creation time. Exceptions:
+  temperatures are °C (initial, boundary, and `atmosphere` values), the
+  `atmosphere` pressure is kPa, radiation is W/m², and angles are
+  degrees.
 - **One absolute elevation datum** shared by `bottom_elevation`, initial
   `eta`, stage boundary values, and hydrostatic heads. Water depth is
   `eta − bottom`; a cell is dry where `eta ≤ bottom`. **A dry start is
@@ -62,6 +65,12 @@ mid-run); the smoke run is what catches that.
 | surface scalar transport | `validation/transport-surface-tracer-advection/` | upwind vs superbee pair |
 | subsurface advection–dispersion | `validation/transport-ogata-banks-column/` | |
 | variable-density / saltwater intrusion | `validation/transport-henry-saltwater-intrusion/` (simplest), `benchmarks/b6-kuan/` (full coupled tidal) | |
+| open-water evaporation | `benchmarks/g4-evap/` | prescribed rates; `g4c-bulk.yaml` has the `atmosphere` block and `evaporation: {mode: bulk}` |
+| bare-soil evaporation / salinization | `benchmarks/g5-geng2015/` | `groundwater.evaporation` + `scalar_cauchy` + density feedback |
+| subsurface heat transport | `benchmarks/g6-heat/` | conduction and advection; `g6c-coupled.yaml` is the coupled variant |
+| surface heat exchange | `benchmarks/g7-heat/` | `equilibrium` (`g7a-edinger.yaml`) and `bulk` (`g7a2-bulk.yaml`) modes |
+| thermal convection | `benchmarks/g8-hrl/` | `thermal_expansion` density feedback, pinned top/bottom temperatures |
+| wind setup / seiche | `benchmarks/g9-wind/` | Cd(U₁₀) laws, the `u10`/`v10` component form |
 
 Every case directory has a README stating what it does and its expected
 result — read it before adapting.
@@ -77,6 +86,12 @@ optional (none = closed basin).
 | groundwater only | `groundwater: true` | `groundwater`, `soil`, `initial_conditions.groundwater` (exactly one of `water_table`/`head`/`moisture`) |
 | coupled | both true | all of the above; `coupling.mode` optional (`sync` default) |
 | + transport | `transport: true` | `transport` section + `initial_conditions.transport.{surface,groundwater}` for each active grid |
+| + temperature | `temperature: true` | `temperature` section + `initial_conditions.temperature.{surface,groundwater}` for each active grid; with groundwater on, `temperature.thermal_conductivity` and `heat_capacity_solid` too |
+
+Transport (salinity) and temperature can run together. An `atmosphere:`
+block is required by every bulk-aerodynamic consumer:
+`surface_water.evaporation.mode: bulk`, `groundwater.evaporation`, and
+`temperature.surface_exchange.mode: bulk`.
 
 ## 5. Input data files
 
@@ -88,11 +103,11 @@ required; `cellsize`, `nodata_value` optional; nodata → NaN). 3D fields
 `(j·nx + i)·nz + k` order. A wrong count aborts with
 observed-vs-expected — trust that message.
 
-**Time series** (rain, evaporation, wind, time-varying BCs): two columns
-`t value`, seconds + SI, strictly increasing time, `#` comments,
-piecewise-linear, **clamped** to the end values outside the sampled
-range. Step changes are expressed with close sample pairs
-(`12000 5.5e-6` then `12001 0`).
+**Time series** (rain, evaporation, wind, `atmosphere` fields,
+time-varying BCs): two columns `t value`, seconds + the key's units
+(§2), strictly increasing time, `#` comments, piecewise-linear,
+**clamped** to the end values outside the sampled range. Step changes
+are expressed with close sample pairs (`12000 5.5e-6` then `12001 0`).
 
 Generate these files with small Python snippets in the case directory
 (the worked example shows the pattern); keep them under `input/`.
@@ -130,13 +145,17 @@ Generate these files with small Python snippets in the case directory
    the adaptive controller lives within `[dt_min, dt_max]`. For
    fixed-step studies set all three equal.
 9. **Transport constraints** (load-bearing; details in
-   `validation/README.md`): prescribed subsurface boundary
-   concentration enters on the **y+ (north) side only** — orient the
-   geometry so scalar inflow comes from y+; the density law
-   `r_ρ = 1 + 7.44e-4·s` is hardwired, so a target density contrast is
-   set via the salinity surrogate `s = (Δρ/ρ)/7.44e-4`; configured
-   dispersivities act on volumetric face fluxes, not Darcy velocities
-   (not directly the physical dispersivity).
+   `validation/README.md`): for salinity, a prescribed subsurface side
+   concentration enters the limiter bounds on the **y+ (north) side
+   only** and is clipped to the interior range on the other three sides,
+   so orient the geometry so salt inflow comes from y+ (temperature
+   works on all four sides). The density law is
+   `r_ρ = 1 + β_s·s − β_T·(T − T₀)` with `β_s` =
+   `groundwater.density_coupling.beta_saline` (default 7.44e-4, the
+   legacy constant); a target density contrast is the salinity
+   surrogate `s = (Δρ/ρ)/β_s`. Configured dispersivities act on
+   volumetric face fluxes, not Darcy velocities (a preserved legacy
+   quirk), so they are not directly the physical dispersivity.
 10. Surface `scalar_value` conditions: on a `discharge`-covered region
     they set the inflow concentration; elsewhere they hold the region's
     wet cells at the value (tide/stage salinity). For bare-soil
@@ -163,23 +182,43 @@ Generate these files with small Python snippets in the case directory
     Cd(U₁₀) (garratt/smith-banke/wu/large-pond, capped at `wind.cap`);
     `constant` is the uncapped legacy `Cw` via `wind.cd`. A closed
     wind-setup basin needs the explicit velocity-0 walls (pitfall 11).
-13. Shallow steady flows inside `friction.thin_layer_depth` (default
+13. **`atmosphere`** (v2): `wind_speed` there feeds only the bulk
+    transfer functions and is configured separately from
+    `surface_water.wind` (the momentum forcing); point both at the same
+    series when they should agree. `surface_temperature` is read only by
+    the evaporation consumers; the bulk heat exchange uses the water's
+    own temperature. Exactly one of `specific_humidity` and
+    `relative_humidity`.
+14. **Temperature** (v2): values in °C; `temperature.bounds` are open by
+    default (salinity's default to `[0, ∞)`). Prescribe temperatures
+    with `kind: scalar_value` plus `scalar: temperature`, on the
+    surface, on `groundwater_side`, or as a pinned `groundwater_top`/
+    `groundwater_bottom` cell. Top pins are rejected in coupled runs,
+    where the coupler owns the top face. Thermal buoyancy needs
+    `groundwater.density_coupling: {enabled: true, thermal_expansion:
+    β_T}`; with the default `thermal_expansion: 0` temperature has no
+    density effect.
+15. Shallow steady flows inside `friction.thin_layer_depth` (default
     0.1 m) sit in the legacy drag-regularization band — cm-scale normal
     depths can offset ~20 % from Manning theory; set `thin_layer_depth`
     below the expected depths when that matters.
-14. Model scope limits — do not try to configure around them: no
+16. Model scope limits — do not try to configure around them: no
     periodic boundaries, no Darcy–Weisbach friction, no
     surface-infiltration source term other than the groundwater coupling
-    itself, one scalar, groundwater scheme is PCA only, no adaptive
-    *surface* stepping outside sync-coupled mode.
-13. `output.variables` lists must match enabled modules (`seepage` exists
+    itself, two scalars (salinity and temperature), groundwater scheme
+    is PCA only, no adaptive *surface* stepping outside sync-coupled
+    mode.
+17. `output.variables` lists must match enabled modules (`seepage` exists
     only in coupled runs; `concentration` needs groundwater+transport,
-    `concentration_surface` needs surface+transport). Monitors record
+    `concentration_surface` needs surface+transport; `temperature` and
+    `temperature_surface` go under `output.variables.temperature` and
+    pair with groundwater and surface in the same way). Monitors record
     every time step at one cell — use them for hydrographs instead of
     frequent field output.
-14. Restart: `output.checkpoint.interval` writes `/checkpoint/<t>`
+18. Restart: `output.checkpoint.interval` writes `/checkpoint/<t>`
     groups (one always at `t_end`); resuming needs the same physical
-    configuration and reproduces the uninterrupted run bitwise.
+    configuration and reproduces the uninterrupted run (bitwise; the
+    temperature restart gate checks a relative 1e-12).
 
 ## 7. Minimal skeleton (surface-water rain-runoff)
 

@@ -5,6 +5,10 @@ resume from any checkpoint. Restart is **bitwise deterministic**: the
 restarted run reproduces the uninterrupted run to the last bit at every
 output time. This is enforced by regression gates for surface-only (b1),
 groundwater-only (b2), coupled (b5), and coupled-with-transport (b6) runs.
+v2 adds restart gates for the AMG and `aijkokkos` solver paths, for wind
+and evaporation forcing (bitwise), and for runs with temperature. The
+temperature gate checks agreement to a relative 1e-12 rather than bit for
+bit.
 
 ## Writing checkpoints
 
@@ -33,10 +37,13 @@ recompute, including:
 - the transport scalars on both grids and the transport-specific carried
   state (`s_fu_old`/`s_fv_old` — the pre-stage-correction flow-rate
   snapshots — and `s_dzz_top`, the carried top-cell dispersion
-  coefficient), which cannot be rebuilt from the flow state.
+  coefficient), which cannot be rebuilt from the flow state;
+- with the temperature module (v2), the temperature on both grids and its
+  carried state: `t_*` fields that mirror the `s_*` ones. A checkpoint
+  without temperature has the same layout as in v1.
 
-Time series (rainfall, tides, hydrographs) are evaluated statelessly by
-time, so they need no checkpoint state.
+Time series (rainfall, tides, hydrographs, wind, atmospheric forcing) are
+evaluated statelessly by time, so they need no checkpoint state.
 
 ## Resuming
 
@@ -57,6 +64,10 @@ equivalence, and changing physics keys across a restart is undefined
 behavior in the modeling sense — the run will proceed, but it is a new
 experiment, not a continuation.
 
+The resumed run's `run-record.yaml` names its parent
+(`provenance.restart_from` and `restart_time`), so a chain of restarts
+can be traced back to the first run.
+
 ## Verifying determinism
 
 The regression suite gates it, and you can check any pair of runs yourself:
@@ -64,4 +75,5 @@ every field at every common output time must match bitwise:
 
 ```bash
 ctest --test-dir build -R 'b1_restart|b2_restart|b5_restart|b6_restart'
+ctest --test-dir build -R 'heat_restart|wind_restart|evap_restart'   # v2 lanes
 ```

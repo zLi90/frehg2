@@ -14,10 +14,25 @@ cd benchmarks/b1-sw
 OMP_NUM_THREADS=1 /path/to/build/src/frehg b1-sw.yaml
 ```
 
-Frehg2 logs the effective configuration, then one line per output time
-with the solver iteration counts (free-surface and/or subsurface,
-depending on the enabled modules — sync-coupled runs also show the current
-adaptive step), and finally a timer report.
+Frehg2 logs a header line with the version and revision stamp
+(`frehg2 2.0.0 (git <stamp>), ...`), the effective configuration, then
+one line per output time with the solver iteration counts (free-surface
+and/or subsurface, depending on the enabled modules — sync-coupled runs
+also show the current adaptive step), and finally a timer report. Each
+run also writes `run-record.yaml` next to the output file: provenance,
+the resolved configuration, the timers, and solver statistics (see the
+[output reference](output.md#the-run-record-v2)).
+
+## Checking a configuration first
+
+```bash
+build/src/frehg --validate my-case.yaml   # schema check: VALID: or INVALID: with one line per problem
+build/src/frehg --resolve my-case.yaml    # print the configuration with every default filled in
+build/src/frehg                           # usage text, with the version and revision stamp
+```
+
+`--validate` catches schema, range, cross-field and missing-file errors.
+It cannot catch an unstable time step; a short trial run does that.
 
 ## Parallel (MPI) runs
 
@@ -41,7 +56,10 @@ build/src/frehg my-case.yaml -fs_pc_type jacobi -fs_ksp_rtol 1e-13 -fs_ksp_atol 
 ```
 
 The free-surface system uses the `fs_` option prefix; the subsurface
-system uses `gw_`.
+system uses `gw_`. Since v2 the usual solver choices are YAML keys
+(`solver.surface` / `solver.groundwater`: `preconditioner` `bjacobi-icc`,
+`amg` or `gamg`, and `mat_type`; see [configuration](configuration.md)).
+Command-line options and `solver.petsc_options_file` still override them.
 
 ## Threads and performance
 
@@ -55,6 +73,13 @@ one only for large grids. For production:
 OMP_NUM_THREADS=1 build/src/frehg my-case.yaml        # small grids
 OMP_NUM_THREADS=8 mpirun -np 4 build/src/frehg big.yaml  # large grids
 ```
+
+With the default `solver.<system>.mat_type: aij`, threads speed up the
+model's kernels but the PETSc linear solves stay serial within each rank.
+Set `mat_type: aijkokkos` to run the solves through Kokkos as well, so
+they thread too (v2). This needs a Kokkos-aware PETSc
+([installation](installation.md)). GPU builds use the same path but are
+**experimental**: device execution has not been validated yet.
 
 The measured strong-scaling behavior of the coupled solver (b5, 1→8 ranks)
 and the per-module cost breakdown are in the developer guide's

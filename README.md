@@ -1,11 +1,12 @@
 # Frehg2
 
 Frehg2 is a production-grade rewrite of Frehg 1.0 — a coupled semi-implicit
-2D shallow-water / 3D mixed-form Richards / solute-transport model — in
-C++20 with Kokkos (CPU/GPU-portable), MPI, PETSc, yaml-cpp configuration,
-and single-file parallel HDF5 output. The core physics is preserved exactly
-from the validated legacy code; each of the six benchmarks is a blocking,
-quantitative validation gate. The binding specifications are
+2D shallow-water / 3D mixed-form Richards / solute- and heat-transport
+model — in C++20 with Kokkos (CPU/GPU-portable), MPI, PETSc, yaml-cpp
+configuration, and single-file parallel HDF5 output. The core physics is
+preserved exactly from the validated legacy code; the six legacy
+benchmarks and the v2 gates are blocking, quantitative validation gates.
+The binding specifications are
 [`docs/developer-guide/FREHG2_UPGRADE_PLAN.md`](docs/developer-guide/FREHG2_UPGRADE_PLAN.md)
 (v1, the six-benchmark model) and
 [`docs/developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md`](docs/developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md)
@@ -13,25 +14,36 @@ quantitative validation gate. The binding specifications are
 
 **What Frehg2 simulates**
 
-- **surface water** — the θ-scheme 2D shallow-water solver: rainfall and
-  evaporation, wind stress, Manning or Chézy friction, wetting/drying, and
-  an implicit free surface (PETSc CG);
+- **surface water** — the θ-scheme 2D shallow-water solver: rainfall,
+  prescribed or bulk-aerodynamic evaporation, wind stress (constant drag
+  or Cd(U₁₀) laws), Manning or Chézy friction, wetting/drying, and an
+  implicit free surface (PETSc CG);
 - **groundwater** — the mass-conservative PCA mixed-form Richards solver
   (Li et al. 2021): van Genuchten soils, adaptive subsurface stepping,
   head/flux/free-drainage/hydrostatic boundary conditions,
-  terrain-following or partial-cell meshes;
+  terrain-following or partial-cell meshes, and moisture-limited
+  bare-soil evaporation;
 - **coupled surface–subsurface flow** — both modules exchanging
   infiltration and seepage each step (wet cells drive the subsurface as a
   ponded-head boundary limited to the water actually available; seepage
   returns to the surface), in lockstep (`sync`) or subcycled mode;
-- **scalar transport** — one scalar (e.g. salinity) advected with upwind or
-  TVD-superbee fluxes, diffused on the surface, dispersed anisotropically
-  in the subsurface, exchanged through the seepage, and optionally fed back
-  into the subsurface density/viscosity (baroclinic saltwater intrusion).
+- **salinity transport** — advected with upwind or TVD-superbee fluxes,
+  diffused on the surface, dispersed anisotropically in the subsurface,
+  exchanged through the seepage, concentrated by evaporation, and
+  optionally fed back into the subsurface density/viscosity (baroclinic
+  saltwater intrusion);
+- **heat transport** — temperature as a second scalar on both grids:
+  conduction, thermal dispersion, solid-matrix retardation, surface heat
+  exchange (equilibrium or bulk-aerodynamic with radiation), and optional
+  thermal density feedback;
+- **atmospheric forcing** — one meteorological block feeding the
+  open-water and bare-soil evaporation and the surface heat exchange.
 
 Every mode has HDF5 field output, mass-audit tables (including the scalar
-budget), point monitors, and checkpoint/restart (restart reproduces the
-uninterrupted run bitwise). The linear solve is **performance-portable**:
+and heat budgets), point monitors, checkpoint/restart (restart reproduces
+the uninterrupted run, bitwise for flow and salinity), and a
+`run-record.yaml` provenance record. The linear solve is
+**performance-portable**:
 all kernels are Kokkos with no backend `#ifdef`s, and a Kokkos-aware PETSc
 lets the free-surface and groundwater solves run backend-consistently and
 thread under OpenMP (`solver.<sys>.mat_type: aijkokkos`; v2 Q3). The GPU
@@ -169,13 +181,14 @@ running and gating each one.
 | `src/core` | configuration, grid/decomposition, halo exchange, PETSc linear systems, time series, timers, logging |
 | `src/swe` | the surface-water module (momentum, free surface, wet/dry, sources) |
 | `src/gw` | the groundwater module (predictor/corrector, reallocation, terrain mesh, baroclinic ratios) |
-| `src/transport` | the scalar-transport module (advection limiters, dispersion, scalar exchange) |
+| `src/transport` | scalar transport for salinity and temperature (advection limiters, dispersion, scalar exchange, surface heat exchange) |
+| `src/atm` | atmospheric forcing and the bulk-aerodynamic transfer formulas |
 | `src/coupling` | the surface–subsurface coupler and exchange |
 | `src/driver` | the time loops, output/monitor/checkpoint mediation, restart |
 | `src/bc` | polygon regions and rasterized boundary conditions |
 | `src/io` | parallel HDF5 output, monitors, checkpoints, gridded-input readers |
-| `benchmarks` | the six benchmark configurations and their input data |
-| `validation` | extended validation suites: 13 SERGHEI-benchmark ports and 6 classic transport benchmarks ([validation/README.md](validation/README.md)) |
+| `benchmarks` | the six legacy benchmark gates (b1–b6), the v2 gate cases (g4–g10), and the `x-orient` generality cases, with their input data |
+| `validation` | extended validation: 13 SERGHEI-benchmark ports, 6 classic transport benchmarks, and 2 v2 additions ([validation/README.md](validation/README.md)) |
 | `tests` | GoogleTest unit suites, MPI drivers (1/2/4 ranks), regression harness |
 | `scripts` | CI gates: build+test, forbidden scan, sanitizer/OpenMP lanes, scaling study, docs lockstep |
 | `docs` | the manual (mkdocs), theory reference, developer guide, Doxyfile |

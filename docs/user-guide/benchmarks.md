@@ -1,18 +1,22 @@
 # Benchmark walkthroughs
 
-The six benchmarks are the model's validation gates: each is a published or
+The six benchmarks b1–b6 are the model's original validation gates: each is a published or
 analytically known problem, each has a quantitative pass criterion from the
 [upgrade plan §9](../developer-guide/FREHG2_UPGRADE_PLAN.md#9-benchmark-validation-gates-and-tolerances),
 and a release is only made with all six green. Every case ships as a
 runnable configuration under `benchmarks/` with its own README documenting
-data provenance and configuration decisions.
+data provenance and configuration decisions. v2.0 keeps all six and adds
+gates for each new capability (solvers, evaporation, temperature, wind;
+see [the v2 gates](#the-v2-gates) below).
 
-Beyond the gates, the repository also ships two **extended validation
-suites** under `validation/` — 13 ports of the published SERGHEI benchmark
-suite and 6 classic solute-transport benchmarks (surface tracer advection, Ogata–Banks, Henry,
-Goswami–Clement, Elder, Kuan) — each case self-contained with its measured
-result and run command (`validation/README.md`). They are evidence and
-worked examples, not CI gates.
+Beyond the gates, the repository also ships **extended validation**
+under `validation/` (21 cases): 13 ports of the published SERGHEI
+benchmark suite, 6 classic solute-transport benchmarks (surface tracer
+advection, Ogata–Banks, Henry, Goswami–Clement, Elder, Kuan), and two v2
+additions (a minimal reproducer for the west/south `outflow` defect fixed
+in v2.0, and an MPI strong-scaling case). Each case is self-contained,
+with its measured result and run command (`validation/README.md`). They
+are evidence and worked examples, not CI gates.
 
 Reference data (legacy ASCII goldens, digitized published curves) is
 **never committed**; the regression harness reads it from a sibling legacy
@@ -26,7 +30,8 @@ every metric:
 
 ```bash
 ctest --test-dir build -R 'regression.b1$' --output-on-failure   # any of b1..b4
-ctest --test-dir build -L regression_nightly                     # the long b5/b6 runs
+ctest --test-dir build -L regression_nightly                     # the long runs (b5/b6, g5, g8)
+ctest --test-dir build -R 'regression.g(4|6|7|9|10)$'            # the per-PR v2 physics gates
 ```
 
 You can also run any benchmark directly and analyze the HDF5 output
@@ -123,3 +128,30 @@ The td configuration prescribes the golden's sea-surface salinity as an
 explicit `scalar_value` condition (amendment A20; the case README has the
 provenance). Plot the 50 %-isohaline over the experimental points from
 `/transport/concentration` at the tidally averaged state.
+
+## The v2 gates
+
+v2.0 adds a gate for every new capability. Each case directory below has
+a README with its references, criteria, and measured record; `per-PR`
+gates run in the regular regression label, `nightly` ones in
+`regression_nightly`.
+
+| Gate | Case | What it checks | Tier |
+|---|---|---|---|
+| g1 | b1–b6 with `solver: amg` | all six b-gates pass with BoomerAMG on both systems at 1/2/4 ranks, under the v1 tolerances | per-PR (b5/b6 lanes nightly) |
+| g2, g3 | the scaling cases | linear-solver iterations stay nearly flat as ranks grow (g2); weak-scaling iteration growth ≤ 15 % from 1 to 8 ranks (g3) | per-PR / nightly |
+| g4 | `benchmarks/g4-evap/` | evaporation: analytic drawdown, evaporative concentration at constant salt mass, the bulk-aerodynamic rate, and dry-out with a closed budget | per-PR |
+| g5 | `benchmarks/g5-geng2015/` | bare-soil salinization against MARUN (Geng & Boufadel 2015): bulk soil evaporation, the zero-salt-flux top, density feedback | nightly |
+| g6 | `benchmarks/g6-heat/` | subsurface heat against closed forms: Bredehoeft–Papadopulos, Ogata–Banks (heat form), Stallman, uncoupled and coupled | per-PR |
+| g7 | `benchmarks/g7-heat/` | surface heat exchange: Edinger equilibrium relaxation, the bulk heat-balance root, river advection–dispersion with exchange | per-PR |
+| g8 | `benchmarks/g8-hrl/` | Horton–Rogers–Lapwood convection onset: slabs on either side of Ra_c = 4π² stay conductive or convect (the thermal density term) | nightly |
+| g9, g10 | `benchmarks/g9-wind/` | wind setup against closed forms (constant and Garratt Cd, flat and sloping beds) and the seiche period | per-PR |
+| §8 x-gates | `benchmarks/x-orient/` | the same small case under the 8 rotations and reflections of the grid must give mapped results (surface water, groundwater, transport); every boundary-condition kind on every side, `outflow` included | per-PR |
+
+The heat and wind orientation checks use the `orient-base.yaml` cases in
+`g6-heat/` and `g9-wind/`. The remaining v2 gates check the run record
+(r1–r2), parallel scaling (s1–s4), and performance portability (p1–p6) on
+the existing cases; [testing](../developer-guide/testing.md) describes
+the test labels and gates. `scripts/ci_release_gate.sh` runs every b and
+g gate, s1–s4, and p1–p5 in one release pipeline. p6, the GPU acceptance
+bundle, needs GPU hardware and has not been run yet.

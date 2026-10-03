@@ -37,16 +37,17 @@ cellsize 0.109725
 The value count must match `nx·ny` exactly, or the run aborts with the
 observed-vs-expected counts.
 
-**3D fields** (`soil.map.file`, 3D initial conditions) are flat lists in
-`(j·nx + i)·nz + k` order — the same flattening the HDF5 output uses, `k = 0`
-at the top layer.
+**3D fields** (`soil.map.file`, 3D initial conditions, including the
+subsurface transport and temperature initial fields) are flat lists in
+`(j·nx + i)·nz + k` order — the same flattening the HDF5 output uses,
+`k = 0` at the top layer.
 
-## Time series (rainfall, evaporation, wind, time-varying BCs)
+## Time series (rainfall, evaporation, wind, atmosphere, time-varying BCs)
 
 One `time value` pair per line, whitespace-separated, `#` for comments. Times
-are seconds and must be strictly increasing; values are SI. Evaluation is
-piecewise-linear and **clamped** to the first/last value outside the sampled
-range:
+are seconds and must be strictly increasing; values are in the key's units.
+Evaluation is piecewise-linear and **clamped** to the first/last value
+outside the sampled range:
 
 ```
 # rainfall [m/s]: 5.5e-6 for the first 12000 s, then dry
@@ -58,3 +59,18 @@ range:
 
 Because series are evaluated statelessly by time, restart reproduces them
 exactly.
+
+The same format backs every `series: {file: ...}` key: rainfall,
+prescribed evaporation, the wind (`speed`/`direction` or the `u10`/`v10`
+components), each `atmosphere` field, and time-varying boundary values,
+temperature `scalar_value` conditions included. Values are SI except
+where the key says otherwise:
+
+- temperatures in °C;
+- the `atmosphere` pressure in kPa;
+- humidity as a fraction;
+- radiation in W/m²;
+- wind direction in degrees.
+
+Wind direction series are interpolated on the circle, so sample them
+finely enough that successive values differ well below 180°.

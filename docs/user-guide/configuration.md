@@ -9,6 +9,11 @@ files must exist. Validate early and often:
 build/src/frehg --validate my-case.yaml
 ```
 
+`build/src/frehg --resolve my-case.yaml` prints the configuration with
+every default filled in. This is the text each run stores in its run
+record ([output reference](output.md#the-run-record-v2)), so it shows
+exactly what a case will run with.
+
 Conventions: **units are SI** (meters, seconds, m/s); every relative path is
 resolved against the directory of the configuration file; "one of" groups
 require exactly one member. The complete, machine-checked key reference is
@@ -26,6 +31,11 @@ The rest depends on which modules are on:
 | groundwater only | `groundwater`, `soil`, `initial_conditions.groundwater` |
 | coupled | all of the above; `coupling` is optional (defaults to `sync`) |
 | + transport | `transport`, `initial_conditions.transport.{surface,groundwater}` for each active grid |
+| + temperature | `temperature`, `initial_conditions.temperature.{surface,groundwater}` for each active grid |
+
+`atmosphere` is required when a bulk-aerodynamic consumer is on:
+`surface_water.evaporation.mode: bulk`, `groundwater.evaporation`, or
+`temperature.surface_exchange.mode: bulk`.
 
 `boundary_conditions` is always optional (a domain with none is a closed
 basin — for groundwater, a sealed box).
@@ -76,12 +86,14 @@ because output times are keyed by integer seconds in the HDF5 file.
 modules:
   surface_water: true
   groundwater: true          # both on = coupled run
-  transport: true            # scalar transport (needs a flow module)
+  transport: true            # salinity transport (needs a flow module)
+  temperature: false         # heat transport (v2; needs a flow module)
 ```
 
 At least one flow module must be on; enabling both runs the coupled
-surface–subsurface model. Transport rides whichever flow modules are on
-and requires a `transport:` section plus scalar initial conditions. See
+surface–subsurface model. Transport and temperature ride whichever flow
+modules are on; each needs its own section plus initial conditions, and
+the two can run together. See
 `benchmarks/b2-gw/b2-gw.yaml` for a minimal groundwater-only case,
 `benchmarks/b5-vcatchment/b5-vcatchment.yaml` for a complete coupled case,
 and `benchmarks/b6-kuan/b6-kuan-td.yaml` for coupled flow with salt
@@ -106,15 +118,20 @@ surface_water:
     constant: 5.0e-6               #   rate [m/s]
     # series: {file: input/rain.dat}
     # exclude: {polygon: [[x0,y0],[x1,y1],...]}  # region receiving no rain
-  evaporation: {constant: 0.0}     # optional; [m/s]
+  evaporation: {constant: 0.0}     # optional; prescribed rate [m/s], or series
+  # evaporation: {mode: bulk}      #   or bulk-aerodynamic from `atmosphere` (v2)
 
   wind:                            # optional; off by default
     enabled: false
-    cd: 0.0013                     # drag coefficient
+    law: constant                  # constant | garratt | smith-banke | wu | large-pond
+    cd: 0.0013                     # drag coefficient (constant law only)
+    # cap: 3.5e-3                  # Cd cap for the U10 laws
     attenuation_depth: 5.0         # thin-layer attenuation depth [m]
-    north_angle: 0                 # grid-to-north rotation [deg]
-    speed: {constant: 0.0}         # or series: {file: ...}
-    direction: {constant: 0.0}     # or series: {file: ...}
+    north_angle: 0                 # grid-to-north rotation [deg] (compass form)
+    speed: {constant: 0.0}         # compass form: speed + direction,
+    direction: {constant: 0.0}     #   each constant or series: {file: ...}
+    # u10: {constant: 5.0}         # or grid-frame components [m/s] instead of
+    # v10: {constant: 0.0}         #   speed/direction (v2; no 360° wrap)
 ```
 
 `min_depth` and `wetting_face_depth` are the only required surface-water
@@ -127,6 +144,50 @@ last grid row" and is only needed to reproduce that specific legacy
 convention (the b1 benchmark uses it). For a new case with uniform rainfall,
 omit it. In coupled runs rain falls on every non-excluded cell, wet or dry
 (dry cells start infiltrating immediately).
+
+Evaporation is either **prescribed** (`constant` or `series`, with an
+optional `exclude` polygon) or **bulk-aerodynamic** (`mode: bulk`, v2):
+the rate is computed each step from the `atmosphere` block, only on wet
+cells, and never takes more than the water a cell holds. The prescribed
+form keeps the legacy behavior, including its dry clamp.
+
+Wind stress is quadratic in the wind speed. `law: constant` uses the
+fixed legacy coefficient `cd`; the other laws compute Cd from the 10 m
+wind speed (Garratt 1977, Smith & Banke 1975, Wu 1982, Large & Pond 1981)
+and cap it at `cap`. Give the wind either as compass `speed`/`direction`
+or as the grid-frame components `u10`/`v10`. The component form has no
+360° wrap and ignores `north_angle`. Direction series are interpolated
+on the circle, so 350° → 10° passes through 0°.
+
+## `atmosphere` (meteorological forcing, v2)
+
+One block of meteorological forcing feeds every bulk-aerodynamic
+consumer: open-water evaporation (`surface_water.evaporation.mode: bulk`),
+bare-soil evaporation (`groundwater.evaporation`), and the surface heat
+exchange (`temperature.surface_exchange.mode: bulk`). Every value is
+`{constant: x}` or `{series: {file: p}}`:
+
+```yaml
+atmosphere:
+  air_temperature: {constant: 20.0}        # [°C]                       (required)
+  surface_temperature: {constant: 20.0}    # T_s [°C]; read by the evaporation consumers
+  pressure: {constant: 101.325}            # [kPa]                      (required)
+  specific_humidity: {constant: 0.0029}    # q_a [-]; or relative_humidity (exactly one)
+  wind_speed: {constant: 1.0}              # U [m/s] for the transfer functions (required)
+  # shortwave: {constant: 0.0}             # absorbed shortwave [W/m²] (heat exchange)
+  # longwave_in: {constant: 0.0}           # incident longwave [W/m²]   (heat exchange)
+  # wind_speed_floor: 0.5                  # still-air lower bound on U [m/s]
+```
+
+Note the meteorological units: temperatures in °C and pressure in kPa,
+not K and Pa. `wind_speed` is separate from `surface_water.wind`, which
+drives the momentum equations. When both should see the same wind, point
+them at the same series. The heat exchange evaluates the bulk formulas at
+the local water temperature and never reads `surface_temperature`. See
+`benchmarks/g4-evap/g4c-bulk.yaml` for open-water evaporation,
+`benchmarks/g5-geng2015/` for bare-soil evaporation with salinization,
+and the [atmosphere theory page](../theory/atmosphere.md) for the
+formulas.
 
 ## `groundwater` and `soil`
 
@@ -145,6 +206,10 @@ groundwater:
     # courant_max: 2.0             # legacy Co_max
   specific_storage: 1.0e-5         # Ss [1/m]              (required)
   # reallocation_surplus: drop     # drop | redistribute (see parameters.md)
+  # density_coupling: {enabled: true}   # needs transport and/or temperature
+  # evaporation:                   # bare-soil evaporation (v2; needs atmosphere)
+  #   mode: bulk
+  #   region: {polygon: [[1.0, -0.1], [49.0, -0.1], [49.0, 0.2], [1.0, 0.2]]}
 
 soil:
   types:                           # one or more van Genuchten soil types
@@ -174,6 +239,14 @@ with kinds `head` or `flux` — including free drainage
 (`value: {gravity: true}`) and hydrostatic side heads
 (`value: {hydrostatic: {eta: ...}}`); see the `boundary_conditions`
 section below.
+
+`groundwater.evaporation` (v2) evaporates bare soil through the top face
+of its region. The potential rate comes from the `atmosphere` block, and
+the actual rate is limited by the moisture of the top soil layer. It
+applies to uncoupled groundwater runs only, its region must not overlap
+a `groundwater_top` condition, and it adds an `evaporation` column to the
+groundwater mass audit. For salinization, pair it with a `scalar_cauchy`
+condition on the same region (below): water leaves and salt stays.
 
 ## `coupling` (coupled runs)
 
@@ -223,7 +296,7 @@ initial_conditions:
     groundwater: {constant: 0.0}   # with the GW module
 ```
 
-One scalar (e.g. salinity) advances once per step after the flow update:
+The salinity scalar advances once per step after the flow update:
 explicit finite-volume advection (first-order upwind or TVD superbee),
 constant diffusion on the surface, the full anisotropic dispersion tensor
 in the subsurface, and — in coupled runs — exchange through the seepage
@@ -234,15 +307,84 @@ concentration of a region's wet cells (a stage salinity — pair the polygon
 with your `eta` condition, or cover a whole tidal flat) or, when the
 polygon lies on a `discharge` condition, the inflow concentration; on
 `groundwater_side` they set the boundary concentration the inflow carries
-and the density boundary sees.
+and the density boundary sees. For salinity, that side value enters the
+limiter bounds on the y+ (north) side only; on the other three sides the
+incoming concentration is clipped to the interior range (the legacy rule,
+[symmetry exemption 7](../theory/symmetry-exemptions.md)). So orient a
+case so that salt enters from y+. Temperature has no such restriction.
 
 Setting `groundwater.density_coupling.enabled: true` feeds the subsurface
-scalar back into the Darcy fluxes as the legacy density/viscosity ratios
-(r_rho = 1 + 0.000744 s, r_visc = 1/(1 + 0.0022 s)) — the baroclinic
-pathway saltwater-intrusion problems need (`benchmarks/b6-kuan`). Outputs:
+scalars back into the Darcy fluxes as density and viscosity ratios,
+r_rho = 1 + β_s·s − β_T·(T − T₀) and r_visc = 1/(1 + β_sv·s) — the
+baroclinic pathway saltwater-intrusion problems need (`benchmarks/b6-kuan`).
+The coefficients are keys under `density_coupling`:
+
+- `beta_saline` (β_s, default 7.44e-4, the legacy constant);
+- `beta_saline_viscosity` (β_sv, default 2.2e-3);
+- `thermal_expansion` (β_T, default 0, which leaves temperature without
+  density effect) and `reference_temperature` (T₀, default 20 °C). These
+  two need the temperature module.
+
+Outputs:
 `concentration` (subsurface field), `concentration_surface` (surface
 field), and the `/monitor/transport_audit` scalar-budget table
 ([output reference](output.md)).
+
+## `temperature` (heat transport, v2)
+
+```yaml
+modules: {surface_water: false, groundwater: true, temperature: true}
+temperature:
+  scheme: {advection: superbee}       # upwind | superbee   (default upwind)
+  thermal_conductivity: 2.2           # λ_eff [W/m/K], bulk  (required with GW)
+  heat_capacity_solid: 8.24e5         # (ρc)_s [J/m³/K]       (required with GW)
+  # heat_capacity_water: 4.184e6      # (ρc)_w [J/m³/K]
+  # dispersivity: {longitudinal: 0.0, transverse: 0.0}   # thermal [m]
+  # bounds: {min: 0.0, max: 100.0}    # optional; both open by default
+  # surface_exchange:                 # surface heat flux (needs SWE)
+  #   mode: equilibrium               # equilibrium | bulk (bulk needs `atmosphere`)
+  #   equilibrium: {temperature: 20.0, coefficient: 30.0}  # T_e [°C], K_e [W/m²/K]
+initial_conditions:
+  temperature:
+    groundwater: {constant: 10.0}     # [°C], with the GW module
+    # surface: {constant: 20.0}       # [°C], with the SWE module
+```
+
+Temperature is the second scalar. It shares the transport machinery
+(advection schemes, limiter, budgets, parallel decomposition) and runs
+with or without salinity. In the subsurface, heat storage includes the
+solid matrix, so the thermal front is retarded relative to the water.
+Conduction is set by the bulk `thermal_conductivity`. Heat travels with
+the water, and rain or evaporation change the water volume without
+changing its temperature. Temperatures are in °C.
+
+`surface_exchange` sets the heat flux between the water surface and the
+air, on wet cells only. `equilibrium` relaxes toward `temperature` at
+rate `coefficient` (Edinger). `bulk` computes absorbed shortwave plus
+net longwave minus the latent and sensible fluxes from the `atmosphere`
+block.
+
+Temperature boundary values use `kind: scalar_value` with
+`scalar: temperature`:
+
+- on `surface` regions and on `groundwater_side` faces (all four sides);
+- on `groundwater_top` or `groundwater_bottom` as a pinned cell, whose
+  value is re-imposed after every update. A top pin is rejected in
+  coupled runs, where the coupler owns the top face.
+
+`groundwater.density_coupling.thermal_expansion` adds thermal buoyancy
+(see `transport` above).
+
+Outputs: `temperature` (subsurface) and `temperature_surface` (surface),
+selected by `output.variables.temperature`, plus the
+`/monitor/temperature_audit` heat budget. `temperature_surface` is also
+a valid monitor variable. Examples:
+
+- `benchmarks/g6-heat/`: subsurface conduction and advection;
+- `benchmarks/g7-heat/`: surface exchange;
+- `benchmarks/g8-hrl/`: thermal convection with density feedback.
+
+The [temperature theory page](../theory/temperature.md) has the equations.
 
 ## `initial_conditions`
 
@@ -264,6 +406,9 @@ in absolute elevations, and outputs are in absolute elevations too.
 
 When the groundwater module is on, `initial_conditions.groundwater` is
 also required — exactly one of `water_table`, `head`, or `moisture`.
+Transport and temperature runs add `initial_conditions.transport` and
+`initial_conditions.temperature`, with one entry per active grid (see
+those sections).
 
 ## `boundary_conditions`
 
@@ -296,7 +441,7 @@ Surface kinds:
 | `discharge` | prescribed total discharge into the region [m³/s] | required |
 | `velocity` | prescribed face-normal velocity [m/s] at domain-edge faces | required |
 | `outflow` | free (transmissive) outflow — stage extrapolated down the continued bed slope at the domain-edge faces | **none** |
-| `scalar_value` | concentration of the region's wet cells, or of a `discharge` inflow | required (needs transport) |
+| `scalar_value` | concentration of the region's wet cells, or of a `discharge` inflow; `scalar: temperature` sets temperature instead | required (needs transport or temperature) |
 
 Groundwater kinds:
 
@@ -304,7 +449,8 @@ Groundwater kinds:
 |---|---|---|
 | `head` | prescribed pressure head [m] | `constant`, `series`, or `hydrostatic: {eta: ...}` (head = eta − z) |
 | `flux` | prescribed Darcy flux [m/s] | `constant`, `series`, or `gravity: true` (free drainage) |
-| `scalar_value` | boundary concentration at `groundwater_side` faces | required (needs transport) |
+| `scalar_value` | boundary concentration at `groundwater_side` faces; with `scalar: temperature`, also a pinned top or bottom cell | required (needs transport or temperature) |
+| `scalar_cauchy` | zero total salt flux at `groundwater_top`: water crosses, salt stays (v2; uncoupled runs) | **none** (needs transport) |
 
 `outflow` is the right choice for a "let water leave here" open surface
 boundary (it neither reflects nor holds back the flow) — but it needs a
@@ -343,6 +489,7 @@ output:
     groundwater: [hydraulic_head, water_content]
                                     # subset of {hydraulic_head, water_content, qx, qy, qz}
     transport: [concentration, concentration_surface]
+    temperature: [temperature, temperature_surface]
   monitors:                         # optional point probes
     - name: outlet_q
       i: 199                        # global cell index in i (0 ≤ i < nx)
@@ -352,10 +499,10 @@ output:
     interval: 0                     # [s]; 0 = off. A final checkpoint is always written.
 ```
 
-`variables.surface` / `variables.groundwater` / `variables.transport`
-select which fields are written at each `output_interval` (each list
-requires its module; `seepage` — the surface-applied exchange rate [m/s] —
-exists in coupled runs only). Monitors record their listed variables
+`variables.surface` / `variables.groundwater` / `variables.transport` /
+`variables.temperature` select which fields are written at each
+`output_interval` (each list requires its module; `seepage` — the
+surface-applied exchange rate [m/s] — exists in coupled runs only). Monitors record their listed variables
 **every time step** at one cell, giving a high-resolution hydrograph.
 Mass-balance tables are written automatically (see the
 [output reference](output.md)).
@@ -377,6 +524,7 @@ solver:
   # mask changes).
   surface:
     preconditioner: bjacobi-icc   # bjacobi-icc | amg | gamg
+    # mat_type: aij               # aij | aijkokkos (Kokkos solve; needs a Kokkos-aware PETSc)
     rtol: 1.0e-8
     atol: 1.0e-14
     max_iterations: 500
@@ -390,3 +538,10 @@ solver:
 
 Resuming from a checkpoint reproduces the uninterrupted run bitwise — see
 [Checkpoint and restart](restart.md).
+
+`mat_type: aijkokkos` runs that system's linear solve through Kokkos, so
+it threads with `OMP_NUM_THREADS` and runs on the device in a GPU build
+(experimental). It needs PETSc built with Kokkos; see the
+[installation guide](installation.md). `petsc_options_file` and
+`-fs_`/`-gw_` options given on the command line override every key in
+this block ([running](running.md#extra-petsc-arguments)).

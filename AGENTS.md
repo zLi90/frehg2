@@ -3,8 +3,10 @@
 This file is the entry point for an AI assistant (chat LLM or coding
 agent) helping a user install, run, or analyze **Frehg2** — a coupled
 semi-implicit 2D shallow-water / 3D variably-saturated groundwater /
-solute-transport model (C++20, Kokkos, MPI, PETSc, parallel HDF5,
-strict-schema YAML configuration). You do **not** need to read the
+solute- and heat-transport model with atmospheric forcing (evaporation,
+surface heat exchange) and wind stress (C++20, Kokkos, MPI, PETSc,
+parallel HDF5, strict-schema YAML configuration). These guides describe
+**v2.0.0**. You do **not** need to read the
 source code for the tasks below; each task has a condensed guide that
 carries the full contract. (Human readers: the README's *"Getting
 started — Path 2"* section shows how to hand these files to your LLM,
@@ -25,7 +27,9 @@ top-level `README.md`.
 ## Universal facts (apply to every task)
 
 - **Units are SI everywhere** (meters, seconds, m/s); elevations are
-  absolute (one datum for bed, water surface, and heads).
+  absolute (one datum for bed, water surface, and heads). Exceptions:
+  temperatures are °C, and the `atmosphere` block uses kPa for pressure
+  and W/m² for radiation.
 - **The executable is `build/src/frehg`**; a run is
   `frehg <case>.yaml`, with output paths resolved against the current
   working directory (run from the case directory).
@@ -33,7 +37,11 @@ top-level `README.md`.
   full schema (unknown keys rejected *with nearest-key suggestions*),
   types, ranges, cross-field rules, and input-file existence — iterate
   until it prints `VALID:`. This loop is the backbone of reliable
-  AI-generated configs.
+  AI-generated configs. `frehg --resolve <case>.yaml` prints the
+  configuration with every default filled in.
+- **Every run writes `run-record.yaml`** next to its HDF5 output: the
+  version and revision stamp, the resolved configuration, timers, solver
+  statistics, and the final budgets (`docs/agents/postprocessing.md` §6).
 - **Small grids run fastest single-threaded**: prefix runs with
   `OMP_NUM_THREADS=1` for anything under ~1M cells (kernel-launch
   latency dominates otherwise). On large per-rank subdomains threads pay
@@ -47,8 +55,10 @@ top-level `README.md`.
   **experimental** — CPU-physics-verified, device execution unverified
   pending the owner GPU-acceptance bundle. Never promise validated GPU
   results.
-- Ready-made worked examples live in `benchmarks/` (the six validation
-  gates) and `validation/` (19 extended cases); every case directory is
+- Ready-made worked examples live in `benchmarks/` (the six legacy
+  gates b1–b6, the v2 gate cases g4–g10 for evaporation, salinization,
+  heat, and wind, and the `x-orient` generality cases) and `validation/`
+  (21 extended cases); every case directory is
   runnable and its README states the expected result. Start new work by
   copying the nearest example, not from a blank file.
 

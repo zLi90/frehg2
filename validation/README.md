@@ -2,13 +2,13 @@
 
 The six `benchmarks/` cases are Frehg2's **blocking release gates** —
 quantitative, CI-enforced, tied to the legacy goldens and the upgrade
-plan's tolerances. The 19 cases in this directory are the **extended
+plan's tolerances. The 21 cases in this directory are the **extended
 validation** built on top of the released model: independently authored
 cases probing the same physics against *additional* published
 references, doubling as a library of ready-to-run example
 configurations.
 
-Two suites share this directory, distinguished by prefix:
+Three groups share this directory:
 
 | Prefix | Suite | Cases |
 |---|---|---|
@@ -16,6 +16,7 @@ Two suites share this directory, distinguished by prefix:
 | `re-*` | SERGHEI Richards-equation ports (Part I) | 4 |
 | `swere-*` | SERGHEI coupled SWE–RE ports (Part I) | 2 |
 | `transport-*` | classic solute-transport benchmarks ([Part II](#part-ii--classic-solute-transport-benchmarks-transport-)) | 6 |
+| `swe-outflow-staircase`, `swere-lateral-hillslope-scaling` | v2 additions ([Part III](#part-iii--v2-additions)) | 2 |
 
 Every case directory is self-contained: a `README.md` (what the case is,
 its reference solution, the measured result, and how to run it), one or
@@ -239,13 +240,21 @@ Learned while building this suite — load-bearing for anyone extending it:
    x±, or the top/bottom faces. Any subsurface tracer/seawater inflow
    **must** enter from y+; flow runs north → south. This dictates the
    geometry of cases 2–5 (and is why Elder's top-face source cannot be
-   reproduced).
-2. **Density contrast is a compile-time constant.** The baroclinic law
+   reproduced). *v2:* side ghosts now exist on all four sides, but for
+   salinity the limiter still admits the prescribed value on y+ only
+   (the other sides clip it to the interior range; symmetry exemption 7
+   in `docs/theory/symmetry-exemptions.md`), so the rule stands for
+   this suite. Temperature admits all four sides and can also be pinned
+   at the top or bottom.
+2. **Density contrast was a compile-time constant (v1).** The baroclinic law
    is `r_ρ = 1 + β_ρ·s` with `β_ρ` hardwired at **7.44e-4**. You cannot
    dial `Δρ/ρ` in the YAML — you set it through the seawater salinity
    surrogate `s = (Δρ/ρ)/β_ρ` (33.6 for Henry's 0.025, 35 for
    Goswami–Clement's 0.026, 269 for Elder's 0.2). The viscosity ratio is
-   likewise fixed.
+   likewise fixed. *v2:* both coefficients are now YAML keys
+   (`groundwater.density_coupling.beta_saline`, default 7.44e-4, and
+   `beta_saline_viscosity`). This suite keeps the defaults, so the
+   surrogate values above still apply.
 3. **Dispersion acts on volumetric face fluxes.** The dispersion term is
    applied to face volume-fluxes, not Darcy velocities (the face-area
    factor is not divided out), so a configured `dispersion.longitudinal`
@@ -264,6 +273,18 @@ Learned while building this suite — load-bearing for anyone extending it:
   two-plume *pattern* but not the steady field.
 - **HPC recommended:** `kuan-td` (~13 min serial) and any quantitative
   Elder study.
+
+---
+
+## Part III — v2 additions
+
+Two cases were added during v2 development. Neither is a published
+benchmark:
+
+| Case | Purpose | Cost |
+|---|---|---|
+| [swe-outflow-staircase](swe-outflow-staircase/) | the minimal reproducer of the west/south `outflow` face-area defect (plan amendment V2-A11), with a Manning normal-depth answer and a self-checking `check.py`; since v2.0 it is the per-PR gate `regression.outflow_staircase`, run on all four edges | seconds |
+| [swere-lateral-hillslope-scaling](swere-lateral-hillslope-scaling/) | a large, homogeneous 3D extension of `swere-lateral-hillslope` (400 × 800 columns, every y-slice identical) for MPI strong-scaling measurements: speedup and parallel efficiency over rank counts | multi-rank; its README suggests a 1–40 rank ladder |
 
 ---
 
