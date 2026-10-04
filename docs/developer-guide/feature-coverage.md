@@ -45,6 +45,7 @@ result (README).
 | Bulk (atmosphere) open-water evaporation | regression.g4; unit.all (BulkAerodynamic) |
 | Bulk soil evaporation (`groundwater.evaporation`) | regression.g5.geng2015; BulkAerodynamic.SoilRelativeHumidityAndEquilibrium |
 | `transport.legacy_evap_allowance` | TransportModule.LegacyEvapAllowanceTogglePinsCoupledDryColumnBehavior |
+| `transport.surface_update` (`legacy` / `consistent`) | TransportModule.ConsistentSurfaceUpdateKeepsDrainingFilmsWithinTheInputRange; TransportModule.ConsistentSurfaceUpdateShrinksTheAnchorInSloshingFlow; ConfigTest.SurfaceUpdateParsesRoundTripsAndRejectsUnknownValues |
 | Atmosphere block (met forcing incl. radiation terms) | regression.g7; MetForcing.SamplesConstantsAndFoldsRelativeHumidity |
 | `atmosphere.wind_speed_floor` | MetForcing.WindSpeedFloorBoundsStillAir |
 | Wind stress (`surface_water.wind`) | regression.g9; regression.g10; regression.wind_orient |
@@ -97,6 +98,7 @@ result (README).
 | Transport + subcycled coupling | regression.b6_subcycled |
 | Transport + coupling + density + restart | regression.b6_restart |
 | Transport + MPI decomposition (salinity halos/limiter) | regression.tracer_rank_invariance.strict |
+| `surface_update: consistent` + MPI decomposition | regression.tracer_rank_invariance.strict (superbee-consistent lane) |
 | Temperature + MPI decomposition | regression.heat_rank_invariance.strict |
 | Two scalars + both betas + restart | regression.two_scalar_restart |
 | Rain + subcycled coupling | regression.b5.rain.subcycled |
@@ -117,7 +119,10 @@ couple directly (each is an independent source/closure exercised by its own
 row above): wind+rain, wind+transport/temperature (wind touches momentum
 only; scalar advection sees it through the flow, which the scalar gates
 already integrate over), chezy+non-b4 physics (a scalar drag-law swap),
-run-record+anything (observer only, r1 asserts non-perturbation).
+run-record+anything (observer only, r1 asserts non-perturbation),
+`surface_update`+restart (the consistent update reads only the current
+step's flow rates and carries no state across the step boundary; the
+checkpointed legacy flow-rate snapshots stay in the layout, unused).
 
 ## 3. GPU / device rows (§8.3 release rule)
 

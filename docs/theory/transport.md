@@ -63,7 +63,15 @@ sync).
    while the advective increments use the current ones. Under accelerating
    flow the ledger and the actual volume disagree by the audited
    `surf_anchor` term; in quasi-steady flow (every gated regime) it
-   vanishes.
+   vanishes. Paired with the moving-cell-only limiter, the lag also
+   concentrates a film whose outflow the wetting limiter has just closed
+   (its divisor still subtracts last step's outflow, and a still cell is
+   not clamped) — above every input value, and under strongly unsteady
+   wetting/drying the anchor can rival the scalar mass (measured on a
+   tidal-marsh run: 55 % of the surface salt in 3 days). The opt-in
+   `transport.surface_update: consistent` divides by the current step's
+   flux volume and clamps every wet cell; `legacy` stays the default for
+   golden fidelity.
 3. **The subsurface ledger re-anchors against the post-reallocation θ**:
    Vgflux predates the reallocation/clamp adjustments; the difference is
    the audited `subs_anchor` term.

@@ -366,7 +366,8 @@ Spec buildRootSchema() {
                                 {"transverse", realNonNegative(false)},
                                 {"molecular", realNonNegative(false)}})},
             {"bounds", map({{"min", real(false)}, {"max", real(false)}})},
-            {"legacy_evap_allowance", boolean(false)}})},
+            {"legacy_evap_allowance", boolean(false)},
+            {"surface_update", enumeration(false, {"legacy", "consistent"})}})},
       {"temperature",
        // The second registered scalar (v2 Q5, plan §4.1/V2-A17). The
        // thermal parameters' module dependencies are cross-field checks.

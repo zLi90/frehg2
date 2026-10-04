@@ -290,6 +290,7 @@ transport:
     transverse: 4.0e-04            # [m]
     molecular: 1.0e-10             # [m²/s]
   # bounds: {min: 0, max: 35}      # optional clamp (default [0, unbounded))
+  # surface_update: consistent     # legacy (default) | consistent; see below
 initial_conditions:
   transport:
     surface: {constant: 35.0}      # with the SWE module
@@ -312,6 +313,15 @@ limiter bounds on the y+ (north) side only; on the other three sides the
 incoming concentration is clipped to the interior range (the legacy rule,
 [symmetry exemption 7](../theory/symmetry-exemptions.md)). So orient a
 case so that salt enters from y+. Temperature has no such restriction.
+
+`surface_update` selects the surface concentration update. The default
+`legacy` reproduces the original code: it divides the transported salt by
+the previous step's flux volume and clamps only moving cells. Under
+strongly unsteady wetting and drying (tides, wind setdown) that pairing
+concentrates draining thin films above every input value and gains or
+loses salt, measured in the `surf_anchor` column of
+`/monitor/transport_audit`. `consistent` divides by the current step's
+flux volume and clamps every wet cell; use it for tidal flats and marshes.
 
 Setting `groundwater.density_coupling.enabled: true` feeds the subsurface
 scalars back into the Darcy fluxes as density and viscosity ratios,

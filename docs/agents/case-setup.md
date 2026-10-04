@@ -156,7 +156,12 @@ Generate these files with small Python snippets in the case directory
    surrogate `s = (Δρ/ρ)/β_s`. Configured dispersivities act on
    volumetric face fluxes, not Darcy velocities (a preserved legacy
    quirk), so they are not directly the physical dispersivity.
-10. Surface `scalar_value` conditions: on a `discharge`-covered region
+10. **Surface salinity under wetting/drying**: set
+    `transport.surface_update: consistent` for tidal flats, marshes and
+    wind setdown. The `legacy` default (golden-pinned) can concentrate
+    draining thin films above every input value and gain or lose salt
+    through the `surf_anchor` audit column.
+11. Surface `scalar_value` conditions: on a `discharge`-covered region
     they set the inflow concentration; elsewhere they hold the region's
     wet cells at the value (tide/stage salinity). For bare-soil
     evaporation/salinization cases (uncoupled groundwater + transport),
@@ -165,7 +170,7 @@ Generate these files with small Python snippets in the case directory
     `groundwater_top` region: water leaves, salt stays and concentrates
     exactly (no `value`; uncoupled runs only). A prescribed soil-evap
     flux works too (top `flux` condition, positive value).
-11. Evaporation setup rules learned the hard way (v2 Q4 bring-up): a
+12. Evaporation setup rules learned the hard way (v2 Q4 bring-up): a
     "closed" surface basin must close its edges with a `kind: velocity`
     value-0 condition (the default edge is legacy-transmissive and
     refills an evaporating basin); an initially saturated column needs
@@ -174,22 +179,22 @@ Generate these files with small Python snippets in the case directory
     launches a drainage transient); and physics cases should set
     `groundwater.reallocation_surplus: redistribute` (the legacy `drop`
     default discards water under strong drying).
-12. Wind forcing (v2 Q6): prefer the grid-frame `wind.u10`/`v10`
+13. Wind forcing (v2 Q6): prefer the grid-frame `wind.u10`/`v10`
     component pair (wrap-free; `north_angle` ignored) over the compass
     `speed`/`direction` pair; direction *series* interpolate on the
     circle (350°→10° goes through 0°) — sample them finely enough that
     successive directions differ well below 180°. `wind.law` selects
     Cd(U₁₀) (garratt/smith-banke/wu/large-pond, capped at `wind.cap`);
     `constant` is the uncapped legacy `Cw` via `wind.cd`. A closed
-    wind-setup basin needs the explicit velocity-0 walls (pitfall 11).
-13. **`atmosphere`** (v2): `wind_speed` there feeds only the bulk
+    wind-setup basin needs the explicit velocity-0 walls (pitfall 12).
+14. **`atmosphere`** (v2): `wind_speed` there feeds only the bulk
     transfer functions and is configured separately from
     `surface_water.wind` (the momentum forcing); point both at the same
     series when they should agree. `surface_temperature` is read only by
     the evaporation consumers; the bulk heat exchange uses the water's
     own temperature. Exactly one of `specific_humidity` and
     `relative_humidity`.
-14. **Temperature** (v2): values in °C; `temperature.bounds` are open by
+15. **Temperature** (v2): values in °C; `temperature.bounds` are open by
     default (salinity's default to `[0, ∞)`). Prescribe temperatures
     with `kind: scalar_value` plus `scalar: temperature`, on the
     surface, on `groundwater_side`, or as a pinned `groundwater_top`/
@@ -198,24 +203,24 @@ Generate these files with small Python snippets in the case directory
     `groundwater.density_coupling: {enabled: true, thermal_expansion:
     β_T}`; with the default `thermal_expansion: 0` temperature has no
     density effect.
-15. Shallow steady flows inside `friction.thin_layer_depth` (default
+16. Shallow steady flows inside `friction.thin_layer_depth` (default
     0.1 m) sit in the legacy drag-regularization band — cm-scale normal
     depths can offset ~20 % from Manning theory; set `thin_layer_depth`
     below the expected depths when that matters.
-16. Model scope limits — do not try to configure around them: no
+17. Model scope limits — do not try to configure around them: no
     periodic boundaries, no Darcy–Weisbach friction, no
     surface-infiltration source term other than the groundwater coupling
     itself, two scalars (salinity and temperature), groundwater scheme
     is PCA only, no adaptive *surface* stepping outside sync-coupled
     mode.
-17. `output.variables` lists must match enabled modules (`seepage` exists
+18. `output.variables` lists must match enabled modules (`seepage` exists
     only in coupled runs; `concentration` needs groundwater+transport,
     `concentration_surface` needs surface+transport; `temperature` and
     `temperature_surface` go under `output.variables.temperature` and
     pair with groundwater and surface in the same way). Monitors record
     every time step at one cell — use them for hydrographs instead of
     frequent field output.
-18. Restart: `output.checkpoint.interval` writes `/checkpoint/<t>`
+19. Restart: `output.checkpoint.interval` writes `/checkpoint/<t>`
     groups (one always at `t_end`); resuming needs the same physical
     configuration and reproduces the uninterrupted run (bitwise; the
     temperature restart gate checks a relative 1e-12).

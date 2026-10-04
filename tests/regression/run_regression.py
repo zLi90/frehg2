@@ -3050,20 +3050,26 @@ def gate_rank_invariance_tracer(args: argparse.Namespace) -> int:
     under superbee — the flow itself never reads those halos, so no
     other lane could see it). Strict bound 1e-10: measured 9.0e-12 after
     the fix — the TVD ratio amplifies rounding near flat gradients, so
-    the subsurface lanes' 1e-12 is not attainable on this path."""
+    the subsurface lanes' 1e-12 is not attainable on this path. A third
+    lane runs superbee under transport.surface_update: consistent, whose
+    flux volume reads the current Fu/Fv halos and whose limiter covers
+    still cells (the 'surface_update + MPI' §8.3 cell)."""
     strict = args.mode == "strict"
     extra = STRICT_PETSC_OPTIONS if strict else []
     limit = 1.0e-10 if strict else 1.0e-4
     ok = True
-    for scheme in ("superbee", "upwind"):
+    for scheme, update in (("superbee", "legacy"), ("upwind", "legacy"),
+                           ("superbee", "consistent")):
+        lane = scheme if update == "legacy" else f"{scheme}-{update}"
         outputs = {}
         for ranks in (1, 2, 4):
             case_dir = stage_case(args.repo, "x-orient",
-                                  args.work / scheme / f"n{ranks}")
+                                  args.work / lane / f"n{ranks}")
             config = case_dir / "transport-orient-base.yaml"
 
-            def set_scheme(doc, scheme=scheme):
+            def set_scheme(doc, scheme=scheme, update=update):
                 doc["transport"]["scheme"]["advection"] = scheme
+                doc["transport"]["surface_update"] = update
 
             rewrite_config(config, set_scheme)
             run_case(args.frehg, config, case_dir, args.mpiexec, ranks, extra)
@@ -3080,7 +3086,7 @@ def gate_rank_invariance_tracer(args: argparse.Namespace) -> int:
                             scale = max(float(np.abs(a).max()), 1.0e-12)
                             worst = max(worst,
                                         float(np.abs(a - b).max()) / scale)
-                    print(f"  [{scheme}] n=1 vs n={ranks} [{args.mode}]: "
+                    print(f"  [{lane}] n=1 vs n={ranks} [{args.mode}]: "
                           f"max rel diff = {worst:.3e} (allowed {limit:.0e})")
                     ok &= worst <= limit
     print(f"tracer rank invariance ({args.mode}):", "PASS" if ok else "FAIL")

@@ -126,6 +126,7 @@ ScalarSpec ScalarSpec::salinity(const FrehgConfig& config) {
   spec.hasBoundMax = tr.hasBoundMax;
   spec.boundMax = tr.boundMax;
   spec.legacyEvapAllowance = tr.legacyEvapAllowance;
+  spec.consistentSurfaceUpdate = tr.consistentSurfaceUpdate;
   return spec;
 }
 
@@ -148,6 +149,7 @@ ScalarSpec ScalarSpec::temperature(const FrehgConfig& config) {
   spec.hasBoundMax = tp.hasBoundMax;
   spec.boundMax = tp.boundMax;
   spec.legacyEvapAllowance = false;
+  spec.consistentSurfaceUpdate = false;
   spec.kappaFactor = tp.heatCapacitySolid / tp.heatCapacityWater;
   spec.heatCapacityWater = tp.heatCapacityWater;
   spec.exchange = tp.surfaceExchange.mode;
@@ -177,6 +179,7 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
   boundMin_ = hasBoundMin_ ? spec_.boundMin : -1.0e30;
   boundMax_ = hasBoundMax_ ? spec_.boundMax : 1.0e30;
   legacyEvapAllowance_ = spec_.legacyEvapAllowance;
+  consistentSurface_ = spec_.consistentSurfaceUpdate;
   if (spec_.exchange == SurfaceExchangeConfig::Mode::Bulk) {
     met_ = atm::MetForcing(config.atmosphere, config);
   }

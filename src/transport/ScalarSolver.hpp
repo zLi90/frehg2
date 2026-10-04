@@ -92,6 +92,7 @@ struct ScalarSpec {
   bool hasBoundMax = false;             ///< upper clamp configured?
   real_t boundMax = 0.0;                ///< upper clamp when hasBoundMax
   bool legacyEvapAllowance = false;     ///< salinity only
+  bool consistentSurfaceUpdate = false; ///< salinity only (transport.surface_update)
   real_t kappaFactor = 0.0;             ///< (rho c)_s / (rho c)_w
   real_t heatCapacityWater = 0.0;       ///< (rho c)_w [J/m^3/K]
   /// Surface heat-exchange source (temperature spec; None for salinity).
@@ -329,6 +330,10 @@ class ScalarSolver {
   /// +0.01 coupled evaporative-concentration allowance instead of the
   /// exact in-step factor.
   bool legacyEvapAllowance_ = false;
+  /// transport.surface_update: consistent — the surface flux volume from the
+  /// current step's flow rates and the limiter in still wet cells (see
+  /// SurfaceTransport.cpp); false keeps the golden-pinned legacy update.
+  bool consistentSurface_ = false;
 
   // Surface fields (halo layout).
   Field2<real_t> sSurf_, smSurf_, sSurfKp_, sseepage_;

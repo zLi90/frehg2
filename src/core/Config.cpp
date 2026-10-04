@@ -407,6 +407,8 @@ TransportConfig extractTransport(const YAML::Node& node) {
     }
   }
   out.legacyEvapAllowance = valueOr<bool>(node["legacy_evap_allowance"], false);
+  out.consistentSurfaceUpdate =
+      valueOr<std::string>(node["surface_update"], "legacy") == "consistent";
   return out;
 }
 
@@ -1041,6 +1043,7 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
       node["bounds"]["max"] = tr.boundMax;
     }
     node["legacy_evap_allowance"] = tr.legacyEvapAllowance;
+    node["surface_update"] = tr.consistentSurfaceUpdate ? "consistent" : "legacy";
     root["transport"] = node;
   }
 

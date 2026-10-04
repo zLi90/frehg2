@@ -21,9 +21,15 @@
 #include <gtest/gtest.h>
 #include <mpi.h>
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace {
@@ -1131,6 +1137,159 @@ TEST(Baroclinic, RatiosFollowTheScalarAndAverageAtFaces) {
               1.0e-12);
   // Interior z face inside the salty rows: the mean of equal values.
   EXPECT_NEAR(interior3(mini.gw->densityRatioFaceZ(), 3, 1, 3), rSalt, 1.0e-12);
+}
+
+// ---------------------------------------------------------------------------
+// transport.surface_update: consistent (post-v2.0 opt-in). The legacy surface
+// update divides the transported mass by the previous step's flux volume and
+// clamps moving cells only, so a film whose outflow the wetting limiter has
+// just closed is concentrated above every input value (found on the Nueces
+// Delta tidal marsh: 37.3 psu from 35 psu inputs), and the volume mismatch is
+// booked into surf_anchor. The consistent update divides by the current flux
+// volume and clamps every wet cell. Each test pins the legacy twin too, so
+// the switch demonstrably changes behavior (plan §8.3).
+// ---------------------------------------------------------------------------
+
+/// Writes a flat-list raster into the per-process temp directory \p tag;
+/// returns the directory.
+std::string writeTransportRaster(const std::string& tag, const std::string& name,
+                                 const std::vector<real_t>& values) {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() /
+      ("frehg_transport_test_" + std::to_string(::getpid()) + "_" + tag);
+  std::filesystem::create_directories(dir);
+  std::ofstream out(dir / name);
+  out.precision(17);
+  for (const real_t v : values) {
+    out << v << "\n";
+  }
+  return dir.string();
+}
+
+/// A shelf draining into a pit: 24 cells of 1 m; the western 12 are a shelf
+/// sloping from z = 0.2 down to 0.017 under a 1 cm film, the eastern 12 a
+/// pit at z = -1 filled to -0.5 m. Closed walls, Manning n = 0.03, uniform
+/// salinity 35. The film runs off into the pit and the shelf thins below
+/// wetting_face_depth, where the wetting limiter closes its faces.
+frehg::FrehgConfig drainingShelfConfig(bool consistent) {
+  constexpr int nx = 24;
+  std::vector<real_t> bed(nx), eta(nx);
+  for (int i = 0; i < nx; ++i) {
+    const real_t shelf = 0.2 * (1.0 - static_cast<real_t>(i) / (nx / 2));
+    bed[static_cast<std::size_t>(i)] = (i < nx / 2) ? shelf : -1.0;
+    eta[static_cast<std::size_t>(i)] = (i < nx / 2) ? shelf + 0.01 : -0.5;
+  }
+  const std::string dir = writeTransportRaster("shelf", "shelf_bed.dat", bed);
+  writeTransportRaster("shelf", "shelf_eta.dat", eta);
+  frehg::FrehgConfig cfg = channelConfig(nx, 1.0, 0.0, 0.05);
+  cfg.simulation.id = "transport-draining-shelf";
+  cfg.configDir = dir;
+  cfg.domain.bottomElevation.fromFile = true;
+  cfg.domain.bottomElevation.file = "shelf_bed.dat";
+  cfg.initialConditions.surface.eta.fromFile = true;
+  cfg.initialConditions.surface.eta.file = "shelf_eta.dat";
+  cfg.initialConditions.surface.hasUu = false;
+  cfg.surfaceWater.friction.coefficient.constant = 0.03;
+  cfg.surfaceWater.friction.thinLayerDepth = 0.1;
+  cfg.surfaceWater.minDepth = 1.0e-5;
+  cfg.surfaceWater.wettingFaceDepth = 1.0e-3;
+  frehg::BoundaryConditionConfig walls;
+  walls.name = "walls";
+  walls.polygon = {{-1.0, -1.0}, {nx + 1.0, -1.0}, {nx + 1.0, 2.0}, {-1.0, 2.0}};
+  walls.target = frehg::BcTarget::Surface;
+  walls.kind = frehg::BcKind::Velocity;
+  walls.value.constant = 0.0;
+  cfg.boundaryConditions = {walls};
+  cfg.initialConditions.transport.surface.constant = 35.0;
+  cfg.transport.consistentSurfaceUpdate = consistent;
+  return cfg;
+}
+
+/// Maximum surface salinity over wet cells and the cumulative surf_anchor
+/// and surf_adjust of a draining-shelf run.
+struct ShelfRun {
+  real_t maxWet = 0.0;
+  real_t minWet = 1.0e30;
+  real_t anchor = 0.0;
+  real_t adjust = 0.0;
+  real_t mass0 = 0.0;
+  real_t massEnd = 0.0;
+};
+
+ShelfRun runDrainingShelf(bool consistent, int steps) {
+  MiniTransport mini;
+  mini.cfg = drainingShelfConfig(consistent);
+  mini.build();
+  ShelfRun run;
+  run.mass0 = mini.transport->ownedSurfaceMass();
+  for (int n = 0; n < steps; ++n) {
+    mini.step();
+    run.anchor += mini.transport->audit().surfAnchor;
+    run.adjust += mini.transport->audit().surfAdjust;
+    for (int i = 0; i < mini.cfg.domain.nx; ++i) {
+      if (interior2(mini.surface->depth(), 1, i + 1) > 0.0) {
+        const real_t v = interior2(mini.transport->surfaceScalar(), 1, i + 1);
+        run.maxWet = std::max(run.maxWet, v);
+        run.minWet = std::min(run.minWet, v);
+      }
+    }
+  }
+  run.massEnd = mini.transport->ownedSurfaceMass();
+  return run;
+}
+
+TEST(TransportModule, ConsistentSurfaceUpdateKeepsDrainingFilmsWithinTheInputRange) {
+  // 120 s: the upslope shelf thins to 0.7 mm (below wetting_face_depth).
+  const ShelfRun legacy = runDrainingShelf(false, 2400);
+  const ShelfRun consistent = runDrainingShelf(true, 2400);
+  std::printf("[ draining shelf ] legacy: s in [%.6f, %.6f], anchor %.4e, adjust %.4e, "
+              "mass %.6e -> %.6e\n",
+              legacy.minWet, legacy.maxWet, legacy.anchor, legacy.adjust, legacy.mass0,
+              legacy.massEnd);
+  std::printf("[ draining shelf ] consistent: s in [%.6f, %.6f], anchor %.4e, adjust %.4e, "
+              "mass %.6e -> %.6e\n",
+              consistent.minWet, consistent.maxWet, consistent.anchor, consistent.adjust,
+              consistent.mass0, consistent.massEnd);
+  // Every input is 35: the consistent update never leaves [35, 35], and a
+  // closed domain keeps its salt (measured: max 35.000000, mass to 1e-12).
+  EXPECT_LE(consistent.maxWet, 35.0 + 1.0e-9);
+  EXPECT_GE(consistent.minWet, 35.0 - 1.0e-9);
+  EXPECT_NEAR(consistent.massEnd, consistent.mass0, 1.0e-10 * consistent.mass0);
+  // The legacy twin concentrates the closing films above every input
+  // (measured: 34.986..35.035, salt mass -0.017).
+  EXPECT_GT(legacy.maxWet, 35.0 + 1.0e-3);
+}
+
+TEST(TransportModule, ConsistentSurfaceUpdateShrinksTheAnchorInSloshingFlow) {
+  // The SloshingBasinClosesTheScalarBudget configuration: accelerating flow,
+  // where the legacy one-step flux-volume lag books a measurable anchor.
+  real_t anchorAbs[2] = {0.0, 0.0};
+  for (int mode = 0; mode < 2; ++mode) {
+    MiniTransport mini;
+    mini.cfg = channelConfig(40, 10.0, 0.5, 0.2);
+    mini.cfg.transport.consistentSurfaceUpdate = (mode == 1);
+    mini.build();
+    setSquareWave(mini, 8, 16);
+    real_t before = surfaceScalarMass(mini);
+    for (int n = 0; n < 30; ++n) {
+      mini.step();
+      const real_t after = surfaceScalarMass(mini);
+      const frehg::transport::TransportAudit& a = mini.transport->audit();
+      const real_t residual = (after - before) - (a.exchange + a.surfSource + a.surfBoundary +
+                                                  a.surfAdjust + a.surfAnchor);
+      // The ledger closes in both modes.
+      EXPECT_NEAR(residual, 0.0, 1.0e-8 * before) << "mode " << mode << " step " << n;
+      anchorAbs[mode] += std::fabs(a.surfAnchor);
+      before = after;
+    }
+  }
+  std::printf("[ sloshing basin ] sum |surf_anchor|: legacy %.4e, consistent %.4e\n",
+              anchorAbs[0], anchorAbs[1]);
+  // Measured 1.32 vs 0.031 (43x). The consistent remainder is the stored
+  // velocities' own mismatch with the free-surface solve (they use the
+  // updated face areas and the legacy double drag factor), not a lag.
+  EXPECT_GT(anchorAbs[0], 0.0);
+  EXPECT_LT(anchorAbs[1], 0.05 * anchorAbs[0]);
 }
 
 }  // namespace

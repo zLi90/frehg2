@@ -193,6 +193,7 @@ choice.
 | `transport.bounds.min` | real | no | 0 | scalar lower bound (replaces the legacy [0, 200] clamp; plan §3.2) |
 | `transport.bounds.max` | real | no | unbounded | scalar upper bound |
 | `transport.legacy_evap_allowance` | bool | no | false | v2 Q4: keep the legacy hardcoded +0.01/step limiter allowance on coupled dry evaporating columns instead of the exact in-step concentration factor (golden pinning) |
+| `transport.surface_update` | `legacy` \| `consistent` | no | legacy | surface salinity update. `legacy` divides the transported mass by the previous step's flux volume and clamps moving cells only (golden-pinned, [theory quirk 2](../theory/transport.md)); under unsteady wetting/drying it concentrates closing thin films above every input value and books the mismatch into `surf_anchor`. `consistent` divides by the current step's flux volume (the flow rates that moved the mass) and applies the local min/max limiter in every wet cell — recommended for tidal and wind-driven wetting/drying |
 
 ## temperature (v2 Q5; required section when the module is on)
 

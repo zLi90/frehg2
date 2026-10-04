@@ -407,6 +407,14 @@ struct TransportConfig {
   /// instead of the exact in-step concentration factor. Off by default;
   /// exists so a b6-class golden can be pinned to the legacy behavior.
   bool legacyEvapAllowance = false;
+  /// transport.surface_update: consistent (v2.0 post-release opt-in): the
+  /// surface concentration divides the transported mass by the volume of
+  /// the *current* step's flow rates (the rates that moved the mass), and
+  /// the local min/max limiter applies in every wet cell, still ones
+  /// included. Off by default (`legacy`): the one-step-lagged flux volume
+  /// and the moving-cell-only limiter are golden-pinned (docs/theory/
+  /// transport.md quirk 2).
+  bool consistentSurfaceUpdate = false;
 };
 
 /// output.monitors[]: point-probe time series.

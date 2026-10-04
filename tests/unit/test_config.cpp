@@ -384,6 +384,36 @@ soil:
   EXPECT_TRUE(hasError(result, "invalid value 'conserve'")) << joined(result);
 }
 
+TEST_F(ConfigTest, SurfaceUpdateParsesRoundTripsAndRejectsUnknownValues) {
+  // transport.surface_update (post-v2.0 opt-in): default legacy, consistent
+  // selects the current-flow-rate flux volume and the still-cell limiter.
+  std::string base = kBaseConfig;
+  const std::string needle = "modules: {surface_water: true}";
+  base.replace(base.find(needle), needle.size(),
+               "modules: {surface_water: true, transport: true}");
+  const std::string icNeedle = "initial_conditions: {surface: {eta: {constant: 0.0}}}";
+  base.replace(base.find(icNeedle), icNeedle.size(),
+               "initial_conditions:\n  surface: {eta: {constant: 0.0}}\n"
+               "  transport: {surface: {constant: 0.0}}");
+
+  const frehg::FrehgConfig byDefault = frehg::loadConfig(writeConfig(base + "transport: {}\n"));
+  EXPECT_FALSE(byDefault.transport.consistentSurfaceUpdate);
+  EXPECT_NE(frehg::resolvedConfigYaml(byDefault).find("surface_update: legacy"),
+            std::string::npos);
+
+  const std::string consistent = base + "transport: {surface_update: consistent}\n";
+  const ValidationResult ok = validate(consistent);
+  EXPECT_TRUE(ok.ok()) << joined(ok);
+  const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(consistent));
+  EXPECT_TRUE(cfg.transport.consistentSurfaceUpdate);
+  EXPECT_NE(frehg::resolvedConfigYaml(cfg).find("surface_update: consistent"),
+            std::string::npos);
+
+  const ValidationResult bad = validate(base + "transport: {surface_update: fixed}\n");
+  ASSERT_FALSE(bad.ok());
+  EXPECT_TRUE(hasError(bad, "invalid value 'fixed'")) << joined(bad);
+}
+
 TEST_F(ConfigTest, RejectsGravityValueOnNonFluxKind) {
   std::string text = kBaseConfig;
   text += R"(boundary_conditions:

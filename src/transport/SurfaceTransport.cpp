@@ -22,6 +22,14 @@
 ///    domain edges with staged far values at rank interfaces (legacy
 ///    guarded rank-local edges, degrading interface faces to upwind — a
 ///    rank-count-dependent stencil; the serial goldens never see it).
+///
+/// Opt-in correction (transport.surface_update: consistent): the flux
+/// volume uses the current step's flow rates, matching the advective
+/// increments, and the local min/max limiter applies in every wet cell.
+/// The legacy pairing (lagged volume, moving-cell-only limiter) concentrates
+/// thin films whose outflow the wetting limiter has just closed above every
+/// input value and books the volume mismatch into surf_anchor; under
+/// strongly unsteady wetting/drying that term can rival the scalar mass.
 
 #include "transport/Limiters.hpp"
 #include "transport/ScalarSolver.hpp"
@@ -60,6 +68,7 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   const real_t cellArea = dx * dy;
   const bool superbee = superbee_;
   const bool coupled = subs_.active && cpl_.active;
+  const bool consistent = consistentSurface_;
   const real_t minDepth = surf_.minDepth;
   const real_t limHi = boundMax_;
   const real_t limLo = boundMin_;
@@ -271,9 +280,17 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
 
         // Flux volume (volume_by_flux, shallowwater.c:996-1032) from the
         // previous step's flow rates; the coupled term is the applied
-        // exchange volume without the legacy porosity factor (A9).
-        real_t v = vsn(j, i) +
-                   dt * (fuOld(j, i - 1) - fuOld(j, i) + fvOld(j - 1, i) - fvOld(j, i));
+        // exchange volume without the legacy porosity factor (A9). Under
+        // transport.surface_update: consistent the volume uses the current
+        // flow rates instead — the rates that moved the mass above — so the
+        // division is the conservative flux-form update (a uniform scalar
+        // stays uniform, and a film whose outflow the wetting limiter just
+        // closed is not concentrated by last step's outflow).
+        const real_t qxW = consistent ? Fu(j, i - 1) : fuOld(j, i - 1);
+        const real_t qxE = consistent ? Fu(j, i) : fuOld(j, i);
+        const real_t qyS = consistent ? Fv(j - 1, i) : fvOld(j - 1, i);
+        const real_t qyN = consistent ? Fv(j, i) : fvOld(j, i);
+        real_t v = vsn(j, i) + dt * (qxW - qxE + qyS - qyN);
         if (coupled) {
           const real_t area = (dept(j, i) > 0.0) ? cellArea : 0.0;
           const real_t dv = qss(j, i) * dt * area;
@@ -343,8 +360,11 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
         if (wet) {
           const bool moving = (uu(j, i) != 0.0 || uu(j, i - 1) != 0.0 || vv(j, i) != 0.0 ||
                                vv(j - 1, i) != 0.0);
-          bool applyLimiter = moving;
-          if (!moving && coupled) {
+          // Legacy clamps moving cells only; the consistent update clamps
+          // every wet cell (a still film can still receive mass/volume
+          // mismatches from the exchange or a closing face).
+          bool applyLimiter = moving || consistent;
+          if (!applyLimiter && coupled) {
             // Legacy gates the still-water clamp on a conductive top
             // (param->Ksz > 0, scalar.c:217); the staged extrema already
             // encode the per-column conductivity, so reuse the wet gate.
