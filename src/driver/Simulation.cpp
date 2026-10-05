@@ -287,6 +287,14 @@ void Simulation::buildTransport() {
     surfWiring.rainMask = surface_->rainApplyMask();
   }
   transport::SubsurfaceWiring subsWiring;
+  // transport.subsurface_update: consistent reads the groundwater module's
+  // window volumes (all substeps, post-allocation transfers on every face
+  // crossed); switch the accumulation on before wiring the views.
+  const bool transportWindow =
+      gw_ && config_.modules.transport && config_.transport.consistentSubsurfaceUpdate;
+  if (transportWindow) {
+    gw_->enableTransportWindow();
+  }
   if (gw_) {
     subsWiring.active = true;
     subsWiring.wc = gw_->waterContent();
@@ -311,11 +319,19 @@ void Simulation::buildTransport() {
     subsWiring.sideCodeYm = gw_->sideBcCodeYm();
     subsWiring.sideCodeXm = gw_->sideBcCodeXm();
     subsWiring.sideCodeXp = gw_->sideBcCodeXp();
+    if (transportWindow) {
+      subsWiring.qxWindow = gw_->windowVolumeX();
+      subsWiring.qyWindow = gw_->windowVolumeY();
+      subsWiring.qzWindow = gw_->windowVolumeZ();
+    }
   }
   transport::CouplingWiring cplWiring;
   if (coupler_) {
     cplWiring.active = true;
     cplWiring.qss = coupler_->seepageRate();
+    if (transportWindow) {
+      cplWiring.ventVolume = gw_->windowVentVolume();
+    }
   }
   if (config_.modules.transport) {
     transport_ = std::make_unique<transport::ScalarSolver>(
@@ -359,6 +375,11 @@ void Simulation::stepTransport(real_t t, real_t dt, real_t dtgLast) {
   }
   if (temperature_) {
     temperature_->step(t, dt, dtgLast, rain, evap);
+  }
+  if (gw_) {
+    // The window volumes are consumed (no-op unless the consistent
+    // subsurface update switched the accumulation on).
+    gw_->resetTransportWindow();
   }
 }
 

@@ -20,7 +20,9 @@ then the subsurface scalar (`scalar_groundwater`, `scalar.c:303-498`;
 state of the completed step; in subcycled coupling the subsurface advection
 uses the window's *last* substep's Darcy fluxes over the whole surface dt —
 the legacy structure exactly (only sync mode is golden-pinned; b6 runs
-sync).
+sync). That structure is not conservative when dtg ≠ dt (quirk 7); the
+opt-in `transport.subsurface_update: consistent` replaces it with the
+window volumes (below).
 
 ## Provenance
 
@@ -74,12 +76,23 @@ sync).
    golden fidelity.
 3. **The subsurface ledger re-anchors against the post-reallocation θ**:
    Vgflux predates the reallocation/clamp adjustments; the difference is
-   the audited `subs_anchor` term.
+   the audited `subs_anchor` term. The post-allocation walks move water
+   between cells without moving scalar, and their flux mirror marks only
+   the receiver's face, so water that walks *through* a full cell is booked
+   as a flux out of the wrong neighbor; under density coupling the walks
+   can circulate water through a saturated layer every step
+   ([groundwater theory](groundwater.md), reallocation gradient). The
+   anchor then deletes or creates scalar: a 35 psu pond infiltrating a
+   10 psu sandy clay kept only 30 % of the infiltrated salt in the soil
+   (Nueces coupled case). Fixed by the two opt-ins below.
 4. **The coupled top-interface dispersive flux is one-sided**: the
    subsurface gains `dispersive_flux` at the kM ghost (`scalar.c:362`)
    *and* loses the seepage term's diffusive part, while the surface only
    gains the seepage term — the interface gain has no surface counterpart.
-   Measured into `subs_boundary` (negligible at b6's dispersivities).
+   Measured into `subs_boundary` (negligible at b6's dispersivities). The
+   seepage term's diffusive part itself acts only on steps with a nonzero
+   seepage rate, which subcycled windows without a substep do not have.
+   Both are corrected under `transport.subsurface_update: consistent`.
 5. **Surface scalar advects across closed boundary faces**: the closed-edge
    fold keeps the water in, but the boundary-face velocities are live
    computed values and the scalar upwinds across them against the
@@ -94,6 +107,48 @@ sync).
    (`scalar.c:243-254`); Frehg2 keeps the structure but uses the per-cell
    masked rain (the legacy global rate ignored its own exclusion rows — no
    gated case rains on transport).
+
+
+## Consistent subsurface update (`transport.subsurface_update: consistent`)
+
+Post-v2.0 opt-in, recommended for coupled salinity runs; `legacy` stays the
+default for golden fidelity (shortened b5, b6 ss/td, g5, g6c and Henry
+runs are bitwise identical to the pre-change binary, 99fea72). **7. The legacy subsurface update is conservative only for
+dt = dtg.** It advects with the last substep's Darcy fluxes times the
+surface dt, but divides by a flux volume built from that substep's start
+moisture plus dtg times its divergence. Under subcycling (dt 4 s, dtg up to
+10 s) the two disagree. Surface steps without a substep reuse the last
+fluxes. A third of the infiltrated salt was lost, and ~500 psu·m³ were
+missing from every audit column on the Nueces exchange checks.
+
+The consistent update moves the scalar with every volume the groundwater
+module moved:
+
+- **Window volumes.** `RichardsSolver` accumulates W = Σ q·dtg on every
+  face over all substeps since the last transport step. The post-allocation
+  transfers are recorded on each face they cross (`qzPathCorr_`; the
+  legacy receiver-face mirror, which the adaptive controller and the `qz`
+  output read, is unchanged).
+- **Advection and dispersion** use the window-mean fluxes W/dt.
+- **Flux volume.** The mass basis is the water content at the previous
+  transport step; the flux volume adds the divergence of W.
+- **Interface.** Every wet step gets the exchange's interface diffusion,
+  vented post-allocation water arrives at the top-cell concentration, and
+  the one-sided interface gain (quirk 4) is dropped.
+
+With dt = dtg and no reallocation the update reduces to the legacy
+arithmetic (unit test: 0 difference). Measured on the infiltrating column
+(`TransportModule.ConsistentSubsurfaceUpdate*`): the subcycled ledger
+residual falls from 0.65 to 4e-13 psu·m³, and the subcycled result matches
+sync (97.2 % of the infiltrated salt kept, the rest leaving with the water
+the post-allocation drops by design). With
+`groundwater.density_coupling.reallocation_gradient: density` the
+density-on column keeps 99.9 % (legacy 60 %). Decomposition:
+`regression.coupled_salt_rank_invariance.*` (strict 1.1e-8 at 1/2/4 ranks).
+Restart: the window is empty at every checkpoint (it is consumed by each
+transport step) and the mass basis is the restored θ. This feature mix
+(coupled, uniform terrain layers, density) restarts to rounding, 3e-16 in
+the stage, legacy and consistent alike, rather than bitwise.
 
 ## Defined resolutions of legacy undefined/rank-dependent behavior (A19)
 

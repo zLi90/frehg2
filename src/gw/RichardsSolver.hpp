@@ -187,7 +187,31 @@ class RichardsSolver {
     betaSalineVisc_ = dc.betaSalineViscosity;
     betaThermal_ = dc.thermalExpansion;
     referenceT_ = dc.referenceTemperature;
+    densityGradient_ = dc.densityReallocationGradient;
   }
+
+  /// Start accumulating the transport window volumes
+  /// (transport.subsurface_update: consistent; wired by the driver). From
+  /// now on every step adds q dtg of each face into windowVolume{X,Y,Z}()
+  /// until resetTransportWindow(), and the post-allocation walks record
+  /// their transfers on every face they cross (the legacy mirror into qzF
+  /// marks only the receiver's face, which is what the controller and the
+  /// qz output keep reading). Allocates the window fields; idempotent.
+  void enableTransportWindow();
+  /// Zero the window volumes (the driver calls it after each transport
+  /// step consumed them).
+  void resetTransportWindow();
+  /// Window face volume [m^3] through the x+ face of each cell (qx layout),
+  /// summed over the substeps since the last resetTransportWindow().
+  const Field3<real_t>& windowVolumeX() const { return qxWin_; }
+  /// Window face volume [m^3] through the y+ face (qy layout).
+  const Field3<real_t>& windowVolumeY() const { return qyWin_; }
+  /// Window face volume [m^3] through the z faces (qzF layout), including
+  /// the post-allocation transfers on every face they crossed.
+  const Field3<real_t>& windowVolumeZ() const { return qzWin_; }
+  /// Window volume [m^3] each column's post-allocation vented onto the
+  /// surface (coupled runs; the surface transport adds it to the exchange).
+  const Field2<real_t>& windowVentVolume() const { return ventWin_; }
 
   /// Advance the subsurface state by \p dtg, evaluating series-valued
   /// boundary conditions at time \p t (the end-of-step time, matching the
@@ -366,6 +390,9 @@ class RichardsSolver {
   /// Accumulate the boundary Darcy volumes of the step into the audit
   /// over \p dtg.
   void accumulateBoundaryFlux(real_t dtg);
+  /// Add the step's face volumes q dtg (z: including the post-allocation
+  /// path correction) into the transport window (consistent mode only).
+  void accumulateTransportWindow(real_t dtg);
 
   // Post-allocation (Reallocate.cpp).
   /// Redistribute over/under-saturated cells along the legacy send walk
@@ -397,6 +424,17 @@ class RichardsSolver {
   real_t betaSalineVisc_ = kBaroclinicBetaVisc;
   real_t betaThermal_ = 0.0;
   real_t referenceT_ = 20.0;
+  /// groundwater.density_coupling.reallocation_gradient: density.
+  bool densityGradient_ = false;
+  /// transport.subsurface_update: consistent — window volumes on.
+  bool transportWindow_ = false;
+  /// Window face volumes [m^3] (empty until enableTransportWindow()).
+  Field3<real_t> qxWin_, qyWin_, qzWin_;
+  Field2<real_t> ventWin_;
+  /// Per-step correction from the legacy receiver-face mirror of the
+  /// post-allocation transfers to the full crossed-face path [m^3/s]
+  /// (qzF layout; the window adds qzF + this).
+  Field3<real_t> qzPathCorr_;
 
   // Configuration extracts.
   real_t ss_ = 0.0;              ///< specific storage [1/m]

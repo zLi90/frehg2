@@ -157,6 +157,34 @@ mid-step depth one step; the half-step freshness difference is a §2.1-class
 consistency choice recorded in A18). Uncoupled runs keep the configured
 reference form `(value − z_c) r_face`.
 
+**Post-allocation gradient under density coupling** (post-v2.0 opt-in
+`groundwater.density_coupling.reallocation_gradient: density`; default
+`freshwater` = legacy):
+- **The legacy test.** The split that routes restore and over-saturation
+  surpluses up or down (`check_head_gradient`, `groundwater.c:1074-1150`)
+  measures the vertical gradient as dh/dz − 1. Activation multiplies the
+  Darcy gravity term by r_ρ but never touched this test, so a hydrostatic
+  saline column (dh/dz = r_ρ) reads as an upward gradient.
+- **The failure.** Take a saturated layer between two unsaturated cells in
+  saturated contact. Their restore surpluses are then sent up and down
+  through it every step: the receivers' heads are not refreshed, so the
+  next restore finds the deposit again.
+- **Measured.** On the Nueces coupled case ~20 times the infiltration rate
+  circulated between layers 1 and 3, and the transport (which this water
+  does not carry) lost 70 % of the infiltrated salt.
+- **The fix.** The density form tests dh/dz − r_ρ at the face, the Darcy
+  flux's own gravity term. Without density coupling r_ρ = 1, and the two
+  forms are identical.
+
+**Transport window** (`enableTransportWindow`, switched on by
+`transport.subsurface_update: consistent`): every step adds q·dtg of each
+face into window volumes, and the post-allocation walks record each
+transfer on every face it crosses (`qzPathCorr_`). The legacy
+receiver-face mirror in `qzF` is unchanged, so the adaptive controller,
+the audit and the `qz` output read exactly what they did before. The
+driver consumes and zeroes the window after each transport step
+([transport theory](transport.md)).
+
 ## Mass audit
 
 `/monitor/gw_mass_audit` records, per step (cumulative, reduced over ranks):

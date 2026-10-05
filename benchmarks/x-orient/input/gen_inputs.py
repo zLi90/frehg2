@@ -14,6 +14,11 @@
   flow advects an off-axis blob, gating the advection scheme's own
   orientation symmetry with no boundary throughflow (the BC side sweep
   lives in the outflow-staircase and surface-bc-sides gates instead).
+- cs_dem.dat: 8 x 8 flat-list bed for the coupled-salinity decomposition
+  lane (coupled-salt-base.yaml) — a plane rising 0.1 m per cell east and
+  0.03 m per cell north from -0.3 m, so a 0.15 m stage floods the west
+  half, leaves the east half dry, and drives lateral subsurface flow across
+  both rank interfaces of a 2 x 2 decomposition.
 
 The battery harness (tests/regression/run_regression.py, the *-orient
 subcommands) transforms swe_dem.dat with the same dihedral table it applies
@@ -77,8 +82,16 @@ def transport_ics() -> None:
             np.exp(-(((xx - 7.0) ** 2) + ((yy - 15.0) ** 2)) / 8.0))
 
 
+def coupled_salt_dem() -> None:
+    nx = ny = 8
+    ii, jj = np.meshgrid(np.arange(nx), np.arange(ny))  # (ny, nx)
+    write2d("cs_dem.dat", "x-orient coupled-salinity lane bed: tilted plane",
+            -0.3 + 0.1 * ii + 0.03 * jj)
+
+
 if __name__ == "__main__":
     swe_dem()
     gw_soil_id()
     transport_ics()
-    print("wrote swe_dem.dat, gw_soil_id.dat, tr_eta0.dat, tr_blob.dat")
+    coupled_salt_dem()
+    print("wrote swe_dem.dat, gw_soil_id.dat, tr_eta0.dat, tr_blob.dat, cs_dem.dat")

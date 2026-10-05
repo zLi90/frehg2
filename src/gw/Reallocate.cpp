@@ -37,6 +37,23 @@
 ///  - check_head_gradient's up-face spacing added a cell index to a
 ///    thickness (:1110, the §2.1-flagged index bug); the intended
 ///    0.5 (dz(k) + dz(k-1)) is used.
+/// Two post-v2.0 opt-ins (both off by default; the legacy arithmetic is
+/// untouched when they are off):
+///  - groundwater.density_coupling.reallocation_gradient: density measures
+///    the vertical gradient against the face density ratio, dh/dz - r_rho,
+///    the gravity term of the Darcy flux. The legacy freshwater form,
+///    dh/dz - 1, reads a hydrostatic saline column (dh/dz = r_rho > 1) as
+///    an upward gradient; when a saturated layer separates two cells under
+///    saturated contact, their restore surpluses are then swapped through
+///    it on every step (the receivers' heads are not refreshed, so the next
+///    restore finds the deposit again). Found on the Nueces coupled case:
+///    ~20 times the infiltration rate circulated between layers 1 and 3.
+///  - with the transport window on (transport.subsurface_update:
+///    consistent), every transfer is also recorded on each face it crosses,
+///    into qzPathCorr_ (the difference from the legacy receiver-face mirror,
+///    which the controller and the qz output keep reading), so the scalar
+///    moves with the water: a walk through a full cell is a flux through
+///    it, not a flux out of the receiver's neighbor.
 /// Everything each cell publishes in the parallel phase touches only that
 /// cell; the column sweep touches only its own column — race-free and
 /// decomposition-invariant by construction.
@@ -73,6 +90,11 @@ void RichardsSolver::reallocateWaterContent() {
 
   Field3<real_t> h = h_, wc = wc_;
   Field3<real_t> kx = kx_, ky = ky_, kzF = kzF_, qzF = qzF_;
+  Field3<real_t> rZp = rRhoZp_;
+  const bool densityGradient = densityGradient_;
+  const bool recordPath = transportWindow_;
+  Field3<real_t> pathCorr = qzPathCorr_;
+  Field2<real_t> ventWin = ventWin_;
   Field3<real_t> vga = vga_, vgn = vgn_, wcs = wcs_, wcr = wcr_, aev = aev_;
   Field3<real_t> dz3d = mesh_.dz3d();
   Field3<real_t> room = room_, sendUp = sendUp_, sendDown = sendDown_;
@@ -135,13 +157,15 @@ void RichardsSolver::reallocateWaterContent() {
                        : 0.0;
           if (active(jc, ic, kc + 1) && kzF(jc, ic, kc + 1) > 0.0) {
             const real_t dzp = 0.5 * (dz3d(jc, ic, kc) + dz3d(jc, ic, kc + 1));
-            dh6[4] = (h(jc, ic, kc + 1) - h(jc, ic, kc)) / dzp - 1.0;
+            dh6[4] = (h(jc, ic, kc + 1) - h(jc, ic, kc)) / dzp -
+                     (densityGradient ? rZp(jc, ic, kc + 1) : 1.0);
           } else {
             dh6[4] = 0.0;
           }
           if (active(jc, ic, kc - 1) && kzF(jc, ic, kc) > 0.0) {
             const real_t dzm = 0.5 * (dz3d(jc, ic, kc) + dz3d(jc, ic, kc - 1));
-            dh6[5] = (h(jc, ic, kc) - h(jc, ic, kc - 1)) / dzm - 1.0;
+            dh6[5] = (h(jc, ic, kc) - h(jc, ic, kc - 1)) / dzm -
+                     (densityGradient ? rZp(jc, ic, kc) : 1.0);
           } else {
             dh6[5] = 0.0;
           }
@@ -297,6 +321,29 @@ void RichardsSolver::reallocateWaterContent() {
             continue;
           }
           const bool topIsHead = (topCode(j, i) == static_cast<int>(GwBcCode::Head));
+          // Path recording (transport window only): replace the legacy
+          // mirror of a transfer from cell `from` to cell `to` (or through
+          // the column's top face when to < 0) recorded at face `legacyFace`
+          // with the flux on every face crossed (a vent's `to` is the cell
+          // above the column top, top - 1). Plane f is the face above cell
+          // f; positive upward.
+          const auto record = [&](int from, int to, real_t vol, int legacyFace,
+                                  real_t legacySign) {
+            if (!recordPath) {
+              return;
+            }
+            const real_t rate = vol / dtg;
+            pathCorr(j, i, legacyFace) -= legacySign * rate;
+            if (to < from) {
+              for (int f = to + 1; f <= from; ++f) {
+                pathCorr(j, i, f) += rate;
+              }
+            } else {
+              for (int f = from + 1; f <= to; ++f) {
+                pathCorr(j, i, f) -= rate;
+              }
+            }
+          };
           // Send up (:1158-1249).
           real_t dV = sendUp(j, i, k);
           if (dV > 0.0) {
@@ -308,6 +355,7 @@ void RichardsSolver::reallocateWaterContent() {
                 wc(j, i, ll) += take / (az * dz3d(j, i, ll));
                 room(j, i, ll) -= take;
                 qzF(j, i, ll + 1) += take / dtg;
+                record(k, ll, take, ll + 1, 1.0);
                 dV -= take;
               }
             }
@@ -324,6 +372,10 @@ void RichardsSolver::reallocateWaterContent() {
                   cplAvail(j, i) += d;
                   cplGain(j, i) += d;
                   qzF(j, i, ll) += dV / dtg;
+                  record(k, ll - 1, dV, ll, 1.0);
+                  if (recordPath) {
+                    ventWin(j, i) += dV;
+                  }
                   vent += dV;
                 } else {
                   lost -= dV;
@@ -332,6 +384,7 @@ void RichardsSolver::reallocateWaterContent() {
               } else if (topIsHead) {
                 // Release through the prescribed-head surface (:1210-1214).
                 qzF(j, i, ll) += dV / dtg;
+                record(k, ll - 1, dV, ll, 1.0);
                 dV = 0.0;
               } else {
                 // No-flux/flux top: send the remainder back down (:1216-1240).
@@ -342,6 +395,7 @@ void RichardsSolver::reallocateWaterContent() {
                     wc(j, i, ll) += take / (az * dz3d(j, i, ll));
                     room(j, i, ll) -= take;
                     qzF(j, i, ll) -= take / dtg;
+                    record(k, ll, take, ll, -1.0);
                     dV -= take;
                   }
                 }
@@ -361,6 +415,7 @@ void RichardsSolver::reallocateWaterContent() {
                 wc(j, i, ll) += take / (az * dz3d(j, i, ll));
                 room(j, i, ll) -= take;
                 qzF(j, i, ll) -= take / dtg;
+                record(k, ll, take, ll, -1.0);
                 dV -= take;
               }
             }

@@ -93,6 +93,9 @@ struct ScalarSpec {
   real_t boundMax = 0.0;                ///< upper clamp when hasBoundMax
   bool legacyEvapAllowance = false;     ///< salinity only
   bool consistentSurfaceUpdate = false; ///< salinity only (transport.surface_update)
+  /// salinity only (transport.subsurface_update): the subsurface update on
+  /// the groundwater module's window volumes (SubsurfaceTransport.cpp).
+  bool consistentSubsurfaceUpdate = false;
   real_t kappaFactor = 0.0;             ///< (rho c)_s / (rho c)_w
   real_t heatCapacityWater = 0.0;       ///< (rho c)_w [J/m^3/K]
   /// Surface heat-exchange source (temperature spec; None for salinity).
@@ -149,12 +152,22 @@ struct SubsurfaceWiring {
   Field2<int> sideCodeYm;     ///< y- side code
   Field2<int> sideCodeXm;     ///< x- side code (temperature admission, V2-A17)
   Field2<int> sideCodeXp;     ///< x+ side code
+  /// Window face volumes [m^3] since the last transport step, qx/qy/qzF
+  /// layouts (RichardsSolver::windowVolume*; transport.subsurface_update:
+  /// consistent only — empty otherwise).
+  Field3<real_t> qxWindow;
+  Field3<real_t> qyWindow;
+  Field3<real_t> qzWindow;
 };
 
 /// Coupler state the transport reads in coupled runs.
 struct CouplingWiring {
   bool active = false;  ///< true when the coupler runs
   Field2<real_t> qss;   ///< surface-applied seepage rate of the step [m/s]
+  /// Post-allocation vent volume per column since the last transport step
+  /// [m^3] (RichardsSolver::windowVentVolume; consistent subsurface update
+  /// only — empty otherwise).
+  Field2<real_t> ventVolume;
 };
 
 /// This rank's scalar-mass budget contributions of one transport step
@@ -334,6 +347,10 @@ class ScalarSolver {
   /// current step's flow rates and the limiter in still wet cells (see
   /// SurfaceTransport.cpp); false keeps the golden-pinned legacy update.
   bool consistentSurface_ = false;
+  /// transport.subsurface_update: consistent — the subsurface update on the
+  /// window volumes (see SubsurfaceTransport.cpp); false keeps the
+  /// golden-pinned legacy update.
+  bool consistentSubsurface_ = false;
 
   // Surface fields (halo layout).
   Field2<real_t> sSurf_, smSurf_, sSurfKp_, sseepage_;
@@ -352,6 +369,14 @@ class ScalarSolver {
   /// nz planes; kzF has nz+1).
   Field3<real_t> kzLower_;
   Field2<int> kTop_;  ///< per-column first active layer (device scratch)
+  /// Consistent subsurface update: θ at the end of the previous transport
+  /// step (the mass basis the anchor re-based the scalar onto), and the
+  /// window-mean face fluxes W/dt the step advects with [m^3/s].
+  Field3<real_t> wcT_, qxMean_, qyMean_, qzMean_;
+  /// The face fluxes the subsurface step and the dispersion tensor read:
+  /// the groundwater module's last-substep fluxes (legacy) or the window
+  /// means (consistent). Set at the start of each subsurface step.
+  Field3<real_t> flowX_, flowY_, flowZ_;
   /// Columns under a scalar_cauchy top condition (v2 §3.2, Geng & Boufadel
   /// Eq. (7)): 1 where the top face passes water but no scalar mass and the
   /// top-cell limiter admits the exact evaporative concentration/dilution

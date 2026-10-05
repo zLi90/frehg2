@@ -707,13 +707,68 @@ void RichardsSolver::step(real_t t, real_t dtg) {
   halo_.exchange({"gw_wc"});
 
   // Post-allocation and the final clamp (legacy groundwater.c:159-189).
+  if (transportWindow_) {
+    Kokkos::deep_copy(qzPathCorr_, 0.0);
+  }
   reallocateWaterContent();
   finalizeWaterContent();
   enforceMoistureBc();
   halo_.exchange({"gw_wc"});
 
   accumulateBoundaryFlux(dtg);
+  if (transportWindow_) {
+    accumulateTransportWindow(dtg);
+  }
   adaptTimeStep(dtg);
+}
+
+void RichardsSolver::enableTransportWindow() {
+  if (transportWindow_) {
+    return;
+  }
+  transportWindow_ = true;
+  qxWin_ = Field3<real_t>("gw_qx_window", qx_.extent(0), qx_.extent(1), qx_.extent(2));
+  qyWin_ = Field3<real_t>("gw_qy_window", qy_.extent(0), qy_.extent(1), qy_.extent(2));
+  qzWin_ = Field3<real_t>("gw_qz_window", qzF_.extent(0), qzF_.extent(1), qzF_.extent(2));
+  qzPathCorr_ =
+      Field3<real_t>("gw_qz_path_corr", qzF_.extent(0), qzF_.extent(1), qzF_.extent(2));
+  ventWin_ = Field2<real_t>("gw_vent_window", qzF_.extent(0), qzF_.extent(1));
+  resetTransportWindow();
+  Kokkos::deep_copy(qzPathCorr_, 0.0);
+}
+
+void RichardsSolver::resetTransportWindow() {
+  if (!transportWindow_) {
+    return;
+  }
+  Kokkos::deep_copy(qxWin_, 0.0);
+  Kokkos::deep_copy(qyWin_, 0.0);
+  Kokkos::deep_copy(qzWin_, 0.0);
+  Kokkos::deep_copy(ventWin_, 0.0);
+}
+
+void RichardsSolver::accumulateTransportWindow(real_t dtg) {
+  // Every face slot, halos included: the transport reads the same slots of
+  // the window volumes it would read of the per-step fluxes.
+  Field3<real_t> qx = qx_, qy = qy_, qzF = qzF_, corr = qzPathCorr_;
+  Field3<real_t> wx = qxWin_, wy = qyWin_, wz = qzWin_;
+  Kokkos::parallel_for(
+      "gw_transport_window_xy",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
+          {0, 0, 0}, {static_cast<int>(qx.extent(0)), static_cast<int>(qx.extent(1)),
+                      static_cast<int>(qx.extent(2))}),
+      KOKKOS_LAMBDA(const int j, const int i, const int k) {
+        wx(j, i, k) += qx(j, i, k) * dtg;
+        wy(j, i, k) += qy(j, i, k) * dtg;
+      });
+  Kokkos::parallel_for(
+      "gw_transport_window_z",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
+          {0, 0, 0}, {static_cast<int>(qzF.extent(0)), static_cast<int>(qzF.extent(1)),
+                      static_cast<int>(qzF.extent(2))}),
+      KOKKOS_LAMBDA(const int j, const int i, const int k) {
+        wz(j, i, k) += (qzF(j, i, k) + corr(j, i, k)) * dtg;
+      });
 }
 
 void RichardsSolver::refreshDerivedState() {

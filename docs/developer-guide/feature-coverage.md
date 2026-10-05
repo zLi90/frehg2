@@ -45,6 +45,8 @@ result (README).
 | Bulk (atmosphere) open-water evaporation | regression.g4; unit.all (BulkAerodynamic) |
 | Bulk soil evaporation (`groundwater.evaporation`) | regression.g5.geng2015; BulkAerodynamic.SoilRelativeHumidityAndEquilibrium |
 | `transport.legacy_evap_allowance` | TransportModule.LegacyEvapAllowanceTogglePinsCoupledDryColumnBehavior |
+| `transport.subsurface_update` (`legacy` / `consistent`) | TransportModule.ConsistentSubsurfaceUpdateClosesTheSubcycledLedger; TransportModule.ConsistentSubsurfaceUpdateReducesToLegacyWithoutSubcycling; ConfigTest.SubsurfaceUpdateAndReallocationGradientParseAndRoundTrip; ConfigTest.RejectsConsistentSubsurfaceUpdateWithoutGroundwater |
+| `groundwater.density_coupling.reallocation_gradient` (`freshwater` / `density`) | TransportModule.DensityReallocationGradientKeepsInfiltratedSalt; ConfigTest.SubsurfaceUpdateAndReallocationGradientParseAndRoundTrip |
 | `transport.surface_update` (`legacy` / `consistent`) | TransportModule.ConsistentSurfaceUpdateKeepsDrainingFilmsWithinTheInputRange; TransportModule.ConsistentSurfaceUpdateShrinksTheAnchorInSloshingFlow; ConfigTest.SurfaceUpdateParsesRoundTripsAndRejectsUnknownValues |
 | Atmosphere block (met forcing incl. radiation terms) | regression.g7; MetForcing.SamplesConstantsAndFoldsRelativeHumidity |
 | `atmosphere.wind_speed_floor` | MetForcing.WindSpeedFloorBoundsStillAir |
@@ -99,6 +101,7 @@ result (README).
 | Transport + coupling + density + restart | regression.b6_restart |
 | Transport + MPI decomposition (salinity halos/limiter) | regression.tracer_rank_invariance.strict |
 | `surface_update: consistent` + MPI decomposition | regression.tracer_rank_invariance.strict (superbee-consistent lane) |
+| `subsurface_update: consistent` + subcycled coupling + density + MPI decomposition | regression.coupled_salt_rank_invariance.strict; regression.coupled_salt_rank_invariance.default |
 | Temperature + MPI decomposition | regression.heat_rank_invariance.strict |
 | Two scalars + both betas + restart | regression.two_scalar_restart |
 | Rain + subcycled coupling | regression.b5.rain.subcycled |
@@ -122,7 +125,12 @@ already integrate over), chezy+non-b4 physics (a scalar drag-law swap),
 run-record+anything (observer only, r1 asserts non-perturbation),
 `surface_update`+restart (the consistent update reads only the current
 step's flow rates and carries no state across the step boundary; the
-checkpointed legacy flow-rate snapshots stay in the layout, unused).
+checkpointed legacy flow-rate snapshots stay in the layout, unused),
+`subsurface_update`+restart (the window volumes are consumed by every
+transport step, so they are empty at each checkpoint, and the mass basis
+is the restored θ; measured on x-orient/coupled-salt-base: restart
+reproduces the straight run to rounding, 5e-16 in the flow, as the legacy
+update does on this feature mix).
 
 ## 3. GPU / device rows (§8.3 release rule)
 

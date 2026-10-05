@@ -161,6 +161,13 @@ struct MiniTransport {
       sw.rainMask = surface->rainApplyMask();
     }
     frehg::transport::SubsurfaceWiring gwW;
+    // The driver's transport-window switch (transport.subsurface_update:
+    // consistent), mirrored here so the fixture runs the same wiring.
+    const bool window =
+        gw && !temperature && cfg.modules.transport && cfg.transport.consistentSubsurfaceUpdate;
+    if (window) {
+      gw->enableTransportWindow();
+    }
     if (gw) {
       gwW.active = true;
       gwW.wc = gw->waterContent();
@@ -185,11 +192,19 @@ struct MiniTransport {
       gwW.sideCodeYm = gw->sideBcCodeYm();
       gwW.sideCodeXm = gw->sideBcCodeXm();
       gwW.sideCodeXp = gw->sideBcCodeXp();
+      if (window) {
+        gwW.qxWindow = gw->windowVolumeX();
+        gwW.qyWindow = gw->windowVolumeY();
+        gwW.qzWindow = gw->windowVolumeZ();
+      }
     }
     frehg::transport::CouplingWiring cw;
     if (coupler) {
       cw.active = true;
       cw.qss = coupler->seepageRate();
+      if (window) {
+        cw.ventVolume = gw->windowVentVolume();
+      }
     }
     transport = std::make_unique<frehg::transport::ScalarSolver>(
         *grid, cfg, *boundaries, *halo, sw, gwW, cw,
@@ -211,6 +226,7 @@ struct MiniTransport {
       coupler->step(t, dt);
       transport->step(t, dt, gw->lastDtg(), surface->currentRain(),
                       surface->currentEvaporation());
+      gw->resetTransportWindow();
     } else if (surface) {
       t += dt;
       surface->beginStep(t);
@@ -221,6 +237,7 @@ struct MiniTransport {
       t += dt;
       gw->step(t, dt);
       transport->step(t, dt, gw->lastDtg(), 0.0, 0.0);
+      gw->resetTransportWindow();
     }
     return dt;
   }
@@ -1290,6 +1307,219 @@ TEST(TransportModule, ConsistentSurfaceUpdateShrinksTheAnchorInSloshingFlow) {
   // updated face areas and the legacy double drag factor), not a lag.
   EXPECT_GT(anchorAbs[0], 0.0);
   EXPECT_LT(anchorAbs[1], 0.05 * anchorAbs[0]);
+}
+
+// ---------------------------------------------------------------------------
+// transport.subsurface_update: consistent and groundwater.density_coupling.
+// reallocation_gradient: density (post-v2.0 opt-ins). Found on the Nueces
+// Delta coupled case (nueces/frehg2-swgw-dx10/exchange-check): a 35 psu pond
+// infiltrating a 10 psu sandy clay kept only 30 % of the infiltrated salt in
+// the soil under density coupling, and 67 % under subcycling at dtg <= 10 s
+// with dt = 4 s; the subcycled ledger did not close. Each test pins the
+// legacy twin too (plan §8.3).
+// ---------------------------------------------------------------------------
+
+/// Sandy clay (Carsel & Parrish 1988) with Ks raised 30x so the column
+/// fills within ~1 h instead of a day: a 0.2 m pond of 35 psu over five
+/// 0.5 m layers of 10 psu soil, water table 1.5 m below the bed, closed
+/// sides and bottom. \p mode 0 = sync dt = dtg = 4 s; 1 = subcycled,
+/// dt = 4 s with dtg ramping to 10 s.
+frehg::FrehgConfig infiltratingColumnConfig(int mode, bool density, bool fixed) {
+  frehg::FrehgConfig cfg;
+  cfg.simulation.id = "transport-infiltrating-column";
+  cfg.domain.nx = 1;
+  cfg.domain.ny = 1;
+  cfg.domain.nz = 5;
+  cfg.domain.dx = 10.0;
+  cfg.domain.dy = 10.0;
+  cfg.domain.dz = 0.5;
+  cfg.domain.bottomElevation.constant = 0.0;
+  cfg.domain.followTerrain = true;
+  cfg.domain.terrainLayers = frehg::DomainConfig::TerrainLayers::Uniform;
+  cfg.time.dt = 4.0;
+  cfg.time.tEnd = 1.0e5;
+  cfg.time.outputInterval = 1.0e5;
+  cfg.modules.surfaceWater = true;
+  cfg.modules.groundwater = true;
+  cfg.modules.transport = true;
+  cfg.coupling.mode =
+      (mode == 0) ? frehg::CouplingConfig::Mode::Sync : frehg::CouplingConfig::Mode::Subcycled;
+  cfg.surfaceWater.gravity = 9.81;
+  cfg.surfaceWater.friction.coefficient.constant = 0.03;
+  cfg.surfaceWater.friction.thinLayerDepth = 0.1;
+  cfg.surfaceWater.minDepth = 1.0e-5;
+  cfg.surfaceWater.wettingFaceDepth = 1.0e-3;
+  if (mode == 0) {
+    cfg.groundwater.timestep.dtInit = 4.0;
+    cfg.groundwater.timestep.dtMin = 4.0;
+    cfg.groundwater.timestep.dtMax = 4.0;
+  } else {
+    cfg.groundwater.timestep.dtInit = 1.0;
+    cfg.groundwater.timestep.dtMin = 0.1;
+    cfg.groundwater.timestep.dtMax = 10.0;
+  }
+  cfg.groundwater.specificStorage = 1.0e-5;
+  cfg.groundwater.reallocationSurplus = frehg::GroundwaterConfig::ReallocationSurplus::Redistribute;
+  cfg.groundwater.densityCoupling.enabled = density;
+  cfg.groundwater.densityCoupling.densityReallocationGradient = fixed;
+  frehg::SoilType soil;
+  soil.name = "sandy-clay-fast";
+  soil.ksx = soil.ksy = soil.ksz = 1.0e-5;
+  soil.thetaS = 0.38;
+  soil.thetaR = 0.10;
+  soil.vgAlpha = 2.7;
+  soil.vgN = 1.23;
+  soil.aev = 0.0;
+  cfg.soil.types = {soil};
+  cfg.soil.map.constantName = "sandy-clay-fast";
+  cfg.initialConditions.surface.eta.constant = 0.2;
+  cfg.initialConditions.groundwater.form = frehg::GroundwaterInitialConfig::Form::WaterTable;
+  cfg.initialConditions.groundwater.value.constant = -1.5;
+  cfg.transport.scheme.advection = frehg::TransportSchemeConfig::Advection::Superbee;
+  cfg.transport.consistentSurfaceUpdate = true;
+  cfg.transport.consistentSubsurfaceUpdate = fixed;
+  cfg.initialConditions.transport.surface.constant = 35.0;
+  cfg.initialConditions.transport.groundwater.constant = 10.0;
+  return cfg;
+}
+
+/// Salt the pond lost and the soil kept over a run, plus the worst
+/// per-step subsurface ledger residual and the final layer salinities.
+struct ColumnRun {
+  real_t lost = 0.0;
+  real_t kept = 0.0;
+  real_t worstResidual = 0.0;
+  real_t mass0 = 0.0;
+  std::vector<real_t> layers;
+};
+
+ColumnRun runInfiltratingColumn(int mode, bool density, bool fixed, real_t tEnd) {
+  MiniTransport mini;
+  mini.cfg = infiltratingColumnConfig(mode, density, fixed);
+  mini.build();
+  ColumnRun run;
+  run.mass0 = mini.transport->ownedSubsurfaceMass();
+  real_t before = run.mass0;
+  while (mini.t < tEnd - 1.0e-9) {
+    mini.step();
+    const real_t after = mini.transport->ownedSubsurfaceMass();
+    const frehg::transport::TransportAudit& a = mini.transport->audit();
+    run.lost -= a.exchange;
+    const real_t residual =
+        (after - before) - (-a.exchange + a.subsBoundary + a.subsAdjust + a.subsAnchor);
+    run.worstResidual = std::max(run.worstResidual, std::fabs(residual));
+    before = after;
+  }
+  run.kept = mini.transport->ownedSubsurfaceMass() - run.mass0;
+  for (int k = 0; k < 5; ++k) {
+    run.layers.push_back(interior3(mini.transport->subsurfaceScalar(), 1, 1, k));
+  }
+  return run;
+}
+
+void printColumn(const char* label, const ColumnRun& r) {
+  std::printf("[ infiltrating column ] %-22s kept %.4f of %.3f psu m3 (%.1f %%), worst ledger "
+              "residual %.2e, layers %.3f %.3f %.3f %.3f %.3f\n",
+              label, r.kept, r.lost, 100.0 * r.kept / r.lost, r.worstResidual, r.layers[0],
+              r.layers[1], r.layers[2], r.layers[3], r.layers[4]);
+}
+
+TEST(TransportModule, DensityReallocationGradientKeepsInfiltratedSalt) {
+  // Sync, density on. The freshwater gradient test reads the saline
+  // hydrostatic column as an upward gradient and swaps restore surpluses
+  // through the saturated layer each step, which the scalar does not
+  // follow; the anchor then deletes the salt. The density form keeps it.
+  const real_t tEnd = 6000.0;
+  const ColumnRun legacy = runInfiltratingColumn(0, true, false, tEnd);
+  const ColumnRun fixed = runInfiltratingColumn(0, true, true, tEnd);
+  const ColumnRun fresh = runInfiltratingColumn(0, false, true, tEnd);
+  printColumn("legacy (density on)", legacy);
+  printColumn("fixed (density on)", fixed);
+  printColumn("fixed (density off)", fresh);
+  ASSERT_GT(legacy.lost, 1.0);
+  EXPECT_LT(legacy.kept / legacy.lost, 0.80);
+  EXPECT_GT(fixed.kept / fixed.lost, 0.95);
+  // Density coupling no longer loses salt relative to the freshwater run
+  // (measured 99.9 % vs 97.2 %; the freshwater run's post-allocation drops
+  // more water, and the dropped water takes its salt along).
+  EXPECT_GT(fixed.kept / fixed.lost, fresh.kept / fresh.lost - 0.01);
+  EXPECT_LT(fixed.worstResidual, 1.0e-9 * fixed.mass0);
+}
+
+TEST(TransportModule, ConsistentSubsurfaceUpdateClosesTheSubcycledLedger) {
+  // Subcycled dt = 4 s, dtg up to 10 s, density off: the legacy update mixes
+  // the surface dt with the last substep's fluxes, loses salt and leaves the
+  // ledger open; the window update closes it and matches the sync result.
+  const real_t tEnd = 6000.0;
+  const ColumnRun legacy = runInfiltratingColumn(1, false, false, tEnd);
+  const ColumnRun fixed = runInfiltratingColumn(1, false, true, tEnd);
+  const ColumnRun sync = runInfiltratingColumn(0, false, true, tEnd);
+  printColumn("legacy subcycled", legacy);
+  printColumn("fixed subcycled", fixed);
+  printColumn("fixed sync", sync);
+  ASSERT_GT(legacy.lost, 1.0);
+  EXPECT_GT(legacy.worstResidual, 1.0e-6 * legacy.mass0);
+  EXPECT_LT(fixed.worstResidual, 1.0e-9 * fixed.mass0);
+  EXPECT_GT(fixed.kept / fixed.lost, 0.95);
+  EXPECT_NEAR(fixed.kept / fixed.lost, sync.kept / sync.lost, 0.02);
+  EXPECT_NEAR(fixed.layers[0], sync.layers[0], 0.05 * (sync.layers[0] - 10.0));
+}
+
+TEST(TransportModule, ConsistentSubsurfaceUpdateReducesToLegacyWithoutSubcycling) {
+  // Groundwater-only draining column (no interface term, no post-allocation
+  // transfers): dt = dtg and the window volume is q dtg, so the consistent
+  // update must reproduce the legacy arithmetic to rounding.
+  std::vector<real_t> profile[2];
+  for (int mode = 0; mode < 2; ++mode) {
+    MiniTransport mini;
+    frehg::FrehgConfig& cfg = mini.cfg;
+    cfg.simulation.id = "transport-column-consistent";
+    cfg.domain.nx = 1;
+    cfg.domain.ny = 1;
+    cfg.domain.nz = 24;
+    cfg.domain.dx = 1.0;
+    cfg.domain.dy = 1.0;
+    cfg.domain.dz = 0.05;
+    cfg.domain.bottomElevation.constant = 0.0;
+    cfg.time.dt = 2.0;
+    cfg.time.tEnd = 1.0e4;
+    cfg.time.outputInterval = 1.0e4;
+    cfg.modules.groundwater = true;
+    cfg.modules.transport = true;
+    cfg.groundwater.timestep.dtInit = 2.0;
+    cfg.groundwater.timestep.dtMin = 2.0;
+    cfg.groundwater.timestep.dtMax = 2.0;
+    cfg.groundwater.specificStorage = 0.0;
+    cfg.soil.types = {testSoil(1.0e-5)};
+    cfg.soil.map.constantName = "test";
+    cfg.initialConditions.groundwater.form = frehg::GroundwaterInitialConfig::Form::Moisture;
+    cfg.initialConditions.groundwater.value.constant = 0.3;
+    cfg.transport.scheme.advection = frehg::TransportSchemeConfig::Advection::Superbee;
+    cfg.transport.dispersionLongitudinal = 0.01;
+    cfg.transport.dispersionTransverse = 0.002;
+    cfg.transport.dispersionMolecular = 1.0e-9;
+    cfg.transport.consistentSubsurfaceUpdate = (mode == 1);
+    cfg.initialConditions.transport.groundwater.constant = 0.0;
+    mini.build();
+    for (int k = 8; k < 16; ++k) {
+      const real_t z = (static_cast<real_t>(k) - 11.5) / 4.0;
+      setInterior3(mini.transport->subsurfaceScalar(), 1, 1, k, std::exp(-4.0 * z * z));
+    }
+    mini.transport->refreshDerivedState(0.0);
+    for (int n = 0; n < 40; ++n) {
+      mini.step();
+    }
+    for (int k = 0; k < 24; ++k) {
+      profile[mode].push_back(interior3(mini.transport->subsurfaceScalar(), 1, 1, k));
+    }
+  }
+  real_t worst = 0.0;
+  for (int k = 0; k < 24; ++k) {
+    worst = std::max(worst, std::fabs(profile[0][static_cast<std::size_t>(k)] -
+                                      profile[1][static_cast<std::size_t>(k)]));
+  }
+  std::printf("[ draining column ] max |consistent - legacy| = %.3e\n", worst);
+  EXPECT_LT(worst, 1.0e-12);
 }
 
 }  // namespace

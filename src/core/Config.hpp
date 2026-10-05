@@ -213,6 +213,15 @@ struct DensityCouplingConfig {
   real_t betaSalineViscosity = 0.0022;   ///< legacy r_visc slope [L/g]
   real_t thermalExpansion = 0.0;         ///< beta_T [1/K] (Q5; 0 = off)
   real_t referenceTemperature = 20.0;    ///< T0 [C] for the thermal term
+  /// groundwater.density_coupling.reallocation_gradient: density (post-v2.0
+  /// opt-in). The post-allocation head-gradient split (legacy
+  /// check_head_gradient, groundwater.c:1074-1150) measures the vertical
+  /// gradient against freshwater gravity, dh/dz - 1. Under density coupling
+  /// a hydrostatic saline column has dh/dz = r_rho, so the legacy test sees
+  /// a spurious upward gradient and routes restore surpluses upward. The
+  /// density form subtracts the face density ratio instead — the gravity
+  /// term of the Darcy flux itself. Off by default (`freshwater`, legacy).
+  bool densityReallocationGradient = false;
 };
 
 /// groundwater: Richards module parameters.
@@ -415,6 +424,17 @@ struct TransportConfig {
   /// and the moving-cell-only limiter are golden-pinned (docs/theory/
   /// transport.md quirk 2).
   bool consistentSurfaceUpdate = false;
+  /// transport.subsurface_update: consistent (post-v2.0 opt-in): the
+  /// subsurface scalar moves with every volume the groundwater module moves
+  /// over the surface step. The face volumes are accumulated over all
+  /// subcycled substeps (legacy: the last substep's fluxes times the
+  /// surface dt), the post-allocation transfers are recorded on every face
+  /// they cross (legacy: on the receiver's face only), the mass basis is the
+  /// water content at the previous transport step, the surface-interface
+  /// diffusion acts on every wet step (legacy: only on steps with a nonzero
+  /// seepage rate) and the legacy one-sided interface dispersive gain is
+  /// dropped. Off by default (`legacy`): the b6 goldens pin the legacy update.
+  bool consistentSubsurfaceUpdate = false;
 };
 
 /// output.monitors[]: point-probe time series.
@@ -433,7 +453,7 @@ struct OutputConfig {
   std::vector<std::string> transportVariables;    ///< /transport/* selection
   std::vector<std::string> temperatureVariables;  ///< /temperature/* selection
   std::vector<MonitorConfig> monitors;            ///< point probes
-  real_t checkpointInterval = 0.0;  ///< 0 = off; final checkpoint always written
+  real_t checkpointInterval = 0.0;  ///< 0 = off (none written); > 0 also writes one at t_end
 };
 
 /// restart

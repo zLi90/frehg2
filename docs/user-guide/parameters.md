@@ -126,6 +126,7 @@ choice.
 | `groundwater.density_coupling.beta_saline_viscosity` | real ≥ 0 | no | 2.2e-3 | β_sv [L/g] (requires transport) |
 | `groundwater.density_coupling.thermal_expansion` | real ≥ 0 | no | 0 | β_T [1/K] thermal expansion (v2 Q5; requires temperature; 0 = thermally passive) |
 | `groundwater.density_coupling.reference_temperature` | real | no | 20 | T₀ [°C] for the thermal term (requires temperature) |
+| `groundwater.density_coupling.reallocation_gradient` | `freshwater` \| `density` | no | freshwater | vertical head gradient of the post-allocation split. `freshwater` (legacy, golden-pinned) tests dh/dz − 1, which reads a hydrostatic saline column (dh/dz = r_ρ) as an upward gradient: when a saturated layer separates two cells in saturated contact, their restore surpluses are swapped through it every step and the scalar cannot follow (the Nueces coupled case lost 70 % of its infiltrated salt). `density` tests dh/dz − r_ρ, the gravity term of the Darcy flux — recommended with density coupling |
 | `groundwater.evaporation.mode` | `bulk` | yes (in block) | — | v2 Q4 bulk-aerodynamic soil evaporation: potential rate from the `atmosphere` block, actual rate limited by the surface-layer soil relative humidity α₁ = min(1, 1.8·w_g/(w_g + 0.30)) (Geng & Boufadel Eq. 6; condensation passes through), applied as the top-face flux over the region. Requires `atmosphere`; uncoupled groundwater runs only; the region must not overlap a `groundwater_top` condition. Adds the cumulative `evaporation` column to `/monitor/gw_mass_audit` |
 | `groundwater.evaporation.region.polygon` | [x, y] list ≥ 3 | yes (in block) | — | the evaporation zone |
 
@@ -193,6 +194,7 @@ choice.
 | `transport.bounds.min` | real | no | 0 | scalar lower bound (replaces the legacy [0, 200] clamp; plan §3.2) |
 | `transport.bounds.max` | real | no | unbounded | scalar upper bound |
 | `transport.legacy_evap_allowance` | bool | no | false | v2 Q4: keep the legacy hardcoded +0.01/step limiter allowance on coupled dry evaporating columns instead of the exact in-step concentration factor (golden pinning) |
+| `transport.subsurface_update` | `legacy` \| `consistent` | no | legacy | subsurface salinity update (requires groundwater). `legacy` (golden-pinned) advects with the last subsurface substep's fluxes over the surface dt but divides by that substep's flux volume, so subcycled runs with dtg ≠ dt lose or gain salt outside every audit column, surface steps without a substep reuse stale fluxes, the surface-interface diffusion acts only on steps with seepage, and post-allocation transfers are recorded on the receiver's face only. `consistent` moves the scalar with every volume the groundwater module moved: face volumes summed over all substeps (transfers on every face crossed), the previous transport step's water content as the mass basis, the interface diffusion on every wet step, and no one-sided interface gain. Identical to `legacy` up to rounding when dt = dtg and nothing is reallocated; recommended for coupled salinity runs |
 | `transport.surface_update` | `legacy` \| `consistent` | no | legacy | surface salinity update. `legacy` divides the transported mass by the previous step's flux volume and clamps moving cells only (golden-pinned, [theory quirk 2](../theory/transport.md)); under unsteady wetting/drying it concentrates closing thin films above every input value and books the mismatch into `surf_anchor`. `consistent` divides by the current step's flux volume (the flow rates that moved the mass) and applies the local min/max limiter in every wet cell — recommended for tidal and wind-driven wetting/drying |
 
 ## temperature (v2 Q5; required section when the module is on)
@@ -241,7 +243,7 @@ temperature module writes the `/monitor/temperature_audit` heat ledger
 | `output.monitors[].i` | int ≥ 0 | yes | — | global cell index in i (< nx) |
 | `output.monitors[].j` | int ≥ 0 | yes | — | global cell index in j (< ny) |
 | `output.monitors[].variables` | list, ≥ 1 | yes | — | variables of enabled modules |
-| `output.checkpoint.interval` | real ≥ 0, whole seconds | no | 0 | 0 = off; final checkpoint always written |
+| `output.checkpoint.interval` | real ≥ 0, whole seconds | no | 0 | 0 = off (no checkpoints at all); > 0 also writes a final checkpoint at `t_end` |
 
 ## restart
 

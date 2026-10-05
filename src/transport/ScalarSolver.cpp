@@ -127,6 +127,7 @@ ScalarSpec ScalarSpec::salinity(const FrehgConfig& config) {
   spec.boundMax = tr.boundMax;
   spec.legacyEvapAllowance = tr.legacyEvapAllowance;
   spec.consistentSurfaceUpdate = tr.consistentSurfaceUpdate;
+  spec.consistentSubsurfaceUpdate = tr.consistentSubsurfaceUpdate;
   return spec;
 }
 
@@ -180,6 +181,7 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
   boundMax_ = hasBoundMax_ ? spec_.boundMax : 1.0e30;
   legacyEvapAllowance_ = spec_.legacyEvapAllowance;
   consistentSurface_ = spec_.consistentSurfaceUpdate;
+  consistentSubsurface_ = spec_.consistentSubsurfaceUpdate && subs_.active;
   if (spec_.exchange == SurfaceExchangeConfig::Mode::Bulk) {
     met_ = atm::MetForcing(config.atmosphere, config);
   }
@@ -255,6 +257,27 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
     // instances independent.)
     halo_.add(p + "gw_kx", subs_.kx);
     halo_.add(p + "gw_ky", subs_.ky);
+    flowX_ = subs_.qx;
+    flowY_ = subs_.qy;
+    flowZ_ = subs_.qzF;
+    if (consistentSubsurface_) {
+      if (subs_.qxWindow.size() == 0 || subs_.qyWindow.size() == 0 ||
+          subs_.qzWindow.size() == 0) {
+        log::fatal("transport.subsurface_update: consistent needs the groundwater "
+                   "module's window volumes (RichardsSolver::enableTransportWindow)");
+      }
+      wcT_ = Field3<real_t>(p + "wc_transport", ny2, nx2, nz);
+      Kokkos::deep_copy(wcT_, subs_.wc);
+      qxMean_ = Field3<real_t>(p + "qx_mean", subs_.qxWindow.extent(0),
+                               subs_.qxWindow.extent(1), subs_.qxWindow.extent(2));
+      qyMean_ = Field3<real_t>(p + "qy_mean", subs_.qyWindow.extent(0),
+                               subs_.qyWindow.extent(1), subs_.qyWindow.extent(2));
+      qzMean_ = Field3<real_t>(p + "qz_mean", subs_.qzWindow.extent(0),
+                               subs_.qzWindow.extent(1), subs_.qzWindow.extent(2));
+      flowX_ = qxMean_;
+      flowY_ = qyMean_;
+      flowZ_ = qzMean_;
+    }
   }
 
   buildBoundaryLists(boundaries);
@@ -555,6 +578,11 @@ void ScalarSolver::refreshDerivedState(real_t t) {
     audit_ = TransportAudit{};
     enforceSubsurfaceBc(t);
     halo_.exchangeWithCorners({p + "subs"});
+    if (consistentSubsurface_) {
+      // The mass basis of the next step: checkpoints are written after the
+      // transport step, whose last act re-based the scalar onto this θ.
+      Kokkos::deep_copy(wcT_, subs_.wc);
+    }
   }
   if (surf_.active) {
     // vsn reconstructs from the restored depth; fuOld/fvOld were restored

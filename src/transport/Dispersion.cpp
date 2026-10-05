@@ -37,7 +37,9 @@ void ScalarSolver::updateDispersionTensor() {
 
   Field3<real_t> dxx = dxx_, dyy = dyy_, dzz = dzz_;
   Field3<real_t> dxy = dxy_, dxz = dxz_, dyz = dyz_;
-  Field3<real_t> qx = subs_.qx, qy = subs_.qy, qzF = subs_.qzF;
+  // The step's advecting fluxes: the last substep's (legacy) or the window
+  // means (transport.subsurface_update: consistent; set by stepSubsurface).
+  Field3<real_t> qx = flowX_, qy = flowY_, qzF = flowZ_;
   Field3<real_t> wcs = subs_.wcs;
 
   Kokkos::parallel_for(

@@ -19,8 +19,9 @@ output:
     interval: 3600        # [s]; 0 = off
 ```
 
-Checkpoints land in the output file under `/checkpoint/<t>/...`. One is
-always written at `t_end`, even with `interval: 0`. Under adaptive stepping
+Checkpoints land in the output file under `/checkpoint/<t>/...`. With a
+positive interval one is also written at `t_end`; `interval: 0` (the
+default) writes none. Under adaptive stepping
 (groundwater-only and sync-coupled runs) the step generally crosses the
 checkpoint interval mid-step: the group key `<t>` is the crossed
 whole-second boundary, while the group's `t` attribute and the stored

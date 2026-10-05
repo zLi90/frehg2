@@ -160,7 +160,13 @@ Generate these files with small Python snippets in the case directory
     `transport.surface_update: consistent` for tidal flats, marshes and
     wind setdown. The `legacy` default (golden-pinned) can concentrate
     draining thin films above every input value and gain or lose salt
-    through the `surf_anchor` audit column.
+    through the `surf_anchor` audit column. **Coupled salinity**: also set
+    `transport.subsurface_update: consistent`, and with density coupling
+    `groundwater.density_coupling.reallocation_gradient: density`. The
+    legacy defaults lose infiltrated salt in the soil: 30 % kept under
+    density coupling, 67 % under subcycling with dtg > dt. Check the
+    salt that left the surface (`exchange`) against the subsurface gain
+    in `/monitor/transport_audit`.
 11. Surface `scalar_value` conditions: on a `discharge`-covered region
     they set the inflow concentration; elsewhere they hold the region's
     wet cells at the value (tide/stage salinity). For bare-soil

@@ -291,6 +291,7 @@ transport:
     molecular: 1.0e-10             # [m²/s]
   # bounds: {min: 0, max: 35}      # optional clamp (default [0, unbounded))
   # surface_update: consistent     # legacy (default) | consistent; see below
+  # subsurface_update: consistent  # legacy (default) | consistent; see below
 initial_conditions:
   transport:
     surface: {constant: 35.0}      # with the SWE module
@@ -323,12 +324,32 @@ loses salt, measured in the `surf_anchor` column of
 `/monitor/transport_audit`. `consistent` divides by the current step's
 flux volume and clamps every wet cell; use it for tidal flats and marshes.
 
+`subsurface_update` selects the subsurface concentration update (requires
+the groundwater module). The default `legacy` reproduces the original
+code. It advects with the last subsurface substep's fluxes over the
+surface step, which is conservative only when both modules take the same
+step, and it does not move salt with the water the post-allocation step
+redistributes. `consistent` moves the salt with every volume the
+groundwater module moved over the surface step: all substeps, every
+transfer, the surface–soil interface diffusion on every wet step. Use it
+for coupled salinity runs, together with
+`groundwater.density_coupling.reallocation_gradient: density` when density
+coupling is on (below). On a ponded infiltration test the soil keeps 97 %
+of the infiltrated salt with both settings, against 30 % (density on) or
+67 % (subcycled) with the defaults.
+
 Setting `groundwater.density_coupling.enabled: true` feeds the subsurface
 scalars back into the Darcy fluxes as density and viscosity ratios,
 r_rho = 1 + β_s·s − β_T·(T − T₀) and r_visc = 1/(1 + β_sv·s) — the
 baroclinic pathway saltwater-intrusion problems need (`benchmarks/b6-kuan`).
 The coefficients are keys under `density_coupling`:
 
+- `reallocation_gradient` (`freshwater`, the default and legacy form, or
+  `density`): how the post-allocation step judges the vertical head
+  gradient when it redistributes water. `freshwater` reads a hydrostatic
+  saline column as an upward gradient and can circulate water through a
+  saturated layer every step, which the salt does not follow. Set
+  `density` whenever density coupling is on;
 - `beta_saline` (β_s, default 7.44e-4, the legacy constant);
 - `beta_saline_viscosity` (β_sv, default 2.2e-3);
 - `thermal_expansion` (β_T, default 0, which leaves temperature without

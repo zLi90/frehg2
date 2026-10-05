@@ -228,6 +228,7 @@ foreach(case
     x-orient/gw-orient-base
     x-orient/transport-orient-base
     x-orient/conveyor-base
+    x-orient/coupled-salt-base
     g6-heat/g6a-bp
     g6-heat/g6b-ogata
     g6-heat/g6c-stallman
@@ -549,6 +550,17 @@ add_test(NAME regression.p1.b1_restart.aijkokkos
           --work ${CMAKE_BINARY_DIR}/regression/p1-b1-restart-aijkokkos)
 set_tests_properties(regression.p1.b1_restart.aijkokkos PROPERTIES
   LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# The §7.1 decomposition lane for the consistent subsurface salinity update
+# (transport.subsurface_update + density reallocation_gradient): window
+# volumes, per-face transfer paths and the vent volume in the halo layout.
+foreach(mode strict default)
+  add_test(NAME regression.coupled_salt_rank_invariance.${mode}
+    COMMAND ${_regress} rank-invariance-coupled-salt --mode ${mode} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/rank-coupled-salt-${mode})
+  set_tests_properties(regression.coupled_salt_rank_invariance.${mode} PROPERTIES
+    LABELS "regression;mpi" ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 1800)
+endforeach()
 
 # The §7.1 decomposition lane for the salinity transport module (the b6
 # gate is serial by design and g5 runs at one rank, so salinity halo /

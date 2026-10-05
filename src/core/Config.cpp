@@ -222,6 +222,8 @@ GroundwaterConfig extractGroundwater(const YAML::Node& node) {
     out.densityCoupling.thermalExpansion = valueOr<real_t>(dc["thermal_expansion"], 0.0);
     out.densityCoupling.referenceTemperature =
         valueOr<real_t>(dc["reference_temperature"], 20.0);
+    out.densityCoupling.densityReallocationGradient =
+        valueOr<std::string>(dc["reallocation_gradient"], "freshwater") == "density";
   }
   if (node["evaporation"].IsDefined()) {
     out.evaporation.enabled = true;  // mode "bulk" is the sole schema value
@@ -409,6 +411,8 @@ TransportConfig extractTransport(const YAML::Node& node) {
   out.legacyEvapAllowance = valueOr<bool>(node["legacy_evap_allowance"], false);
   out.consistentSurfaceUpdate =
       valueOr<std::string>(node["surface_update"], "legacy") == "consistent";
+  out.consistentSubsurfaceUpdate =
+      valueOr<std::string>(node["subsurface_update"], "legacy") == "consistent";
   return out;
 }
 
@@ -894,6 +898,8 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
             ? "redistribute"
             : "drop";
     node["density_coupling"]["enabled"] = gw.densityCoupling.enabled;
+    node["density_coupling"]["reallocation_gradient"] =
+        gw.densityCoupling.densityReallocationGradient ? "density" : "freshwater";
     // The per-term coefficients require their scalar's module (schema
     // cross-check) — mirror it or the r1 round-trip fails.
     if (cfg.modules.transport) {
@@ -1044,6 +1050,7 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     }
     node["legacy_evap_allowance"] = tr.legacyEvapAllowance;
     node["surface_update"] = tr.consistentSurfaceUpdate ? "consistent" : "legacy";
+    node["subsurface_update"] = tr.consistentSubsurfaceUpdate ? "consistent" : "legacy";
     root["transport"] = node;
   }
 

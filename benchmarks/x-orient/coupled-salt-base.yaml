@@ -1,0 +1,91 @@
+# x-orient coupled-salt-base — the decomposition lane of the consistent
+# subsurface salinity update (transport.subsurface_update: consistent with
+# groundwater.density_coupling.reallocation_gradient: density). Not a
+# dihedral battery: the harness runs it at 1, 2 and 4 ranks
+# (regression.coupled_salt_rank_invariance.*).
+#
+# An 8 x 8 walled basin on a tilted bed (input/cs_dem.dat): a 0.15 m stage
+# floods the west half with 35 psu water over 10 psu sandy-clay-like soil
+# (Ks raised to 1e-5 m/s so the soil responds within minutes), water table
+# 1.0 m down. Subcycled coupling (dt 4 s, dtg up to 10 s) exercises the
+# window accumulation; infiltration, lateral subsurface flow under the dry
+# east half, post-allocation transfers, and density coupling all cross both
+# rank interfaces of the 2 x 2 decomposition.
+simulation:
+  id: x-orient-coupled-salt
+  title: coupled salinity decomposition lane (consistent subsurface update)
+
+domain:
+  nx: 8
+  ny: 8
+  nz: 5
+  dx: 10.0
+  dy: 10.0
+  dz: 0.5
+  bottom_elevation: {file: input/cs_dem.dat}
+  follow_terrain: true
+  terrain_layers: uniform
+
+time:
+  dt: 4.0
+  t_end: 120
+  output_interval: 60
+
+modules:
+  surface_water: true
+  groundwater: true
+  transport: true
+
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-5
+  wetting_face_depth: 1.0e-3
+
+groundwater:
+  timestep: {dt_init: 1.0, dt_min: 0.1, dt_max: 10.0}
+  specific_storage: 1.0e-5
+  reallocation_surplus: redistribute
+  density_coupling: {enabled: true, reallocation_gradient: density}
+
+soil:
+  types:
+    - {name: fast-sandy-clay, ksx: 1.0e-5, ksy: 1.0e-5, ksz: 1.0e-5,
+       theta_s: 0.38, theta_r: 0.10, vg_alpha: 2.7, vg_n: 1.23, aev: 0.0}
+  map: {constant: fast-sandy-clay}
+
+coupling: {mode: subcycled}
+
+initial_conditions:
+  surface: {eta: {constant: 0.15}}
+  groundwater: {water_table: {constant: -1.0}}
+  transport:
+    surface: {constant: 35.0}
+    groundwater: {constant: 10.0}
+
+boundary_conditions:
+  - name: walls
+    region: {polygon: [[-0.1, -0.1], [80.1, -0.1], [80.1, 80.1], [-0.1, 80.1]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+transport:
+  scheme: {advection: superbee}
+  # No dispersivity: frehg2 applies it to volumetric face fluxes (a
+  # preserved legacy quirk), which on 100 m2 cells makes the surface-soil
+  # interface diffusion stiff enough to amplify solver rounding by ~1e4 in
+  # either update (0.5 m measured 8e-2 between rank counts at 120 s under
+  # the default solver tolerances, legacy and consistent alike).
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 1.0e-9}
+  surface_update: consistent
+  subsurface_update: consistent
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+    groundwater: [water_content]
+    transport: [concentration, concentration_surface]

@@ -23,6 +23,23 @@
 ///  - the legacy top-face advective leak of uncoupled superbee runs with a
 ///    head-condition top reduces to the donor value (tvd of an equal pair),
 ///    which is what this port evaluates directly.
+///
+/// transport.subsurface_update: consistent (post-v2.0 opt-in) moves the
+/// scalar with every volume the groundwater module moved over the surface
+/// step. The legacy update advects with the last substep's fluxes times
+/// the surface dt but divides by a flux volume built from the last
+/// substep's start moisture plus dtg times its divergence; under subcycling
+/// with dtg != dt the two disagree, and surface steps without a substep
+/// reuse stale fluxes (a third of the infiltrated salt was lost at
+/// dtg <= 10 s against dt = 4 s on the Nueces exchange checks). The
+/// consistent update instead advects with the window-mean face fluxes W/dt
+/// (W = Σ q dtg over the window's substeps, post-allocation transfers on
+/// every face they crossed — RichardsSolver::enableTransportWindow), builds
+/// the flux volume from the water content at the previous transport step
+/// plus the divergence of W, and drops the legacy one-sided interface
+/// dispersive gain (the exchange term already carries the interface
+/// diffusion, on both sides). With dt = dtg it reduces to the legacy update
+/// up to rounding, minus the one-sided gain.
 
 #include "transport/Limiters.hpp"
 #include "transport/ScalarSolver.hpp"
@@ -207,6 +224,35 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   // every added term an exact +0.0 — the salinity arithmetic is unchanged.
   const bool thermal = spec_.isTemperature;
   const real_t kappaFactor = spec_.kappaFactor;
+  const bool consistentSub = consistentSubsurface_;
+  // Time factor of the flux-volume divergence: the last substep (legacy) or
+  // the surface step the window-mean fluxes are defined over (consistent).
+  const real_t dtFlux = consistentSub ? dt : dtgLast;
+
+  if (consistentSub) {
+    // Window-mean face fluxes W/dt over every slot (halos included — the
+    // stencils read the same slots of these as of the per-step fluxes).
+    const real_t invDt = 1.0 / dt;
+    Field3<real_t> wx = subs_.qxWindow, wy = subs_.qyWindow, wz = subs_.qzWindow;
+    Field3<real_t> mx = qxMean_, my = qyMean_, mz = qzMean_;
+    Kokkos::parallel_for(
+        "transport_window_mean_xy",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
+            {0, 0, 0}, {static_cast<int>(mx.extent(0)), static_cast<int>(mx.extent(1)),
+                        static_cast<int>(mx.extent(2))}),
+        KOKKOS_LAMBDA(const int j, const int i, const int k) {
+          mx(j, i, k) = wx(j, i, k) * invDt;
+          my(j, i, k) = wy(j, i, k) * invDt;
+        });
+    Kokkos::parallel_for(
+        "transport_window_mean_z",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
+            {0, 0, 0}, {static_cast<int>(mz.extent(0)), static_cast<int>(mz.extent(1)),
+                        static_cast<int>(mz.extent(2))}),
+        KOKKOS_LAMBDA(const int j, const int i, const int k) {
+          mz(j, i, k) = wz(j, i, k) * invDt;
+        });
+  }
 
   stageSubsurfaceFarNeighbors();
   updateDispersionTensor();
@@ -237,9 +283,9 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   v.coupled = coupled;
 
   Field3<real_t> s = sSubs_, sm = smSubs_, sMin = sMin3_, sMax = sMax3_;
-  Field3<real_t> qx = subs_.qx, qy = subs_.qy, qzF = subs_.qzF;
+  Field3<real_t> qx = flowX_, qy = flowY_, qzF = flowZ_;
   Field3<real_t> kx = subs_.kx, ky = subs_.ky, kzLower = kzLower_, kzFace = subs_.kzF;
-  Field3<real_t> wcn = subs_.wcn, wcs = subs_.wcs;
+  Field3<real_t> wcn = consistentSub ? wcT_ : subs_.wcn, wcs = subs_.wcs;
   Field3<real_t> dz3d = subs_.dz3d, ax = subs_.ax, ay = subs_.ay;
   Field3<real_t> fxm = sFarXm3_, fxp = sFarXp3_, fym = sFarYm3_, fyp = sFarYp3_;
   Field3<PetscInt> gid = grid_.gid3();
@@ -467,7 +513,7 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           // leaves their top dispersive flux at zero — together with the
           // zero advective value above, the total scalar flux through the
           // face is exactly zero (the Eq. (7) relation, discretized).
-          if (coupled && dept(j, i) > 0.0) {
+          if (coupled && !consistentSub && dept(j, i) > 0.0) {
             // Solute molecular diffusion is pore-water-only (times theta_s);
             // thermal conduction is a bulk property used as-is (V2-A17).
             const real_t molBase = thermal ? molecular : molecular * wcs(j, i, k);
@@ -605,7 +651,7 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         const real_t kap = kappaFactor * (1.0 - wcsUpd(j, i, k));
         const real_t vgflux =
             (wcn(j, i, k) + kap) * volume +
-            dtgLast * (qx(j, i, k) - qx(j, i - 1, k) + qy(j, i, k) - qy(j - 1, i, k) +
+            dtFlux * (qx(j, i, k) - qx(j, i - 1, k) + qy(j, i, k) - qy(j - 1, i, k) +
                        qzF(j, i, k + 1) - qzF(j, i, k));
         real_t value = (vgflux > 0.0) ? sm(j, i, k) / vgflux : 0.0;
         const real_t raw = value;
@@ -638,7 +684,7 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           // neighbor extrema — under zero total scalar flux the top cell
           // must not be clipped to a fresher neighbor — and the allowance
           // only ever widens it.
-          const real_t interior = vgflux + dtgLast * qzF(j, i, k);
+          const real_t interior = vgflux + dtFlux * qzF(j, i, k);
           const real_t sOld = s(j, i, k);
           if (sOld < lo) {
             lo = sOld;
@@ -707,6 +753,10 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
       });
 
   halo_.exchangeWithCorners({spec_.prefix + "_subs"});
+  if (consistentSub) {
+    // The mass basis of the next step: the θ this step re-based onto.
+    Kokkos::deep_copy(wcT_, subs_.wc);
+  }
 }
 
 void ScalarSolver::enforceSubsurfaceBc(real_t t) {

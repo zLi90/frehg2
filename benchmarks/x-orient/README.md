@@ -11,6 +11,7 @@ under a second serial. The regression harness owns them
 | `swe-orient-base.yaml` | `regression.swe_orient` | 8 dihedral transforms of a rain-fed uneven-bed basin with walls and a single-cell `outflow` outlet — SWE orientation symmetry, and `outflow` on all four edges (the V2-A11 cells) |
 | `gw-orient-base.yaml` | `regression.gw_orient` | 8 dihedral transforms of a two-soil saturated block — Richards lateral machinery plus `head` (hydrostatic + constant-pressure) and side `flux` on all four edges |
 | `transport-orient-base.yaml` | `regression.transport_orient`, `regression.tracer_rank_invariance.*` | 8 dihedral transforms of a walled sloshing basin advecting a tracer blob — the advection/limiter scheme's own orientation symmetry (no boundary throughflow), and the salinity-under-MPI lane |
+| `coupled-salt-base.yaml` | `regression.coupled_salt_rank_invariance.*` | not a battery: a walled, half-flooded tilted basin over sandy-clay-like soil, run at 1/2/4 ranks — the consistent subsurface salinity update (`transport.subsurface_update: consistent`, density `reallocation_gradient`) under subcycled coupling and density across rank interfaces |
 | `conveyor-base.yaml` | `regression.surface_bc_sides` | 4 rotations x {uncoupled, coupled}: single-cell `discharge` + riding `scalar_value` + `eta` outlet column, judged by absolute per-side criteria |
 
 Design rules the harness relies on (see the per-case headers):

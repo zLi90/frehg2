@@ -589,6 +589,67 @@ TEST_F(ConfigTest, RejectsScalarCauchyInCoupledRuns) {
       << joined(result);
 }
 
+TEST_F(ConfigTest, SubsurfaceUpdateAndReallocationGradientParseAndRoundTrip) {
+  // transport.subsurface_update and groundwater.density_coupling.
+  // reallocation_gradient (post-v2.0 opt-ins): both default to the legacy
+  // behavior, round-trip through the resolved configuration, and reject
+  // unknown values.
+  const std::string base = kGwTransportConfig;
+  const frehg::FrehgConfig byDefault = frehg::loadConfig(writeConfig(base));
+  EXPECT_FALSE(byDefault.transport.consistentSubsurfaceUpdate);
+  EXPECT_FALSE(byDefault.groundwater.densityCoupling.densityReallocationGradient);
+  const std::string resolvedDefault = frehg::resolvedConfigYaml(byDefault);
+  EXPECT_NE(resolvedDefault.find("subsurface_update: legacy"), std::string::npos);
+  EXPECT_NE(resolvedDefault.find("reallocation_gradient: freshwater"), std::string::npos);
+
+  std::string text = base;
+  const std::string trNeedle = "  scheme: {advection: upwind}";
+  text.replace(text.find(trNeedle), trNeedle.size(),
+               "  scheme: {advection: upwind}\n  subsurface_update: consistent");
+  const std::string gwNeedle = "  specific_storage: 1.0e-5";
+  text.replace(text.find(gwNeedle), gwNeedle.size(),
+               "  specific_storage: 1.0e-5\n"
+               "  density_coupling: {enabled: true, reallocation_gradient: density}");
+  const ValidationResult ok = validate(text);
+  EXPECT_TRUE(ok.ok()) << joined(ok);
+  const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(text));
+  EXPECT_TRUE(cfg.transport.consistentSubsurfaceUpdate);
+  EXPECT_TRUE(cfg.groundwater.densityCoupling.densityReallocationGradient);
+  const std::string resolved = frehg::resolvedConfigYaml(cfg);
+  EXPECT_NE(resolved.find("subsurface_update: consistent"), std::string::npos);
+  EXPECT_NE(resolved.find("reallocation_gradient: density"), std::string::npos);
+
+  std::string badUpdate = base;
+  badUpdate.replace(badUpdate.find(trNeedle), trNeedle.size(),
+                    "  scheme: {advection: upwind}\n  subsurface_update: windowed");
+  const ValidationResult bad1 = validate(badUpdate);
+  ASSERT_FALSE(bad1.ok());
+  EXPECT_TRUE(hasError(bad1, "invalid value 'windowed'")) << joined(bad1);
+
+  std::string badGradient = base;
+  badGradient.replace(badGradient.find(gwNeedle), gwNeedle.size(),
+                      "  specific_storage: 1.0e-5\n"
+                      "  density_coupling: {enabled: true, reallocation_gradient: saline}");
+  const ValidationResult bad2 = validate(badGradient);
+  ASSERT_FALSE(bad2.ok());
+  EXPECT_TRUE(hasError(bad2, "invalid value 'saline'")) << joined(bad2);
+}
+
+TEST_F(ConfigTest, RejectsConsistentSubsurfaceUpdateWithoutGroundwater) {
+  std::string base = kBaseConfig;
+  const std::string needle = "modules: {surface_water: true}";
+  base.replace(base.find(needle), needle.size(),
+               "modules: {surface_water: true, transport: true}");
+  const std::string icNeedle = "initial_conditions: {surface: {eta: {constant: 0.0}}}";
+  base.replace(base.find(icNeedle), icNeedle.size(),
+               "initial_conditions:\n  surface: {eta: {constant: 0.0}}\n"
+               "  transport: {surface: {constant: 0.0}}");
+  const ValidationResult result = validate(base + "transport: {subsurface_update: consistent}\n");
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result, "subsurface_update: consistent requires modules.groundwater"))
+      << joined(result);
+}
+
 TEST_F(ConfigTest, RejectsScalarCauchyWithoutTransport) {
   std::string text = kGwTransportConfig;
   const std::string needle = "modules: {groundwater: true, transport: true}";

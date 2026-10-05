@@ -336,7 +336,8 @@ Spec buildRootSchema() {
                   {"beta_saline", realNonNegative(false)},
                   {"beta_saline_viscosity", realNonNegative(false)},
                   {"thermal_expansion", realNonNegative(false)},
-                  {"reference_temperature", real(false)}})},
+                  {"reference_temperature", real(false)},
+                  {"reallocation_gradient", enumeration(false, {"freshwater", "density"})}})},
             // Bulk-aerodynamic soil evaporation over a region (v2 Q4
             // §3.2); dependencies (atmosphere block, uncoupled runs) are
             // cross-field checks.
@@ -367,7 +368,8 @@ Spec buildRootSchema() {
                                 {"molecular", realNonNegative(false)}})},
             {"bounds", map({{"min", real(false)}, {"max", real(false)}})},
             {"legacy_evap_allowance", boolean(false)},
-            {"surface_update", enumeration(false, {"legacy", "consistent"})}})},
+            {"surface_update", enumeration(false, {"legacy", "consistent"})},
+            {"subsurface_update", enumeration(false, {"legacy", "consistent"})}})},
       {"temperature",
        // The second registered scalar (v2 Q5, plan §4.1/V2-A17). The
        // thermal parameters' module dependencies are cross-field checks.
@@ -908,6 +910,18 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
                      "bulk soil evaporation applies to uncoupled groundwater runs "
                      "only (the coupler owns the top exchange)");
       }
+    }
+  }
+
+  // transport.subsurface_update: consistent rewires the subsurface scalar
+  // update onto the groundwater module's window volumes; without that
+  // module there is no subsurface scalar to update.
+  {
+    const YAML::Node update = sub(root, "transport", "subsurface_update");
+    if (update.IsDefined() && update.IsScalar() && update.as<std::string>() == "consistent" &&
+        !gw) {
+      ctx.addError("transport.subsurface_update",
+                   "subsurface_update: consistent requires modules.groundwater: true");
     }
   }
 

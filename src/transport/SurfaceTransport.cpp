@@ -69,6 +69,9 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   const bool superbee = superbee_;
   const bool coupled = subs_.active && cpl_.active;
   const bool consistent = consistentSurface_;
+  // transport.subsurface_update: consistent — the exchange side of the
+  // consistent subsurface update (see the exchange block below).
+  const bool consistentExchange = coupled && consistentSubsurface_;
   const real_t minDepth = surf_.minDepth;
   const real_t limHi = boundMax_;
   const real_t limLo = boundMin_;
@@ -109,6 +112,7 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   Field2<real_t> uu = surf_.uu, vv = surf_.vv, Fu = surf_.fu, Fv = surf_.fv;
   Field2<real_t> Asx = surf_.asx, Asy = surf_.asy, rainMask = surf_.rainMask;
   Field2<real_t> qss = coupled ? cpl_.qss : Field2<real_t>();
+  Field2<real_t> vent = consistentExchange ? cpl_.ventVolume : Field2<real_t>();
   Field3<real_t> ksz = coupled ? subs_.ksz : Field3<real_t>();
   Field3<real_t> dz3d = coupled ? subs_.dz3d : Field3<real_t>();
   Field3<PetscInt> gid = grid_.gid3();
@@ -230,7 +234,21 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
           if (kTop >= 0) {
             topKsz = ksz(j, i, kTop);
             const real_t diffusive = 2.0 * dzzTop(j, i) / dz3d(j, i, kTop);
-            if (qss(j, i) > 0.0) {
+            if (consistentExchange) {
+              // The interface diffusion acts on every wet step, not only on
+              // steps whose seepage rate is nonzero (subcycled windows
+              // without a substep have qss = 0), and the post-allocation's
+              // vented water arrives at the top-cell concentration.
+              if (qss(j, i) > 0.0 && dept(j, i) > 0.0) {
+                rate = qss(j, i) * sKp(j, i);
+              } else if (qss(j, i) < 0.0) {
+                rate = qss(j, i) * s(j, i);
+              }
+              if (dept(j, i) > 0.0) {
+                rate += diffusive * (sKp(j, i) - s(j, i));
+              }
+              rate += vent(j, i) / (cellArea * dt) * sKp(j, i);
+            } else if (qss(j, i) > 0.0) {
               if (dept(j, i) > 0.0) {
                 rate = qss(j, i) * sKp(j, i) + diffusive * (sKp(j, i) - s(j, i));
               }
@@ -300,6 +318,9 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
             if (dept(j, i) > 0.0) {
               v += dv;
             }
+          }
+          if (consistentExchange) {
+            v += vent(j, i);  // the vented water is already in the depth
           }
         }
         vflux(j, i) = v;

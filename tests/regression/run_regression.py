@@ -3093,6 +3093,64 @@ def gate_rank_invariance_tracer(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def gate_rank_invariance_coupled_salt(args: argparse.Namespace) -> int:
+    """The §7.1 decomposition lane for the consistent subsurface salinity
+    update (transport.subsurface_update: consistent with
+    groundwater.density_coupling.reallocation_gradient: density) — the
+    'subsurface_update + MPI' §8.3 cell: x-orient/coupled-salt-base.yaml at
+    1/2/4 ranks. The window volumes, the per-face post-allocation path, the
+    vent volume and the transport-step mass basis all live in the halo
+    layout, so a staging error shows at the interfaces immediately. The
+    120 s horizon stays ahead of the saturation-front cell crossings that
+    amplify reduction-order rounding in every coupled lane (P2 finding;
+    measured here ~1e-3 by 3600 s for the legacy update too). Strict bound
+    1e-7: measured 1.1e-8. Default bound 2e-2: measured 7.3e-3, set by the
+    flow itself — the per-rank block-Jacobi/ICC preconditioner at rtol 1e-8
+    moves the unsaturated water content by 4.6e-3..5.7e-3 between rank
+    counts in the legacy update as well."""
+    strict = args.mode == "strict"
+    extra = (STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW) if strict else []
+    limit = 1.0e-7 if strict else 2.0e-2
+    outputs = {}
+    for ranks in (1, 2, 4):
+        case_dir = stage_case(args.repo, "x-orient", args.work / f"n{ranks}")
+        config = case_dir / "coupled-salt-base.yaml"
+        decomposition = {1: (1, 1), 2: (2, 1), 4: (2, 2)}[ranks]
+
+        def set_ranks(doc, decomposition=decomposition):
+            doc["domain"]["decomposition"] = {"mpi_nx": decomposition[0],
+                                              "mpi_ny": decomposition[1]}
+
+        rewrite_config(config, set_ranks)
+        run_case(args.frehg, config, case_dir, args.mpiexec, ranks, extra)
+        outputs[ranks] = case_dir / "out" / "output.h5"
+    ok = True
+    with h5py.File(outputs[1], "r") as base:
+        salted = float(np.nanmax(base["/transport/concentration/120"][:]))
+        moved = salted > 10.5
+        print(f"  n=1: subsurface salinity reaches {salted:.3f} psu (needs > 10.5)"
+              f"{'' if moved else ' FAIL'}")
+        ok &= moved
+        for ranks in (2, 4):
+            with h5py.File(outputs[ranks], "r") as other:
+                worst, where = 0.0, ""
+                for group in ("/surface/eta", "/groundwater/water_content",
+                              "/transport/concentration",
+                              "/transport/concentration_surface"):
+                    for t in base[group]:
+                        a = base[f"{group}/{t}"][:]
+                        b = other[f"{group}/{t}"][:]
+                        scale = max(float(np.nanmax(np.abs(a))), 1.0e-12)
+                        diff = float(np.nanmax(np.abs(a - b))) / scale
+                        if diff > worst:
+                            worst, where = diff, f"{group}/{t}"
+                print(f"  n=1 vs n={ranks} [{args.mode}]: max rel diff = "
+                      f"{worst:.3e} at {where} (allowed {limit:.0e})")
+                ok &= worst <= limit
+    print(f"coupled salinity rank invariance ({args.mode}):", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def gate_wind_drydown(args: argparse.Namespace) -> int:
     """§8.3 pair closure wind + wetting/drying (the v1 lesson's named
     pair; g9c deliberately grazes without crossing): the g9c sloping
@@ -3452,6 +3510,7 @@ def main() -> int:
                                          "surface-bc-sides", "wind-restart",
                                          "evap-restart", "b6-subcycled",
                                          "rank-invariance-tracer",
+                                         "rank-invariance-coupled-salt",
                                          "wind-drydown", "terrain-heat",
                                          "two-scalar-restart", "evap-heat",
                                          "heat-subcycled"])
@@ -3577,6 +3636,8 @@ def main() -> int:
         return gate_b6_subcycled(args)
     if args.gate == "rank-invariance-tracer":
         return gate_rank_invariance_tracer(args)
+    if args.gate == "rank-invariance-coupled-salt":
+        return gate_rank_invariance_coupled_salt(args)
     if args.gate == "wind-drydown":
         return gate_wind_drydown(args)
     if args.gate == "terrain-heat":
