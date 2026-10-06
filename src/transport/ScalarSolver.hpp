@@ -152,12 +152,12 @@ struct SubsurfaceWiring {
   Field2<int> sideCodeYm;     ///< y- side code
   Field2<int> sideCodeXm;     ///< x- side code (temperature admission, V2-A17)
   Field2<int> sideCodeXp;     ///< x+ side code
-  /// Window face volumes [m^3] since the last transport step, qx/qy/qzF
-  /// layouts (RichardsSolver::windowVolume*; transport.subsurface_update:
-  /// consistent only — empty otherwise).
-  Field3<real_t> qxWindow;
-  Field3<real_t> qyWindow;
-  Field3<real_t> qzWindow;
+  // Window face volumes since the last transport step
+  // (RichardsSolver::windowVolume*; transport.subsurface_update: consistent
+  // only — empty otherwise).
+  Field3<real_t> qxWindow;    ///< x face window volume [m^3] (qx layout)
+  Field3<real_t> qyWindow;    ///< y face window volume [m^3] (qy layout)
+  Field3<real_t> qzWindow;    ///< z face window volume [m^3] (qzF layout)
 };
 
 /// Coupler state the transport reads in coupled runs.
