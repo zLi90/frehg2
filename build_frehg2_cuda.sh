@@ -873,14 +873,42 @@ if ! first_existing "$PREFIX/lib/petsc/conf/petscvariables" "$PREFIX/lib64/petsc
     --with-cuda=1 --with-cuda-dir="$CUDA_DIR" --with-cuda-arch="$ARCH_NUM"
     --with-make-np="$PETSC_MAKE_NP"
   )
-  [[ "$MPI_GPU_AWARE" -eq 1 ]] || PETSC_ARGS+=( --download-hypre-configure-arguments=--disable-gpu-aware-mpi )
+  # hypre's extra configure arguments (appended last by PETSc, so they win):
+  #  - --disable-gpu-aware-mpi without a CUDA-aware MPI (see above);
+  #  - LIBS=-ldl: hypre's CUDA objects pull in NVIDIA's header-only NVTX v3
+  #    through CUB/Thrust, whose loader calls dlopen/dlclose, and hypre links
+  #    libHYPRE.so with -Wl,-z,defs (no undefined symbols). Before glibc 2.34
+  #    (RHEL/CentOS 7-8) those live in libdl, which hypre's link line lacks:
+  #    "undefined reference to `dlclose'" (first seen on the A800 cluster).
+  #    Harmless on newer glibc, where libdl is an empty stub that still links.
+  #    PETSc passes hypre no LIBS of its own outside cross builds.
+  HYPRE_EXTRA=( LIBS=-ldl )
+  [[ "$MPI_GPU_AWARE" -eq 1 ]] || HYPRE_EXTRA=( --disable-gpu-aware-mpi "${HYPRE_EXTRA[@]}" )
+  PETSC_ARGS+=( --download-hypre-configure-arguments="${HYPRE_EXTRA[*]}" )
   read -r -a PETSC_USER_EXTRA <<<"${FREHG_PETSC_EXTRA:-}"
   PETSC_ARGS+=( ${PETSC_USER_EXTRA[@]+"${PETSC_USER_EXTRA[@]}"} )
   dump_petsc_log() { # surface the real error buried in PETSc's logs
-    local log="$1"
+    local log="$1" n
     [[ -f "$log" ]] || return 0
-    echo "======== $log: compiler errors / OOM markers ========" >&2
-    grep -nE 'error:|fatal error|Killed|cannot allocate|out of memory|virtual memory exhausted' "$log" | tail -n 60 >&2 || true
+    # configure.log is full of EXPECTED failures (PETSc's probe programs:
+    # MPI vendor macros, Intel/ARM flags, absent Kokkos backends), so a plain
+    # grep for "error:" shows noise. A failed downloaded package is reported
+    # once as "Error running <step> on <PACKAGE>: <its stdout+stderr>"; show
+    # the matching lines of that block first.
+    n="$(grep -nE 'Error running (configure|make|make; make install|cmake) on ' "$log" | head -n 1 | cut -d: -f1)"
+    if [[ -n "$n" ]]; then
+      echo "======== $log: the failing package step (from line $n) ========" >&2
+      sed -n "${n}p" "$log" | cut -c1-300 >&2
+      tail -n +"$n" "$log" \
+        | grep -nE -B2 -A2 'error|fatal|cannot find|undefined reference|No such file|not found|Killed|out of memory|Error [0-9]' \
+        | cut -c1-400 | head -n 120 >&2 || true
+      echo "======== the same block, last 40 lines before PETSc's summary ========" >&2
+      tail -n +"$n" "$log" | grep -n -m 1 'UNABLE to CONFIGURE' >/dev/null \
+        && tail -n +"$n" "$log" | sed '/UNABLE to CONFIGURE/q' | tail -n 40 | cut -c1-400 >&2
+    else
+      echo "======== $log: compiler errors / OOM markers ========" >&2
+      grep -nE 'error:|fatal error|Killed|cannot allocate|out of memory|virtual memory exhausted' "$log" | tail -n 60 >&2 || true
+    fi
     echo "======== $log: last 80 lines ========" >&2
     tail -n 80 "$log" >&2 || true
   }
@@ -964,9 +992,42 @@ cmake --build "$BUILD_ROOT" --parallel "$JOBS"
 [[ -x "$EXE" ]] || die "CMake finished but expected executable $EXE was not produced."
 # Link evidence: every library resolves and exactly ONE libkokkoscore (ours).
 LDD_OUT="$(ldd "$EXE" 2>&1 || true)"
-if grep -q 'not found' <<<"$LDD_OUT"; then
-  grep 'not found' <<<"$LDD_OUT" >&2
-  die "$EXE has unresolved shared libraries (see above). Check LD_LIBRARY_PATH and the loaded modules."
+# ldd also lists optional ELF filter entries (DT_AUXILIARY / DT_FILTER) as
+# "=> not found". A compiler flag like -fvisibility=hidden that reaches GNU ld
+# directly (via nvcc) is read as "-f visibility=hidden": the auxiliary filter
+# "visibility=hidden". The loader skips a missing auxiliary filter, so only
+# DT_NEEDED entries are real missing libraries; readelf tells them apart.
+MISSING="$(awk '/=> not found/ {print $1}' <<<"$LDD_OUT" | sort -u)"
+if [[ -n "$MISSING" ]]; then
+  ELF_OBJS=( "$EXE" )
+  while IFS= read -r lib; do ELF_OBJS+=( "$lib" ); done \
+    < <(awk '/=> \// {print $3}' <<<"$LDD_OUT" | sort -u)
+  HAVE_READELF=0
+  command -v readelf >/dev/null 2>&1 && HAVE_READELF=1
+  REAL_MISSING=()
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    kind=unknown; owner=""
+    if [[ "$HAVE_READELF" -eq 1 ]]; then
+      for obj in "${ELF_OBJS[@]}"; do
+        dyn="$(readelf -d "$obj" 2>/dev/null || true)"
+        if grep -qF "Shared library: [$name]" <<<"$dyn"; then kind=needed; owner="$obj"; break; fi
+        if grep -qF "Auxiliary library: [$name]" <<<"$dyn" || grep -qF "Filter library: [$name]" <<<"$dyn"; then
+          kind=auxiliary; owner="$obj"
+        fi
+      done
+    fi
+    if [[ "$kind" == auxiliary ]]; then
+      warn "ldd lists '$name => not found', but it is an optional ELF filter entry (DT_AUXILIARY/DT_FILTER) in $owner, not a library dependency; the loader ignores it. Continuing."
+    else
+      REAL_MISSING+=( "$name${owner:+ (needed by $owner)}" )
+    fi
+  done <<<"$MISSING"
+  if [[ ${#REAL_MISSING[@]} -gt 0 ]]; then
+    printf '  missing: %s\n' "${REAL_MISSING[@]}" >&2
+    [[ "$HAVE_READELF" -eq 1 ]] || warn "readelf is unavailable, so filter entries could not be told apart from missing libraries."
+    die "$EXE has unresolved shared libraries (see above). Check LD_LIBRARY_PATH and the loaded modules."
+  fi
 fi
 KOKKOS_CORES="$(awk '/libkokkoscore/ {print $3}' <<<"$LDD_OUT" | sort -u)"
 [[ -n "$KOKKOS_CORES" && "$(wc -l <<<"$KOKKOS_CORES")" -eq 1 ]] \

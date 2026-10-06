@@ -133,6 +133,15 @@ LinearSystem::LinearSystem(MPI_Comm comm, const std::string& prefix, PetscInt nL
                             << "' — a -" << prefix_ << "vec_type override cannot "
                                "select host types on a device build (v2 plan §2B.2)");
     }
+    // The same rule for the matrix: setValues hands MatSetValuesCOO a device
+    // pointer, which a host MATAIJ would read as host memory (a raw SIGSEGV
+    // in a --with-debugging=0 PETSc).
+    if (kOnDevice && std::strstr(matTypeActual, "kokkos") == nullptr) {
+      log::fatal(log::msg() << "LinearSystem('" << prefix_ << "'): device build with a "
+                            << "non-Kokkos matrix type '" << matTypeActual
+                            << "' — a -" << prefix_ << "mat_type override cannot "
+                               "select host types on a device build (v2 plan §2B.2)");
+    }
   }
 
   FREHG_PETSC_CHECK(KSPCreate(comm_, &ksp_));
@@ -268,8 +277,15 @@ void LinearSystem::setPattern(const Kokkos::View<PetscInt*, MemSpace>& cooRows,
                           << cooRows.extent(0) << " vs " << cooCols.extent(0) << ")");
   }
   // PETSc may reorder the index arrays internally, so hand it scratch copies.
-  Kokkos::View<PetscInt*, MemSpace> rows("coo_rows_scratch", cooRows.extent(0));
-  Kokkos::View<PetscInt*, MemSpace> cols("coo_cols_scratch", cooCols.extent(0));
+  // They must be HOST memory on every build: MatSetPreallocationCOO reads
+  // and rewrites coo_i/coo_j on the host for every matrix type, aijkokkos
+  // included (PETSc 3.25 MatSetPreallocationCOO_SeqAIJKokkos and _MPIAIJKokkos
+  // forward to the SeqAIJ/MPIAIJ host routines; only MatSetValuesCOO's values
+  // go through a memory-type check). Device pointers here were the first
+  // fault of the first real GPU run (SIGSEGV in the SurfaceSolver
+  // constructor on an A800). On host builds this is the same copy as before.
+  Kokkos::View<PetscInt*, Kokkos::HostSpace> rows("coo_rows_scratch", cooRows.extent(0));
+  Kokkos::View<PetscInt*, Kokkos::HostSpace> cols("coo_cols_scratch", cooCols.extent(0));
   Kokkos::deep_copy(rows, cooRows);
   Kokkos::deep_copy(cols, cooCols);
   Kokkos::fence();
