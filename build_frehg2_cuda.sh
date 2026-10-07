@@ -93,7 +93,13 @@
 #   longest under nvcc.
 #
 # OPTIONAL OVERRIDES (environment variables)
-#   FREHG_PREFIX=$HOME/frehg-deps-cuda   dependency prefix (NOT the CPU one)
+#   FREHG_PREFIX=$HOME/frehg-deps-cuda   dependency prefix (NOT the CPU one).
+#                                        One prefix = one MPI: to build against
+#                                        another MPI module, give it a new
+#                                        prefix (the script stops otherwise)
+#   FREHG_BUILD_NAME=build-cuda          frehg2 build directory inside the repo
+#                                        (build-<name>; rebuilt from scratch);
+#                                        a second name keeps the first binary
 #   FREHG_MODULE_CMAKE=cmake/3.31.6      exact module names; without them the
 #   FREHG_MODULE_COMPILER=gcc/13.2.0     site defaults shown are used if
 #   FREHG_MODULE_CUDA=cuda/12.6          available, otherwise discovered.
@@ -153,7 +159,12 @@ fi
 PREFIX="${FREHG_PREFIX:-$HOME/frehg-deps-cuda}"
 PREFIX="${PREFIX%/}"
 SRC_CACHE="$PREFIX/src-cache"
-BUILD_ROOT="$ROOT_DIR/build-cuda"
+BUILD_NAME="${FREHG_BUILD_NAME:-build-cuda}"
+# It is removed and rebuilt below, so only a plain build-<name> directory in
+# the repository is accepted (never the CPU build's build/).
+[[ "$BUILD_NAME" =~ ^build-[A-Za-z0-9._-]+$ ]] \
+  || { echo "ERROR: FREHG_BUILD_NAME='$BUILD_NAME' must look like build-<name> (letters, digits, . _ -), e.g. build-cuda-gpumpi." >&2; exit 1; }
+BUILD_ROOT="$ROOT_DIR/$BUILD_NAME"
 EXE="$BUILD_ROOT/src/frehg"
 JOBS="${FREHG_JOBS:-${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-${SLURM_NTASKS:-4}}}}"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || JOBS=4
@@ -607,6 +618,14 @@ say "4 of 10: Load MPI and detect whether it is GPU-aware (CUDA-aware)"
 # module can carry its own HPC-X MPI).
 load_module MPI "$FREHG_MODULE_MPI" "$SITE_MODULE_MPI" '(openmpi|OpenMPI|mpi/openmpi|mpich|MPICH|intel-mpi|impi)/[0-9].*'
 need_command mpicc
+# A CUDA-aware MPI module often loads the CUDA toolkit it was built with as a
+# prerequisite (openmpi/4.1.6-gpu loads cuda/12.4 on the A800 cluster). That
+# would swap nvcc on PATH under the toolkit selected above and mix two CUDA
+# versions in one build. Require the MPI module to leave the selection alone.
+NVCC_AFTER_MPI="$(readlink -f "$(command -v nvcc 2>/dev/null)" 2>/dev/null || true)"
+if [[ -n "$NVCC_AFTER_MPI" && "$NVCC_AFTER_MPI" != "$(readlink -f "$CUDA_DIR/bin/nvcc")" ]]; then
+  die "Loading the MPI module put another CUDA toolkit first on PATH (nvcc is now $NVCC_AFTER_MPI; the build selected $CUDA_DIR). The MPI module most likely loads the CUDA it was built with ('module show <mpi-module>' lists it). Build with that same CUDA: rerun with FREHG_MODULE_CUDA=<its CUDA module>, e.g. FREHG_MODULE_CUDA=cuda/12.4 for openmpi/4.1.6-gpu."
+fi
 need_command mpicxx
 echo "MPI compiler wrapper: $(command -v mpicxx)"
 MPI_VERSION_OUT="$(mpiexec --version 2>&1 || true)"
@@ -717,6 +736,27 @@ fi
 say "6 of 10: Build yaml-cpp and the CUDA Kokkos in $PREFIX"
 # Command to reset this (CUDA-only) prefix but keep downloaded archives.
 WIPE_HINT="rm -rf '$PREFIX'/{bin,include,lib,lib64,share} '$SRC_CACHE'/build-* '$SRC_CACHE/petsc-$PETSC_VERSION'"
+# One prefix holds parallel HDF5, PETSc and hypre linked against ONE MPI. A
+# rerun with another MPI module would otherwise reuse them and mix two MPI
+# builds in one process. The first build records its mpicc; prefixes built
+# before this check are identified by the mpicc PETSc recorded.
+MPICC_NOW="$(readlink -f "$(command -v mpicc)" 2>/dev/null || command -v mpicc)"
+MPI_STAMP="$PREFIX/.frehg-mpicc"
+MPICC_THEN=""
+if [[ -s "$MPI_STAMP" ]]; then
+  MPICC_THEN="$(<"$MPI_STAMP")"
+else
+  PV_OLD="$(first_existing "$PREFIX/lib/petsc/conf/petscvariables" "$PREFIX/lib64/petsc/conf/petscvariables" || true)"
+  [[ -n "$PV_OLD" ]] && MPICC_THEN="$(sed -n 's/^PCC[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' "$PV_OLD" | head -n 1)"
+  [[ -n "$MPICC_THEN" ]] && MPICC_THEN="$(readlink -f "$MPICC_THEN" 2>/dev/null || echo "$MPICC_THEN")"
+fi
+if [[ -n "$MPICC_THEN" && "$MPICC_THEN" != "$MPICC_NOW" ]]; then
+  die "$PREFIX was built with the MPI at $MPICC_THEN, but this run loaded $MPICC_NOW. HDF5, PETSc and hypre in a prefix are linked against one MPI. Build the new MPI into its own prefix (this keeps the existing build), e.g.
+    FREHG_PREFIX=\$HOME/frehg-deps-cuda-gpumpi FREHG_BUILD_NAME=build-cuda-gpumpi FREHG_MODULE_MPI=<module> bash build_frehg2_cuda.sh
+  or reset this prefix to rebuild it against the new MPI: $WIPE_HINT"
+fi
+echo "$MPICC_NOW" > "$MPI_STAMP"
+echo "MPI for this prefix: $MPICC_NOW"
 YAML_SRC="$SRC_CACHE/yaml-cpp-${YAML_VERSION}"
 fetch_tarball "$URL_YAML" "$ARC_YAML" "$YAML_SRC"
 if ! first_existing "$PREFIX/lib/cmake/yaml-cpp/yaml-cpp-config.cmake" "$PREFIX/lib64/cmake/yaml-cpp/yaml-cpp-config.cmake" >/dev/null; then
@@ -964,7 +1004,7 @@ fi
 first_existing "$PREFIX"/lib/libkokkoskernels.so "$PREFIX"/lib64/libkokkoskernels.so >/dev/null \
   || die "PETSc's Kokkos Kernels runtime is missing from $PREFIX (Kokkos was likely rebuilt without PETSc). Reset the prefix: $WIPE_HINT"
 
-say "9 of 10: Configure and compile Frehg2 in build-cuda/"
+say "9 of 10: Configure and compile Frehg2 in $BUILD_NAME/"
 export CMAKE_PREFIX_PATH="$PREFIX${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
