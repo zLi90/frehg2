@@ -52,6 +52,16 @@ class BoundaryCondition {
   /// Hydrostatic it is the reference surface elevation.
   real_t value(real_t t) const;
 
+  /// \name Stage-3 T2: the inflow closure of a prescribed-stage condition
+  /// (kind eta only; plan §13.A). External reservoirs evaluate their
+  /// velocity components per step, like value().
+  ///@{
+  /// The configured closure (zero_gradient default, O1-bitwise).
+  BcInflowClosure inflowClosure() const { return inflowClosure_; }
+  real_t inflowU(real_t t) const;  ///< u_ext [m/s] along +x
+  real_t inflowV(real_t t) const;  ///< v_ext [m/s] along +y
+  ///@}
+
   /// Member cells owned by this rank.
   const std::vector<BcCell>& cells() const { return cells_; }
 
@@ -74,6 +84,13 @@ class BoundaryCondition {
   real_t constant_ = 0.0;
   real_t hydrostaticEta_ = 0.0;
   TimeSeries series_;
+  BcInflowClosure inflowClosure_ = BcInflowClosure::ZeroGradient;
+  BcValueConfig::Form inflowUForm_ = BcValueConfig::Form::Constant;
+  BcValueConfig::Form inflowVForm_ = BcValueConfig::Form::Constant;
+  real_t inflowUConstant_ = 0.0;
+  real_t inflowVConstant_ = 0.0;
+  TimeSeries inflowUSeries_;
+  TimeSeries inflowVSeries_;
   std::vector<BcCell> cells_;
   MPI_Comm subComm_ = MPI_COMM_NULL;
   long globalCells_ = 0;

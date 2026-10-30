@@ -1,0 +1,82 @@
+# et5(ii) — partition and location under a dense canopy (Stage-3 plan
+# §10, T6): a 1 x 1 x 50 silt column (dz 0.02), uniform roots L = 0.4 m,
+# LAI 30 with k = 1 (tau = exp(-30) = 9.4e-14: the canopy shuts the soil
+# channel off), Feddes range chosen so alpha_F = 1 throughout (h3 = -50,
+# h4 = -500 against a column near h = -0.3), 1 day. The water leaves
+# through the ROOTS, distributed over the 0.4 m root zone — the top
+# cell's share of the total depletion is <= 2 b_top (b_top = 0.05),
+# against the bare contrast lane (iii, harness-generated: prescribed
+# surface-top demand at the same rate) whose removal concentrates at the
+# top (share >= 0.5). Lane (i) (harness: the et2 column with a
+# vegetation map of all zeros) pins vegetation-absent bitwise.
+#
+# THE vegetation BLOCK IS THE T6 TARGET SCHEMA (gate-first, plan §2.3):
+# frehg --validate rejects this file until W6.1 lands.
+simulation:
+  id: et5-canopy
+  title: Stage-3 et5 canopy partition and root-zone location
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 50
+  dx: 1.0
+  dy: 1.0
+  dz: 0.02
+  bottom_elevation: {constant: 1.0}
+
+time:
+  dt: 600.0
+  t_end: 86400.0
+  output_interval: 7200.0
+
+modules:
+  groundwater: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 600.0, dt_min: 600.0, dt_max: 600.0}
+  specific_storage: 1.0e-5
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: silt, ksx: 1.0e-6, ksy: 1.0e-6, ksz: 1.0e-6,
+       theta_s: 0.45, theta_r: 0.067, vg_alpha: 1.6, vg_n: 1.37}
+  map: {constant: silt}
+
+atmosphere:
+  air_temperature: {constant: 25.0}
+  surface_temperature: {constant: 30.0}
+  pressure: {constant: 101.3}
+  relative_humidity: {constant: 0.3}
+  wind_speed: {constant: 8.0}
+  wind_speed_floor: 0.5
+
+evapotranspiration:
+  potential: bulk
+  open_water: false
+  soil:
+    limiter: alpha_barton
+
+vegetation:
+  types:
+    - name: canopy
+      lai: 30.0
+      extinction: 1.0
+      leaf_resistance: 100.0
+      root_depth: 0.4
+      root_profile: uniform
+      feddes: {h3: -50.0, h4: -500.0}
+  map: {constant: canopy}
+
+initial_conditions:
+  groundwater:
+    head: {constant: -0.3}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, root_uptake]
+    atmosphere: [soil_evaporation_rate, transpiration_rate]

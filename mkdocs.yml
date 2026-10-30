@@ -48,6 +48,7 @@ nav:
       - Surface water: theory/surface-water.md
       - Groundwater: theory/groundwater.md
       - Exchange flux: theory/exchange-flux.md
+      - Evapotranspiration: theory/evapotranspiration.md
       - Transport: theory/transport.md
       - Temperature: theory/temperature.md
       - Atmosphere: theory/atmosphere.md
@@ -70,6 +71,7 @@ nav:
       - GPU acceptance protocol: developer-guide/gpu-acceptance.md
       - Upgrade plan (binding spec): developer-guide/FREHG2_UPGRADE_PLAN.md
       - v2 development plan (binding spec): developer-guide/FREHG2_V2_DEVELOPMENT_PLAN.md
+      - Stage-3 development plan (binding spec): developer-guide/FREHG2_STAGE3_DEVELOPMENT_PLAN.md
       - Phase records:
           - P0 DoD: developer-guide/dod-P0.md
           - P0 report: developer-guide/report-P0.md
@@ -97,3 +99,21 @@ nav:
           - Q6 report: developer-guide/report-Q6.md
           - Q7 DoD: developer-guide/dod-Q7.md
           - Q7 report: developer-guide/report-Q7.md
+          - T0 DoD: developer-guide/dod-T0.md
+          - T0 report: developer-guide/report-T0.md
+          - T1 DoD: developer-guide/dod-T1.md
+          - T1 report: developer-guide/report-T1.md
+          - T2 DoD: developer-guide/dod-T2.md
+          - T2 report: developer-guide/report-T2.md
+          - T3 DoD: developer-guide/dod-T3.md
+          - T3 report: developer-guide/report-T3.md
+          - T4 DoD: developer-guide/dod-T4.md
+          - T4 report: developer-guide/report-T4.md
+          - T5 DoD: developer-guide/dod-T5.md
+          - T5 report: developer-guide/report-T5.md
+          - T6 DoD: developer-guide/dod-T6.md
+          - T6 report: developer-guide/report-T6.md
+          - T7 DoD: developer-guide/dod-T7.md
+          - T7 report: developer-guide/report-T7.md
+          - T8 DoD: developer-guide/dod-T8.md
+          - T8 report: developer-guide/report-T8.md

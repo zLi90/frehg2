@@ -124,6 +124,12 @@ struct SurfaceWiring {
   Field2<real_t> asx;         ///< x+ face area [m^2] (diffusion, limiter gates)
   Field2<real_t> asy;         ///< y+ face area [m^2]
   Field2<real_t> rainMask;    ///< 1.0 where rain applies (dilution volume)
+  // Stage-3 T5 (W5.7): the ET surface channel's per-step depth fields
+  // (empty views when ET is off) — the D8 dilution volume reads the
+  // ACTUAL per-cell rain added and evaporation removed.
+  bool etActive = false;      ///< ET open-water channel on
+  Field2<real_t> rainAdded;   ///< rain added this step [m] (masked)
+  Field2<real_t> evapRemoved; ///< evaporation removed this step [m]
 };
 
 /// Subsurface-module state the transport reads (RichardsSolver /
@@ -148,6 +154,18 @@ struct SubsurfaceWiring {
   real_t az = 0.0;            ///< horizontal face area dx dy
   Field2<int> topCode;        ///< configured top BC code (GwBcCode)
   Field2<real_t> topValue;    ///< configured top flux (legacy qtop)
+  // Stage-3 T5 (W5.8): the ET soil channel's wiring (empty when off) —
+  // vapWindow is the channel's vapour volume per column since the last
+  // transport step [m^3] (RichardsSolver::windowVapourVolume; consistent
+  // subsurface update only); the top-cell limiter admits its exact
+  // concentration factor on ET columns.
+  bool etActive = false;      ///< the gw ET soil channel is on
+  Field2<int> etColumn;       ///< 1 on ET soil columns
+  Field2<real_t> vapWindow;   ///< window vapour volume [m^3]
+  // Stage-3 T6 (W6.5): the root-uptake window — water leaves through no
+  // face, salt stays, and the limiter admits the exact per-cell factor.
+  bool vegActive = false;     ///< the vegetation sink is on
+  Field3<real_t> sinkWindow;  ///< window uptake volume per cell [m^3]
   Field2<int> sideCodeYp;     ///< y+ side code (limiter ghost gates)
   Field2<int> sideCodeYm;     ///< y- side code
   Field2<int> sideCodeXm;     ///< x- side code (temperature admission, V2-A17)
@@ -168,6 +186,13 @@ struct CouplingWiring {
   /// [m^3] (RichardsSolver::windowVentVolume; consistent subsurface update
   /// only — empty otherwise).
   Field2<real_t> ventVolume;
+  // Stage-3 T5 (W5.9): held-seepage salt. exfNew is THIS step's newly
+  // exfiltrated depth [m] (the held backlog excluded); its salt leaves
+  // the subsurface as the water does — credited to the surface when the
+  // exchange applies, to the salt store while it is held. Empty views
+  // unless ET + store are active.
+  bool heldSeepage = false;   ///< the W5.9 path is on
+  Field2<real_t> exfNew;      ///< newly exfiltrated depth this step [m]
 };
 
 /// This rank's scalar-mass budget contributions of one transport step
@@ -203,6 +228,12 @@ struct TransportAudit {
   real_t subsBoundary = 0.0;
   real_t subsAdjust = 0.0;    ///< subsurface limiter/bounds mass delta
   real_t subsAnchor = 0.0;    ///< subsurface ledger re-anchor (θ_new V - Vgflux)
+  /// Stage-3 T5 (W5.7/O4): the surface salt store's transfers this step
+  /// (internal to the surface ledger: Δ(surf_mass + surf_store) closes on
+  /// the same RHS as before; in = dry-out capture + held-seepage salt,
+  /// out = rewet release).
+  real_t storeIn = 0.0;   ///< dry-out capture + held-seepage salt in
+  real_t storeOut = 0.0;  ///< rewet release out
 };
 
 /// One registered scalar's transport module (salinity or temperature,
@@ -239,6 +270,13 @@ class ScalarSolver {
   /// The surface-side scalar exchange rate of the last step
   /// [concentration m/s] (legacy sseepage observable).
   const Field2<real_t>& scalarSeepage() const { return sseepage_; }
+  /// Stage-3 T5 (W5.7): the per-cell surface salt store [scalar m^3]
+  /// (allocated only under surface_dryout: store; empty otherwise).
+  bool hasSurfaceStore() const { return store_; }  ///< store mode on
+  const Field2<real_t>& surfaceStore() const { return sStore_; }  ///< per-cell store [scalar m^3]
+  Field2<real_t>& surfaceStoreMutable() { return sStore_; }  ///< restart restore
+  /// This rank's store total [scalar m^3] (0 without the store).
+  real_t surfaceStoreTotal() const;
   ///@}
 
   /// \name Restart state beyond the scalar fields (see the file comment)
@@ -354,6 +392,8 @@ class ScalarSolver {
 
   // Surface fields (halo layout).
   Field2<real_t> sSurf_, smSurf_, sSurfKp_, sseepage_;
+  bool store_ = false;        ///< surface_dryout: store (salinity only)
+  Field2<real_t> sStore_;     ///< per-cell salt store [scalar m^3] (W5.7)
   Field2<real_t> vsn_, vflux_, fuOld_, fvOld_;
   Field2<real_t> sMinS_, sMaxS_;
   Field2<real_t> sFarXm2_, sFarXp2_, sFarYm2_, sFarYp2_;

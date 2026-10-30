@@ -1,0 +1,78 @@
+# pd2-surface — seam-invariance (roll) gate, surface + transport lane
+# (Stage-3 plan §7, phase T3). A 12 x 6 channel, periodic in x, with a
+# periodic bed bump, wind at an angle, and a tracer slab sitting ON the
+# seam: every x-dependent input is exactly periodic on the torus, so a
+# run with all inputs rolled by k columns must equal the base run rolled
+# by k (roll(output_k, -k) == output_0, strict solver, 1e-11) — the only
+# test that catches a seam treated specially by ANY kernel (advection,
+# superbee far-neighbor staging, wind, diffusion, audits). The gate
+# generates the rolled variants and the upwind/superbee sub-lanes from
+# this file. Anti-vacuity: the tracer crosses the seam during the run.
+#
+# THE domain.periodic KEY IS THE T3 TARGET SCHEMA (gate-first, plan §2.3).
+simulation:
+  id: pd2-surface
+  title: Stage-3 pd2 surface/transport roll invariance across the seam
+
+domain:
+  nx: 12
+  ny: 6
+  nz: 1
+  dx: 5.0
+  dy: 5.0
+  dz: 1.0
+  bottom_elevation: {file: input/pd2_dem.dat}
+  periodic: {x: true}
+
+time:
+  dt: 1.0
+  t_end: 600.0
+  output_interval: 60.0
+
+modules:
+  surface_water: true
+  transport: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+  wind:
+    enabled: true
+    law: garratt
+    cap: 0.0035
+    u10: {constant: 8.0}
+    v10: {constant: 2.0}
+
+transport:
+  scheme: {advection: superbee}
+  surface_diffusivity: {x: 1.0e-4, y: 1.0e-4}
+  bounds: {min: 0.0, max: 10.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+  transport:
+    surface: {file: input/pd2_tracer0.dat}
+
+boundary_conditions:
+  - name: wall-south
+    region: {polygon: [[-1.0, -1.0], [61.0, -1.0], [61.0, 5.0], [-1.0, 5.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-north
+    region: {polygon: [[-1.0, 25.0], [61.0, 25.0], [61.0, 31.0], [-1.0, 31.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+    transport: [concentration_surface]

@@ -1,0 +1,65 @@
+# et7 — the supply cap, E part (Stage-3 plan §9, T5): a 1 x 1 x 10 sand
+# column whose moisture starts at theta_r + 1e-4 (uniform moisture IC),
+# a prescribed demand E = 1e-5 m/s that the top cell cannot possibly
+# fund, 1 h at fixed dtg = 60 s. The cap must hold theta >= theta_r to
+# rounding, book unrealised = demand - applied exactly, and leave vloss
+# at zero (nothing is clamped away — the cap prevents the overdraw
+# instead of the clamp hiding it).
+simulation:
+  id: et7-cap
+  title: Stage-3 et7 supply cap under an unfundable demand
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 10
+  dx: 1.0
+  dy: 1.0
+  dz: 0.05
+  bottom_elevation: {constant: 0.5}
+
+time:
+  dt: 60.0
+  t_end: 3600.0
+  output_interval: 600.0
+
+modules:
+  groundwater: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 60.0, dt_min: 60.0, dt_max: 60.0}
+  specific_storage: 1.0e-5
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: sand, ksx: 1.0e-4, ksy: 1.0e-4, ksz: 1.0e-4,
+       theta_s: 0.41, theta_r: 0.05, vg_alpha: 4.0, vg_n: 2.5}
+  map: {constant: sand}
+
+atmosphere:
+  air_temperature: {constant: 25.0}
+  surface_temperature: {constant: 30.0}
+  pressure: {constant: 101.3}
+  relative_humidity: {constant: 0.3}
+  wind_speed: {constant: 8.0}
+  wind_speed_floor: 0.5
+
+evapotranspiration:
+  potential: prescribed
+  prescribed: {constant: 1.0e-5}
+  open_water: false
+  soil:
+    limiter: none
+
+initial_conditions:
+  groundwater:
+    moisture: {constant: 0.0501}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, vloss]
+    atmosphere: [soil_evaporation_rate, soil_evaporation_unrealised_rate]

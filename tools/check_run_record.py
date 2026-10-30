@@ -67,6 +67,11 @@ def main() -> int:
     parser.add_argument("--ranks", type=int, default=None)
     parser.add_argument("--threads", type=int, default=None)
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument("--expect", action="append", default=[], metavar="KEY=VALUE",
+                        help="assert the embedded resolved configuration carries "
+                             "KEY (dotted path) with VALUE (Stage-3 plan §3.2: the "
+                             "FREHG_STAGE3_OVERRIDES anti-vacuity hook — an override "
+                             "that never reached the run fails its gate here)")
     args = parser.parse_args()
 
     # 1. Presence.
@@ -102,6 +107,22 @@ def main() -> int:
                 fail(f"boundary condition entry missing field '{field}'")
 
     prov = record["provenance"]
+
+    # 3a. Expected resolved-configuration values (Stage-3 §3.2). The string
+    # form of the embedded value must equal the expected string (bools print
+    # as true/false, matching the YAML the override wrote).
+    for item in args.expect:
+        if "=" not in item:
+            fail(f"--expect takes KEY=VALUE, got '{item}'")
+        dotted, _, expected = item.partition("=")
+        node = record["configuration"]
+        for part in dotted.split("."):
+            if not isinstance(node, dict) or part not in node:
+                fail(f"configuration.{dotted} missing (expected '{expected}')")
+            node = node[part]
+        actual = {True: "true", False: "false"}.get(node, str(node))
+        if actual != expected:
+            fail(f"configuration.{dotted} = '{actual}', expected '{expected}'")
 
     # 3. Launch match.
     if args.ranks is not None and int(prov["mpi_ranks"]) != args.ranks:

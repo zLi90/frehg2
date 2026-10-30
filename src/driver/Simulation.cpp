@@ -32,7 +32,8 @@ io::VarMeta surfaceVarMeta(const std::string& var) {
     return {"m s-1", "y-face velocity"};
   }
   if (var == "seepage") {
-    return {"m s-1", "surface-applied seepage rate (positive upward)"};
+    return {"m s-1", "surface-applied seepage rate (positive upward; a "
+                     "PER-STEP SAMPLE — integrate seepage_rate instead)"};
   }
   return {"", var};
 }
@@ -53,6 +54,15 @@ io::VarMeta groundwaterVarMeta(const std::string& var) {
   }
   if (var == "qz") {
     return {"m s-1", "lower-face Darcy flux (positive upward)"};
+  }
+  if (var == "realloc_created") {
+    return {"m3", "cumulative post-allocation creation per cell (Stage-3 W1.3)"};
+  }
+  if (var == "realloc_dropped") {
+    return {"m3", "cumulative post-allocation discard per cell (Stage-3 W1.3)"};
+  }
+  if (var == "vloss") {
+    return {"m3", "cumulative finalize-clamp volume per cell (signed; + = removed)"};
   }
   return {"", var};
 }
@@ -163,6 +173,12 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
   if (coupled) {
     coupler_ = std::make_unique<coupling::Coupler>(grid_, config_, *surface_, *gw_);
   }
+  if (surface_ && gw_ && gw_->vegActive() && surface_->etActive()) {
+    // Stage-3 T6 (W6.3): the canopy transmission scales the open-water
+    // channel's rate per cell (exactly 1.0 on bare cells — the T5
+    // outputs stay bitwise without vegetation).
+    surface_->attachCanopyFactor(gw_->vegCanopyTau());
+  }
   if (config_.modules.transport || config_.modules.temperature) {
     buildTransport();
   }
@@ -174,6 +190,72 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
       grid_.comm(), config_,
       inputPath.empty() ? std::string("<in-memory>") : inputPath, *boundaries_,
       grid_.px(), grid_.py());
+  // Non-fatal validation advisories (Stage-3 W0.9): visible in the log and
+  // persisted in the record's `warnings:` list (seeded by the constructor).
+  if (grid_.rank() == 0) {
+    for (const std::string& warning : config_.validationWarnings) {
+      log::warn(log::msg() << "configuration: " << warning);
+    }
+  }
+  // Stage-3 T3 (W3.5): seam-discontinuity diagnostic on each periodic
+  // axis. A periodic wrap continues the field across the seam; a jump
+  // larger than the largest interior neighbor jump means the input is a
+  // discontinuity, not a periodic continuation (the H2-class hazard of
+  // plan §13.B). Checked on the bed elevation of whichever module carries
+  // it (the halo exchange has already wrapped the ghost columns/rows).
+  if (grid_.periodicX() || grid_.periodicY()) {
+    const auto diagnose = [&](const Field2<real_t>& field, const char* name) {
+      auto host = Kokkos::create_mirror_view(field);
+      Kokkos::deep_copy(host, field);
+      const std::size_t nyl = static_cast<std::size_t>(grid_.nyLocal());
+      const std::size_t nxl = static_cast<std::size_t>(grid_.nxLocal());
+      // [0] seam-x, [1] seam-y, [2] interior max jump.
+      real_t local[3] = {0.0, 0.0, 0.0};
+      for (std::size_t j = 1; j <= nyl; ++j) {
+        for (std::size_t i = 1; i + 1 <= nxl; ++i) {
+          local[2] = std::max(local[2], std::fabs(host(j, i + 1) - host(j, i)));
+        }
+      }
+      for (std::size_t i = 1; i <= nxl; ++i) {
+        for (std::size_t j = 1; j + 1 <= nyl; ++j) {
+          local[2] = std::max(local[2], std::fabs(host(j + 1, i) - host(j, i)));
+        }
+      }
+      if (grid_.periodicX() && grid_.i0() == 0) {
+        for (std::size_t j = 1; j <= nyl; ++j) {
+          // The wrapped halo column 0 carries global column nx-1.
+          local[0] = std::max(local[0], std::fabs(host(j, 1) - host(j, 0)));
+        }
+      }
+      if (grid_.periodicY() && grid_.j0() == 0) {
+        for (std::size_t i = 1; i <= nxl; ++i) {
+          local[1] = std::max(local[1], std::fabs(host(1, i) - host(0, i)));
+        }
+      }
+      real_t global[3] = {0.0, 0.0, 0.0};
+      MPI_Allreduce(local, global, 3, MPI_DOUBLE, MPI_MAX, grid_.comm());
+      if (grid_.rank() != 0) {
+        return;
+      }
+      for (int axis = 0; axis < 2; ++axis) {
+        if (global[axis] > global[2] && global[axis] > 0.0) {
+          std::ostringstream msg;
+          msg << "domain.periodic." << (axis == 0 ? "x" : "y") << ": " << name
+              << " jumps by " << global[axis] << " across the "
+              << (axis == 0 ? "x" : "y") << " seam (largest interior jump "
+              << global[2] << "); the seam is a discontinuity, not a "
+              << "periodic continuation";
+          log::warn(msg.str());
+          runRecord_->addWarning(msg.str());
+        }
+      }
+    };
+    if (surface_) {
+      diagnose(surface_->bottom(), "bottom_elevation");
+    } else if (mesh_) {
+      diagnose(mesh_->bath(), "bottom_elevation");
+    }
+  }
   {
     HostField2<real_t> bottomInterior("driver_bottom",
                                       static_cast<std::size_t>(grid_.nyLocal()),
@@ -197,6 +279,61 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
     }
   }
   checkpoint_ = std::make_unique<io::Checkpoint>(*output_);
+
+  // Stage-3 T4 (W4.1/W4.2): interval-mean rate outputs. Only requested
+  // variables allocate; today's sole producer is the coupler's per-step
+  // gain (seepage_rate).
+  rates_ = std::make_unique<io::IntervalRates>(grid_, config_.time.tStart);
+  {
+    const auto& sv = config_.output.surfaceVariables;
+    if (coupler_ && std::find(sv.begin(), sv.end(), "seepage_rate") != sv.end()) {
+      rates_->add("surface", "seepage_rate",
+                  {"m s-1", "interval-mean coupled surface gain (applied "
+                            "seepage + bounce-back + vent deposits, positive "
+                            "upward)"});
+    }
+    // Stage-3 T5 (W5.10): the /atmosphere interval-mean ET rates.
+    const auto& av = config_.output.atmosphereVariables;
+    const auto wants = [&av](const char* name) {
+      return std::find(av.begin(), av.end(), name) != av.end();
+    };
+    if (surface_ && surface_->etActive() && wants("evaporation_rate")) {
+      rates_->add("atmosphere", "evaporation_rate",
+                  {"m s-1", "interval-mean open-water evaporation (positive "
+                            "out; negative = condensation)"});
+    }
+    if (gw_ && gw_->vegActive()) {
+      if (wants("transpiration_rate")) {
+        rates_->add("atmosphere", "transpiration_rate",
+                    {"m s-1", "interval-mean applied transpiration "
+                              "(positive out)"});
+      }
+      if (wants("transpiration_unrealised_rate")) {
+        rates_->add("atmosphere", "transpiration_unrealised_rate",
+                    {"m s-1", "interval-mean unrealised transpiration "
+                              "demand (demand minus applied)"});
+      }
+      const auto& gv = config_.output.groundwaterVariables;
+      if (std::find(gv.begin(), gv.end(), "root_uptake") != gv.end()) {
+        // Stage-3 T6 (S3-A7's Field3 leg, first consumer): the
+        // interval-mean volumetric uptake sink.
+        rates_->add3("groundwater", "root_uptake",
+                     {"s-1", "interval-mean root-uptake sink"});
+      }
+    }
+    if (gw_ && gw_->etActive()) {
+      if (wants("soil_evaporation_rate")) {
+        rates_->add("atmosphere", "soil_evaporation_rate",
+                    {"m s-1", "interval-mean applied soil evaporation "
+                              "(positive out)"});
+      }
+      if (wants("soil_evaporation_unrealised_rate")) {
+        rates_->add("atmosphere", "soil_evaporation_unrealised_rate",
+                    {"m s-1", "interval-mean unrealised soil-evaporation "
+                              "demand (demand minus applied)"});
+      }
+    }
+  }
 
   for (const MonitorConfig& mc : config_.output.monitors) {
     monitors_.push_back(std::make_unique<io::Monitor>(*output_, mc));
@@ -222,6 +359,13 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
     // identity holds to its bound with the defect visible, not hidden in
     // the residual. Appended last so earlier columns keep their indices.
     auditConfig.variables.push_back("clamped");
+    if (coupled) {
+      // Stage-3 T2 (W2.4): cumulative coupled deposit on prescribed-stage
+      // cells (+ = external to the surface: removed through the reservoir
+      // under closure external, or deleted unbooked-no-more by the next
+      // stage enforcement under zero_gradient). Appended last.
+      auditConfig.variables.push_back("stage_deposit");
+    }
     massAudit_ = std::make_unique<io::Monitor>(*output_, auditConfig);
   }
   if (config_.modules.groundwater) {
@@ -237,6 +381,21 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
       // the g5 gate reads it as column 7).
       auditConfig.variables.push_back("evaporation");
     }
+    if (config_.evapotranspiration.enabled && config_.evapotranspiration.soil) {
+      // Stage-3 T5 (W5.10): the ET soil channel's cumulative applied and
+      // unrealised volumes [m^3]; soil_evaporation is a sub-account of
+      // boundary_in (the closure identity is unchanged).
+      auditConfig.variables.push_back("soil_evaporation");
+      auditConfig.variables.push_back("soil_evaporation_unrealised");
+    }
+    if (config_.vegetation.enabled) {
+      // Stage-3 T6 (W6.6): the transpiration sink's cumulative applied
+      // and unrealised volumes [m^3]. The closure identity becomes
+      // dV = boundary_in - ss_storage + realloc - vloss - transpiration
+      // (the sink leaves through no boundary face).
+      auditConfig.variables.push_back("transpiration");
+      auditConfig.variables.push_back("transpiration_unrealised");
+    }
     gwMassAudit_ = std::make_unique<io::Monitor>(*output_, auditConfig);
   }
   if (transport_) {
@@ -251,6 +410,12 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
                              "surf_source",   "surf_boundary", "surf_adjust",
                              "surf_anchor",   "subs_boundary", "subs_adjust",
                              "subs_anchor"};
+    if (transport_->hasSurfaceStore()) {
+      // Stage-3 T5 (W5.7): the INSTANTANEOUS store total [scalar m^3],
+      // appended last. Identity: Delta(surf_mass + surf_store) closes on
+      // the same RHS as before (the store transfers are internal).
+      auditConfig.variables.push_back("surf_store");
+    }
     transportAudit_ = std::make_unique<io::Monitor>(*output_, auditConfig);
   }
   if (temperature_) {
@@ -285,6 +450,12 @@ void Simulation::buildTransport() {
     surfWiring.asx = surface_->faceAreaX();
     surfWiring.asy = surface_->faceAreaY();
     surfWiring.rainMask = surface_->rainApplyMask();
+    if (surface_->etActive()) {
+      // Stage-3 T5 (W5.7 D8): the per-cell rain/evaporation depths.
+      surfWiring.etActive = true;
+      surfWiring.rainAdded = surface_->rainAdded();
+      surfWiring.evapRemoved = surface_->evapRemoved();
+    }
   }
   transport::SubsurfaceWiring subsWiring;
   // transport.subsurface_update: consistent reads the groundwater module's
@@ -324,6 +495,19 @@ void Simulation::buildTransport() {
       subsWiring.qyWindow = gw_->windowVolumeY();
       subsWiring.qzWindow = gw_->windowVolumeZ();
     }
+    if (gw_->etActive()) {
+      // Stage-3 T5 (W5.8): the top-cell vapour concentration factor.
+      subsWiring.etActive = true;
+      subsWiring.etColumn = gw_->etColumn();
+      if (transportWindow) {
+        subsWiring.vapWindow = gw_->windowVapourVolume();
+      }
+    }
+    if (gw_->vegActive() && transportWindow) {
+      // Stage-3 T6 (W6.5): the per-cell root-uptake factor.
+      subsWiring.vegActive = true;
+      subsWiring.sinkWindow = gw_->windowSinkVolume();
+    }
   }
   transport::CouplingWiring cplWiring;
   if (coupler_) {
@@ -331,6 +515,13 @@ void Simulation::buildTransport() {
     cplWiring.qss = coupler_->seepageRate();
     if (transportWindow) {
       cplWiring.ventVolume = gw_->windowVentVolume();
+    }
+    // Stage-3 T5 (W5.9): the held-seepage salt path — ET with the store.
+    if (config_.evapotranspiration.enabled && config_.modules.transport &&
+        config_.transport.surfaceDryout == TransportConfig::SurfaceDryout::Store) {
+      coupler_->enableHeldSeepageSalt();
+      cplWiring.heldSeepage = true;
+      cplWiring.exfNew = coupler_->exfNew();
     }
   }
   if (config_.modules.transport) {
@@ -400,6 +591,22 @@ io::Checkpoint::Fields2 Simulation::checkpointFields2() const {
     fields.push_back({"seep_accum", coupler_->seepAccum()});
     fields.push_back({"qss", coupler_->seepageRate()});
   }
+  if (rates_ && !rates_->empty()) {
+    // Stage-3 T4 (W4.1): the interval-rate accumulators restart bitwise
+    // (acc_<name>; the interval start rides as the scalar acc_t_prev).
+    // Runs without rate outputs keep the v2.0 checkpoint layout.
+    for (const auto& named : rates_->checkpointFields()) {
+      fields.push_back(named);
+    }
+  }
+  if (surface_ && surface_->etActive()) {
+    // Stage-3 T5 (W5.10): the complementarity clocks are prognostic.
+    fields.push_back({"et_wet_clock", surface_->wetClock()});
+  }
+  if (gw_ && gw_->etActive()) {
+    fields.push_back({"et_wet_clock_last", gw_->etWetClockLast()});
+    fields.push_back({"et_soil_time", gw_->etSoilTime()});
+  }
   if (transport_) {
     if (surface_) {
       // The scalar plus the transport state a restart cannot reconstruct:
@@ -409,6 +616,10 @@ io::Checkpoint::Fields2 Simulation::checkpointFields2() const {
       fields.push_back({"s_surf", transport_->surfaceScalar()});
       fields.push_back({"s_fu_old", transport_->flowRateSnapshotX()});
       fields.push_back({"s_fv_old", transport_->flowRateSnapshotY()});
+      if (transport_->hasSurfaceStore()) {
+        // Stage-3 T5 (W5.7): the store is prognostic (O4).
+        fields.push_back({"s_store", transport_->surfaceStore()});
+      }
     }
     if (gw_) {
       fields.push_back({"s_dzz_top", transport_->dispersionTopSnapshot()});
@@ -434,8 +645,43 @@ io::Checkpoint::Fields3 Simulation::checkpointFields3() const {
   io::Checkpoint::Fields3 fields;
   if (gw_) {
     fields = {{"h", gw_->head()}, {"wc", gw_->waterContent()}};
+    if (gw_->hasReallocDiagnostics()) {
+      // Stage-3 W1.3: the cumulative diagnostics restart bitwise. The flags
+      // follow the requested outputs, so both sides of a restart carry the
+      // same checkpoint layout; non-diagnostic runs are byte-identical to
+      // the v2.0 layout.
+      fields.push_back({"realloc_created", gw_->reallocCreated()});
+      fields.push_back({"realloc_dropped", gw_->reallocDroppedCell()});
+    }
+    const auto& gwVars = config_.output.groundwaterVariables;
+    if (gw_->hasReallocDiagnostics() ||
+        std::find(gwVars.begin(), gwVars.end(), "vloss") != gwVars.end()) {
+      fields.push_back({"vloss_cum", gw_->vlossField()});
+    }
     if (transport_) {
       fields.push_back({"s_subs", transport_->subsurfaceScalar()});
+    }
+    if (transport_ || temperature_) {
+      // S3-A9 (a pre-existing gap the T6 vegetated restart lane caught):
+      // a subcycled window can take ZERO substeps right after a restart,
+      // leaving the transport to read the LAST SUBSTEP'S per-step fluxes
+      // and dtg (the documented stale-flux legacy quirk) — which must
+      // therefore restart with the state. Runs without transport keep
+      // the prior layout.
+      fields.push_back({"qx_last", gw_->fluxXVolumetric()});
+      fields.push_back({"qy_last", gw_->fluxYVolumetric()});
+      fields.push_back({"qzf_last", gw_->fluxZFaceVolumetric()});
+      // ... and the face conductivities the transport's limiter gates
+      // read (same zero-substep staleness class).
+      fields.push_back({"kx_last", gw_->faceConductivityX()});
+      fields.push_back({"ky_last", gw_->faceConductivityY()});
+      fields.push_back({"kzf_last", gw_->faceConductivityZFace()});
+    }
+    if (rates_ && !rates_->empty()) {
+      // Stage-3 T6: the Field3 interval-rate accumulators (acc_root_uptake).
+      for (const auto& named : rates_->checkpointFields3()) {
+        fields.push_back(named);
+      }
     }
     if (temperature_) {
       fields.push_back({"t_subs", temperature_->subsurfaceScalar()});
@@ -487,13 +733,71 @@ real_t Simulation::restoreFromCheckpoint() {
     }
     coupler_->restore(header.t, dtg_, lag->second);
   }
+  if (gw_ && (transport_ || temperature_)) {
+    const auto dtgLast = header.scalars.find("dtg_last");
+    if (dtgLast == header.scalars.end()) {
+      log::fatal("checkpoint is missing the transport scalar 'dtg_last' "
+                 "(the source run predates the S3-A9 restart fix)");
+    }
+    gw_->restoreLastDtg(dtgLast->second);
+  }
+  if (rates_ && !rates_->empty()) {
+    const auto tPrev = header.scalars.find("acc_t_prev");
+    if (tPrev == header.scalars.end()) {
+      log::fatal("checkpoint is missing the interval-rate scalar 'acc_t_prev' "
+                 "(the source run did not write the requested rate outputs)");
+    }
+    rates_->restore(tPrev->second);
+  }
   log::info(log::msg() << "restart: resumed from " << path << " at t = " << header.t
                        << " s (step " << header.step << ")");
   return header.t;
 }
 
-void Simulation::writeOutputs(real_t t) {
+void Simulation::addEtRateContributions() {
+  // Stage-3 T5 (W5.10): feed the registered atmosphere rates once per
+  // outer step — the surface channel's removal and the soil channel's
+  // depth windows (accumulated over this step's substeps, then reset).
+  if (!rates_ || rates_->empty()) {
+    if (gw_ && gw_->etActive()) {
+      gw_->resetEtDepths();
+    }
+    return;
+  }
+  const auto& av = config_.output.atmosphereVariables;
+  const auto wants = [&av](const char* name) {
+    return std::find(av.begin(), av.end(), name) != av.end();
+  };
+  if (surface_ && surface_->etActive() && wants("evaporation_rate")) {
+    rates_->addInto("evaporation_rate", surface_->evapRemoved());
+  }
+  if (gw_ && gw_->etActive()) {
+    if (wants("soil_evaporation_rate")) {
+      rates_->addInto("soil_evaporation_rate", gw_->etAppliedDepth());
+    }
+    if (wants("soil_evaporation_unrealised_rate")) {
+      rates_->addInto("soil_evaporation_unrealised_rate", gw_->etUnrealisedDepth());
+    }
+    gw_->resetEtDepths();
+  }
+  if (gw_ && gw_->vegActive()) {
+    if (wants("transpiration_rate")) {
+      rates_->addInto("transpiration_rate", gw_->trAppliedDepth());
+    }
+    if (wants("transpiration_unrealised_rate")) {
+      rates_->addInto("transpiration_unrealised_rate", gw_->trUnrealisedDepth());
+    }
+    const auto& gv = config_.output.groundwaterVariables;
+    if (std::find(gv.begin(), gv.end(), "root_uptake") != gv.end()) {
+      rates_->addInto3("root_uptake", gw_->sinkStepWindow());
+    }
+    gw_->resetTrDepths();
+  }
+}
+
+void Simulation::writeOutputs(real_t label, real_t tActual) {
   Timer::Scoped timer("io/output");
+  const real_t t = label;
   for (const std::string& var : config_.output.surfaceVariables) {
     if (!surface_) {
       break;
@@ -512,6 +816,7 @@ void Simulation::writeOutputs(real_t t) {
     } else if (var == "seepage" && coupler_) {
       field = &coupler_->seepageRate();
     }
+    // "seepage_rate" is written by the IntervalRates registry below.
     if (field != nullptr) {
       output_->writeField2("surface", var, t, *field, surfaceVarMeta(var));
     }
@@ -531,6 +836,12 @@ void Simulation::writeOutputs(real_t t) {
       field = &gw_->fluxYPerArea();
     } else if (var == "qz") {
       field = &gw_->fluxZPerArea();
+    } else if (var == "realloc_created" && gw_->hasReallocDiagnostics()) {
+      field = &gw_->reallocCreated();
+    } else if (var == "realloc_dropped" && gw_->hasReallocDiagnostics()) {
+      field = &gw_->reallocDroppedCell();
+    } else if (var == "vloss") {
+      field = &gw_->vlossField();
     }
     if (field != nullptr) {
       output_->writeField3("groundwater", var, t, *field, groundwaterVarMeta(var));
@@ -546,6 +857,9 @@ void Simulation::writeOutputs(real_t t) {
     } else if (var == "concentration_surface" && surface_) {
       output_->writeField2("transport", var, t, transport_->surfaceScalar(),
                            transportVarMeta(var));
+    } else if (var == "salt_store" && surface_ && transport_->hasSurfaceStore()) {
+      output_->writeField2("transport", var, t, transport_->surfaceStore(),
+                           {"psu m3", "per-cell surface salt store (O4)"});
     }
   }
   for (const std::string& var : config_.output.temperatureVariables) {
@@ -559,6 +873,28 @@ void Simulation::writeOutputs(real_t t) {
       output_->writeField2("temperature", var, t, temperature_->surfaceScalar(),
                            temperatureVarMeta(var));
     }
+  }
+  for (const std::string& var : config_.output.atmosphereVariables) {
+    // Stage-3 T5 (W5.10): the cumulative time clocks are plain field
+    // outputs (the *_rate variables are the registry's below).
+    const Field2<real_t>* field = nullptr;
+    if (var == "wet_time" && surface_ && surface_->etActive()) {
+      field = &surface_->wetClock();
+    } else if (var == "soil_evaporation_time" && gw_ && gw_->etActive()) {
+      field = &gw_->etSoilTime();
+    }
+    if (field != nullptr) {
+      output_->writeField2("atmosphere", var, t, *field,
+                           {"s", var == "wet_time"
+                                     ? "cumulative open-water-covered time"
+                                     : "cumulative soil-evaporation time"});
+    }
+  }
+  if (rates_ && !rates_->empty()) {
+    // Datasets keyed by the output label; the mean normalizes over the
+    // TRUE elapsed state time so the rate integrates back to the audited
+    // volume even when an adaptive step crosses the label (plan §8 W4.1).
+    rates_->writeAndReset(*output_, label, tActual < 0.0 ? label : tActual);
   }
 }
 
@@ -607,14 +943,14 @@ void Simulation::recordMonitors(real_t t) {
   }
 }
 
-void Simulation::recordMassAudit(real_t t) {
+void Simulation::recordMassAudit(real_t t, bool writeRow) {
   const swe::SurfaceStepAudit& audit = surface_->audit();
   const real_t seepage = coupler_ ? coupler_->audit().surfaceGain : 0.0;
-  const real_t local[7] = {surface_->ownedVolume(), audit.rainVolume, audit.evapVolume,
+  const real_t local[8] = {surface_->ownedVolume(), audit.rainVolume, audit.evapVolume,
                            audit.boundaryOutflow, audit.bcInflow, seepage,
-                           audit.clampVolume};
-  real_t global[7] = {0, 0, 0, 0, 0, 0, 0};
-  MPI_Reduce(local, global, 7, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+                           audit.clampVolume, audit.stageDeposit};
+  real_t global[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  MPI_Reduce(local, global, 8, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
   if (grid_.rank() == 0) {
     cumRain_ += global[1];
     cumEvap_ += global[2];
@@ -622,26 +958,35 @@ void Simulation::recordMassAudit(real_t t) {
     cumBcInflow_ += global[4];
     cumSeepage_ += global[5];
     cumClamped_ += global[6];
-    std::vector<real_t> row = {global[0], cumRain_, cumEvap_, cumOutflow_, cumBcInflow_};
-    if (coupler_) {
-      row.push_back(cumSeepage_);
+    cumStageDeposit_ += global[7];
+    if (writeRow) {
+      std::vector<real_t> row = {global[0], cumRain_, cumEvap_, cumOutflow_, cumBcInflow_};
+      if (coupler_) {
+        row.push_back(cumSeepage_);
+      }
+      row.push_back(cumClamped_);
+      if (coupler_) {
+        row.push_back(cumStageDeposit_);
+      }
+      massAudit_->record(t, row);
     }
-    row.push_back(cumClamped_);
-    massAudit_->record(t, row);
-  } else {
+  } else if (writeRow) {
     massAudit_->record(t, {});
   }
 }
 
-void Simulation::recordGwMassAudit(real_t t) {
+void Simulation::recordGwMassAudit(real_t t, bool writeRow) {
   // Coupled runs report the window aggregate (all subcycled substeps of the
   // surface step); groundwater-only runs report the single step.
   const gw::GwStepAudit& audit = coupler_ ? coupler_->audit().gw : gw_->audit();
-  const real_t local[7] = {gw_->ownedVolume(), audit.boundaryIn, audit.ssStorage,
-                           audit.reallocAdjust, audit.reallocDropped, audit.vloss,
-                           audit.evap};
-  real_t global[7] = {0, 0, 0, 0, 0, 0, 0};
-  MPI_Reduce(local, global, 7, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+  const real_t local[11] = {gw_->ownedVolume(), audit.boundaryIn, audit.ssStorage,
+                            audit.reallocAdjust, audit.reallocDropped, audit.vloss,
+                            audit.evap,          audit.etApplied,
+                            audit.etDemand - audit.etApplied,
+                            audit.trApplied,
+                            audit.trDemand - audit.trApplied};
+  real_t global[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  MPI_Reduce(local, global, 11, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
   if (grid_.rank() == 0) {
     cumGwBoundary_ += global[1];
     cumGwStorage_ += global[2];
@@ -649,25 +994,40 @@ void Simulation::recordGwMassAudit(real_t t) {
     cumGwDropped_ += global[4];
     cumGwVloss_ += global[5];
     cumGwEvap_ += global[6];
-    std::vector<real_t> row = {global[0], cumGwBoundary_, cumGwStorage_, cumGwRealloc_,
-                               cumGwDropped_, cumGwVloss_};
-    if (config_.groundwater.evaporation.enabled) {
-      row.push_back(cumGwEvap_);
+    cumGwEtApplied_ += global[7];
+    cumGwEtUnrealised_ += global[8];
+    cumGwTrApplied_ += global[9];
+    cumGwTrUnrealised_ += global[10];
+    if (writeRow) {
+      std::vector<real_t> row = {global[0], cumGwBoundary_, cumGwStorage_, cumGwRealloc_,
+                                 cumGwDropped_, cumGwVloss_};
+      if (config_.groundwater.evaporation.enabled) {
+        row.push_back(cumGwEvap_);
+      }
+      if (config_.evapotranspiration.enabled && config_.evapotranspiration.soil) {
+        row.push_back(cumGwEtApplied_);
+        row.push_back(cumGwEtUnrealised_);
+      }
+      if (config_.vegetation.enabled) {
+        row.push_back(cumGwTrApplied_);
+        row.push_back(cumGwTrUnrealised_);
+      }
+      gwMassAudit_->record(t, row);
     }
-    gwMassAudit_->record(t, row);
-  } else {
+  } else if (writeRow) {
     gwMassAudit_->record(t, {});
   }
 }
 
-void Simulation::recordTransportAudit(real_t t) {
+void Simulation::recordTransportAudit(real_t t, bool writeRow) {
   const transport::TransportAudit& audit = transport_->audit();
-  const real_t local[10] = {transport_->ownedSurfaceMass(), transport_->ownedSubsurfaceMass(),
+  const real_t local[11] = {transport_->ownedSurfaceMass(), transport_->ownedSubsurfaceMass(),
                             audit.exchange,     audit.surfSource, audit.surfBoundary,
                             audit.surfAdjust,   audit.surfAnchor, audit.subsBoundary,
-                            audit.subsAdjust,   audit.subsAnchor};
-  real_t global[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  MPI_Reduce(local, global, 10, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+                            audit.subsAdjust,   audit.subsAnchor,
+                            transport_->surfaceStoreTotal()};
+  real_t global[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  MPI_Reduce(local, global, 11, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
   if (grid_.rank() == 0) {
     cumTrExchange_ += global[2];
     cumTrSurfSource_ += global[3];
@@ -677,15 +1037,22 @@ void Simulation::recordTransportAudit(real_t t) {
     cumTrSubsBoundary_ += global[7];
     cumTrSubsAdjust_ += global[8];
     cumTrSubsAnchor_ += global[9];
-    transportAudit_->record(t, {global[0], global[1], cumTrExchange_, cumTrSurfSource_,
-                                cumTrSurfBoundary_, cumTrSurfAdjust_, cumTrSurfAnchor_,
-                                cumTrSubsBoundary_, cumTrSubsAdjust_, cumTrSubsAnchor_});
-  } else {
+    if (writeRow) {
+      std::vector<real_t> row = {global[0], cumTrExchange_, cumTrSurfSource_,
+                                 cumTrSurfBoundary_, cumTrSurfAdjust_, cumTrSurfAnchor_,
+                                 cumTrSubsBoundary_, cumTrSubsAdjust_, cumTrSubsAnchor_};
+      row.insert(row.begin() + 1, global[1]);
+      if (transport_->hasSurfaceStore()) {
+        row.push_back(global[10]);
+      }
+      transportAudit_->record(t, row);
+    }
+  } else if (writeRow) {
     transportAudit_->record(t, {});
   }
 }
 
-void Simulation::recordTemperatureAudit(real_t t) {
+void Simulation::recordTemperatureAudit(real_t t, bool writeRow) {
   const transport::TransportAudit& audit = temperature_->audit();
   const real_t local[11] = {temperature_->ownedSurfaceMass(),
                             temperature_->ownedSubsurfaceMass(),
@@ -704,14 +1071,30 @@ void Simulation::recordTemperatureAudit(real_t t) {
     cumTpSubsBoundary_ += global[8];
     cumTpSubsAdjust_ += global[9];
     cumTpSubsAnchor_ += global[10];
-    temperatureAudit_->record(t, {global[0], global[1], cumTpExchange_,
-                                  cumTpSurfSource_, cumTpSurfBoundary_,
-                                  cumTpSurfAdjust_, cumTpSurfAnchor_, cumTpSurfAtmos_,
-                                  cumTpSubsBoundary_, cumTpSubsAdjust_,
-                                  cumTpSubsAnchor_});
-  } else {
+    if (writeRow) {
+      temperatureAudit_->record(t, {global[0], global[1], cumTpExchange_,
+                                    cumTpSurfSource_, cumTpSurfBoundary_,
+                                    cumTpSurfAdjust_, cumTpSurfAnchor_, cumTpSurfAtmos_,
+                                    cumTpSubsBoundary_, cumTpSubsAdjust_,
+                                    cumTpSubsAnchor_});
+    }
+  } else if (writeRow) {
     temperatureAudit_->record(t, {});
   }
+}
+
+bool Simulation::monitorRowDue(real_t t, bool forced) {
+  const real_t mi = config_.output.monitorInterval;
+  if (mi <= 0.0) {
+    return true;
+  }
+  if (t >= nextMonitorRow_ - 1.0e-9) {
+    // Advance past every boundary this step crossed (the output-schedule
+    // rule; W4.3 restart recomputes nextMonitorRow_ from t0 the same way).
+    nextMonitorRow_ = (std::floor(t / mi + 1.0e-9) + 1.0) * mi;
+    return true;
+  }
+  return forced;
 }
 
 void Simulation::writeCheckpoint(real_t t, long step, real_t labelTime) {
@@ -723,6 +1106,12 @@ void Simulation::writeCheckpoint(real_t t, long step, real_t labelTime) {
   if (coupler_) {
     scalars["tgw_lag"] = coupler_->gwLag(t);
     scalars["dt_surface"] = coupler_->lastSurfaceDt();
+  }
+  if (rates_ && !rates_->empty()) {
+    scalars["acc_t_prev"] = rates_->tPrev();
+  }
+  if (gw_ && (transport_ || temperature_)) {
+    scalars["dtg_last"] = gw_->lastDtg();  // S3-A9
   }
   checkpoint_->write(t, step, scalars, checkpointFields2(), checkpointFields3(), labelTime);
 }
@@ -754,6 +1143,12 @@ void Simulation::run() {
         recordTemperatureAudit(t0);
       }
     }
+  }
+  // W4.3: the monitor row schedule starts at t0 exactly like the output
+  // schedule (restart recomputes it from the restored t0).
+  if (config_.output.monitorInterval > 0.0) {
+    nextMonitorRow_ = (std::floor(t0 / config_.output.monitorInterval + 1.0e-9) + 1.0) *
+                      config_.output.monitorInterval;
   }
   if (coupler_) {
     runCoupledLoop(t0);
@@ -837,14 +1232,75 @@ void Simulation::flushRunRecord(bool finished) {
             << "  bc_inflow_m3: " << cumBcInflow_ << "\n"
             << "  seepage_m3: " << cumSeepage_ << "\n"
             << "  clamped_m3: " << cumClamped_ << "\n";
+    if (coupler_) {
+      closure << "  stage_deposit_m3: " << cumStageDeposit_ << "\n";
+    }
+    // Stage-3 T2 (W2.6): the stage-boundary free-energy observables. The
+    // KE influx is the report_V1 engine metric (zero at a quiet boundary);
+    // the ratio is the entrance head actually paid per v^2/2g (~1 under
+    // closure external, ~0 under zero_gradient with fast inflow). The
+    // zero_gradient warning on these is evaluated here, run end.
+    {
+      real_t local[3] = {surface_->stageKeInflux(), surface_->stageHeadRatioNum(),
+                         surface_->stageHeadRatioDen()};
+      real_t global[3] = {0, 0, 0};
+      MPI_Allreduce(local, global, 3, MPI_DOUBLE, MPI_SUM, grid_.comm());
+      if (grid_.rank() == 0) {
+        closure << "  stage_ke_influx_J: " << global[0] << "\n";
+        if (global[2] > 0.0) {
+          closure << "  stage_entrance_head_ratio: " << global[1] / global[2] << "\n";
+        }
+      }
+      if (finished && grid_.rank() == 0 && !surface_->hasExternalClosure() &&
+          global[2] > 0.0 && global[1] / global[2] < 0.5 && global[0] > 1.0) {
+        const std::string warning =
+            "eta boundaries: inflow imported " + std::to_string(global[0]) +
+            " J of kinetic energy while paying " +
+            std::to_string(global[1] / global[2]) +
+            " of the v^2/2g entrance head; if the water beyond the boundary "
+            "is still, use inflow: {closure: external} (Stage-3 T2)";
+        log::warn(warning);
+        runRecord_->addWarning(warning);
+      }
+    }
   }
   if (gw_) {
     closure << "groundwater:\n"
+            << "  reallocation: "
+            << (config_.groundwater.reallocation ==
+                        GroundwaterConfig::Reallocation::Off
+                    ? "disabled"
+                    : "legacy")
+            << "\n"
             << "  boundary_in_m3: " << cumGwBoundary_ << "\n"
             << "  ss_storage_m3: " << cumGwStorage_ << "\n"
             << "  realloc_m3: " << cumGwRealloc_ << "\n"
             << "  realloc_dropped_m3: " << cumGwDropped_ << "\n"
             << "  vloss_m3: " << cumGwVloss_ << "\n";
+  }
+  if (config_.evapotranspiration.enabled) {
+    // Stage-3 T5 (W5.10): the ET closure lines. open_water is the
+    // mass_audit evaporation column under ET; the soil pair are the gw
+    // audit's T5 columns; salt_store_final is the surface store's
+    // run-end content (0 without the store).
+    closure << "evapotranspiration:\n";
+    if (surface_ && surface_->etActive()) {
+      closure << "  open_water_evaporation_m3: " << cumEvap_ << "\n";
+    }
+    if (gw_ && gw_->etActive()) {
+      closure << "  soil_evaporation_m3: " << cumGwEtApplied_ << "\n"
+              << "  soil_evaporation_unrealised_m3: " << cumGwEtUnrealised_ << "\n";
+    }
+    if (gw_ && gw_->vegActive()) {
+      closure << "  transpiration_m3: " << cumGwTrApplied_ << "\n"
+              << "  transpiration_unrealised_m3: " << cumGwTrUnrealised_ << "\n";
+    }
+    if (transport_ && surface_) {
+      real_t localStore = transport_->surfaceStoreTotal();
+      real_t globalStore = 0.0;
+      MPI_Allreduce(&localStore, &globalStore, 1, MPI_DOUBLE, MPI_SUM, grid_.comm());
+      closure << "  salt_store_final: " << globalStore << "\n";
+    }
   }
   runRecord_->setClosure(closure.str());
   runRecord_->flush(finished);
@@ -877,18 +1333,30 @@ void Simulation::runCoupledLoop(real_t t0) {
     t += dt;
     ++step;
     coupler_->step(t, dt);
+    if (rates_ && rates_->has("seepage_rate")) {
+      // W4.2: the step's complete coupled surface gain (applied seepage +
+      // bounce-back + vent deposits) — the same numbers recordMassAudit
+      // reduces into the cumulative seepage column (the dg1 identity).
+      rates_->addInto("seepage_rate", coupler_->gain());
+    }
+    addEtRateContributions();
     stepTransport(t, dt, gw_->lastDtg());
 
+    const bool checkpointDue =
+        checkpointInterval > 0.0 && t >= nextCheckpoint - 1.0e-9;
+    const bool rowDue = monitorRowDue(t, checkpointDue || t >= tEnd - 1.0e-9);
     {
       Timer::Scoped monitorsTimer("monitors");
-      recordMonitors(t);
-      recordMassAudit(t);
-      recordGwMassAudit(t);
+      if (rowDue) {
+        recordMonitors(t);
+      }
+      recordMassAudit(t, rowDue);
+      recordGwMassAudit(t, rowDue);
       if (transport_) {
-        recordTransportAudit(t);
+        recordTransportAudit(t, rowDue);
       }
       if (temperature_) {
-        recordTemperatureAudit(t);
+        recordTemperatureAudit(t, rowDue);
       }
     }
 
@@ -904,7 +1372,7 @@ void Simulation::runCoupledLoop(real_t t0) {
       // Advance past every boundary this step crossed (see the
       // groundwater loop's note).
       nextOutput = (std::floor(t / interval + 1.0e-9) + 1.0) * interval;
-      writeOutputs(label);
+      writeOutputs(label, t);
       for (const std::unique_ptr<io::Monitor>& monitor : monitors_) {
         monitor->flush();
       }
@@ -922,7 +1390,7 @@ void Simulation::runCoupledLoop(real_t t0) {
                            << " s (fs " << surface_->lastSolve().iterations << " it, gw "
                            << gw_->lastSolve().iterations << " it)");
     }
-    if (checkpointInterval > 0.0 && t >= nextCheckpoint - 1.0e-9) {
+    if (checkpointDue) {
       const real_t label = nextCheckpoint;
       nextCheckpoint =
           (std::floor(t / checkpointInterval + 1.0e-9) + 1.0) * checkpointInterval;
@@ -968,17 +1436,28 @@ void Simulation::runSurfaceLoop(real_t t0) {
     surface_->beginStep(t);
     surface_->solveFreeSurface();
     surface_->updateVelocity();
+    addEtRateContributions();
     stepTransport(t, dt, 0.0);
 
+    bool checkpointDue = false;
+    if (checkpointInterval > 0.0) {
+      const long ci = static_cast<long>(std::llround(t / checkpointInterval));
+      checkpointDue = ci > lastCheckpointIndex &&
+                      std::fabs(t - static_cast<real_t>(ci) * checkpointInterval) <
+                          0.5 * dt;
+    }
+    const bool rowDue = monitorRowDue(t, checkpointDue || step == nSteps);
     {
       Timer::Scoped monitorsTimer("monitors");
-      recordMonitors(t);
-      recordMassAudit(t);
+      if (rowDue) {
+        recordMonitors(t);
+      }
+      recordMassAudit(t, rowDue);
       if (transport_) {
-        recordTransportAudit(t);
+        recordTransportAudit(t, rowDue);
       }
       if (temperature_) {
-        recordTemperatureAudit(t);
+        recordTemperatureAudit(t, rowDue);
       }
     }
 
@@ -1069,17 +1548,23 @@ void Simulation::runGroundwaterLoop(real_t t0) {
     ++step;
     gw_->step(t, dtg);
     dtg_ = gw_->nextDt();
+    addEtRateContributions();
     stepTransport(t, dtg, gw_->lastDtg());
 
+    const bool checkpointDue =
+        checkpointInterval > 0.0 && t >= nextCheckpoint - 1.0e-9;
+    const bool rowDue = monitorRowDue(t, checkpointDue || t >= tEnd - 1.0e-9);
     {
       Timer::Scoped monitorsTimer("monitors");
-      recordMonitors(t);
-      recordGwMassAudit(t);
+      if (rowDue) {
+        recordMonitors(t);
+      }
+      recordGwMassAudit(t, rowDue);
       if (transport_) {
-        recordTransportAudit(t);
+        recordTransportAudit(t, rowDue);
       }
       if (temperature_) {
-        recordTemperatureAudit(t);
+        recordTemperatureAudit(t, rowDue);
       }
     }
 
@@ -1106,7 +1591,7 @@ void Simulation::runGroundwaterLoop(real_t t0) {
                            << " s (solver " << gw_->lastSolve().iterations << " it, residual "
                            << gw_->lastSolve().residualNorm << ")");
     }
-    if (checkpointInterval > 0.0 && t >= nextCheckpoint - 1.0e-9) {
+    if (checkpointDue) {
       const real_t label = nextCheckpoint;
       nextCheckpoint =
           (std::floor(t / checkpointInterval + 1.0e-9) + 1.0) * checkpointInterval;

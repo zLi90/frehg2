@@ -69,3 +69,26 @@ both rows.
 - Raster inputs bind **first data row = j = 0** (file order, *not* ESRI
   north-up) — chosen because the legacy reference inputs were consumed that
   way; documented in `GridDataReader.hpp`.
+
+## Periodic topology and EdgeTopology (Stage-3 T3)
+
+`domain.periodic` wraps the neighbor ranks in `Grid` (`rankWest/East/
+South/North` point across the seam; at `px == 1` to the rank itself), so
+halo exchanges, the gid halo exchange — and with it every matrix leg built
+from `gid(j, i±1)` — and all rank-based ghost fills follow automatically.
+What does NOT follow automatically is every kernel that tests a global
+index against the domain extents: those decide *boundary semantics* (leg
+folds, boundary audits, side-BC application, edge face forms, superbee
+guards, the stage reconstruction), and on a periodic axis there is no
+boundary. They all go through `Grid::EdgeTopology` now:
+
+```cpp
+const Grid::EdgeTopology topo = grid_.edgeTopology();
+if (topo.west(gi)) { ... }      // false everywhere on a periodic axis
+if (topo.outsideX(gi)) { ... }  // a periodic axis has no outside
+```
+
+`check_forbidden.sh` bans raw `gi == 0` / `gi == nxGlobal - 1`-class tests
+in `src/` (rule "raw global-edge test"), so a new kernel cannot silently
+treat the seam as a boundary. The converted-site inventory is the Stage-3
+plan §7 table; the roll-equivalence gate (pd2) is the behavioral proof.

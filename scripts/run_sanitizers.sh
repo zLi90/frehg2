@@ -80,6 +80,12 @@ cmake --build "$BUILD" -j "$(getconf _NPROCESSORS_ONLN)"
 # the other netmod is in use.
 export FI_PROVIDER=tcp
 export UCX_TLS="${UCX_TLS:-tcp,self,sm}"
+# Bitwise pins recorded on the uninstrumented default build are undefined
+# here: sanitizer instrumentation changes codegen under the same compiler
+# (the h5_bitwise fingerprint is compiler identity only). The regression
+# harness skips those comparisons under this flag (S3-A11); every
+# tolerance-based criterion still gates.
+export FREHG_SANITIZED_BUILD=1
 # Pin single-threaded execution for every label below (the FULL block further
 # down re-states this for its smoke subprocesses). The unit/validate ctest
 # entries carry no per-test OMP pin, so without this Kokkos grabs every core
@@ -106,7 +112,9 @@ if [ "$(uname -s)" = "Linux" ]; then
 fi
 
 if [ "$FULL" -eq 0 ]; then
-  ctest --test-dir "$BUILD" -L 'unit|mpi' --output-on-failure
+  # Stage-3 W8.6: the stage3 label (and its local-only subset) joins the
+  # quick matrix — the new rl/ob/pd/dg/et kernels get sanitizer coverage.
+  ctest --test-dir "$BUILD" -L '^(unit|mpi|stage3_local)$' --output-on-failure
   echo "run_sanitizers.sh: clean"
   exit 0
 fi
@@ -156,12 +164,15 @@ echo "run_sanitizers.sh: excluded from the matrix: $EXCLUDE"
 # subset (restart determinism, rank invariance) and say so.
 LEGACY="$(sed -n 's/^FREHG_LEGACY_BENCHMARKS:[^=]*=//p' "$BUILD/CMakeCache.txt")"
 if [ -d "$LEGACY" ]; then
-  ctest --test-dir "$BUILD" -L '^(unit|mpi|regression)$' -E "$EXCLUDE" \
+  ctest --test-dir "$BUILD" -L '^(unit|mpi|regression|stage3|stage3_local)$' -E "$EXCLUDE" \
     --output-on-failure --no-tests=error
 else
   echo "run_sanitizers.sh: legacy goldens not found at '$LEGACY' —"
   echo "  golden-comparison gates SKIPPED; running the self-contained set."
   ctest --test-dir "$BUILD" -L '^(unit|mpi)$' --output-on-failure --no-tests=error
+  # The stage3 gates are self-contained (no legacy goldens) — run them all.
+  ctest --test-dir "$BUILD" -L '^(stage3|stage3_local)$' -E "$EXCLUDE" \
+    --output-on-failure --no-tests=error
   ctest --test-dir "$BUILD" -L '^regression$' -R "restart|rank_invariance" \
     -E "$EXCLUDE" --output-on-failure --no-tests=ignore
 fi

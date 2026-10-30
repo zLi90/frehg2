@@ -203,10 +203,9 @@ void SurfaceSolver::assembleRhs() {
 void SurfaceSolver::assembleCoefficients() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   const real_t coef = gravity_ * dt_ * dt_;
   const real_t cellArea = grid_.dx() * grid_.dy();
   Field2<real_t> Sxp = Sxp_, Sxm = Sxm_, Syp = Syp_, Sym = Sym_, Sct = Sct_, Srhs = Srhs_;
@@ -257,19 +256,21 @@ void SurfaceSolver::assembleCoefficients() {
 
         // Fold the closed-boundary legs into the diagonal at the global
         // domain edges (shallowwater.c:367-393): the ghost surface is a
-        // zero-gradient copy, so the implicit face flux vanishes.
+        // zero-gradient copy, so the implicit face flux vanishes. On a
+        // periodic axis there is no edge: the leg stays live and its COO
+        // column is valid through the wrapped gid halo (Stage-3 T3).
         const int gi = i0 + i - 1;
         const int gj = j0 + j - 1;
-        if (gi == 0) {
+        if (topo.west(gi)) {
           sct -= sxm;
         }
-        if (gi == nxGlobal - 1) {
+        if (topo.east(gi)) {
           sct -= sxp;
         }
-        if (gj == 0) {
+        if (topo.south(gj)) {
           sct -= sym;
         }
-        if (gj == nyGlobal - 1) {
+        if (topo.north(gj)) {
           sct -= syp;
         }
 
@@ -436,8 +437,6 @@ void SurfaceSolver::fillAndSolve() {
 void SurfaceSolver::accumulateBoundaryFluxes() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
   const real_t dt = dt_;
@@ -455,46 +454,83 @@ void SurfaceSolver::accumulateBoundaryFluxes() {
   // surface-water.md, "West/south closed edges carry no explicit flux"),
   // so those terms measure zero today and become live only if a later
   // boundary kind fills the ghost momentum.
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   real_t outflow = 0.0;
+  // Stage-3 T2 (W2.6): alongside the volume, measure the kinetic energy
+  // entering through stage-adjacent faces and the entrance head it paid —
+  // the run record's stage_ke_influx_J / stage_entrance_head_ratio lines,
+  // the free-energy observable of the 2026-10 diagnosis (report_V1 §2.3).
+  // Inflow KE uses the face velocity u = E (the stored face velocity) and
+  // the explicit face volume; the paid head is eta_stage - eta_interior
+  // over u^2/2g, KE-weighted. Momentum rho = 998 (SweFormulas.hpp).
+  real_t keIn = 0.0;
+  real_t headNum = 0.0;
   Kokkos::parallel_reduce(
       "swe_boundary_outflow",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
           {1, 1}, {nyl + 1, nxl + 1}),
-      KOKKOS_LAMBDA(const int j, const int i, real_t& sum) {
+      KOKKOS_LAMBDA(const int j, const int i, real_t& sum, real_t& ke,
+                    real_t& num) {
         if (isEtaBc(j, i) != 0.0) {
           return;
         }
+        // Inflow KE through the four possible stage-adjacent faces of this
+        // interior cell: dV > 0 means water arrived FROM the stage cell.
+        const real_t g = real_t(9.81);
+        const auto stageInflow = [&](real_t dv, real_t u, real_t etaStage) {
+          if (dv > 0.0 && u != 0.0) {
+            const real_t dke = real_t(0.5) * real_t(998.0) * u * u * dv;
+            ke += dke;
+            num += dke * (etaStage - eta(j, i)) / (u * u / (real_t(2.0) * g));
+          }
+        };
+        // A periodic seam books exactly nothing: interior faces cancel in
+        // the telescoped sum, and the EdgeTopology predicates are all
+        // false on a periodic axis (gate pd4; Stage-3 T3).
         const int gi = i0 + i - 1;
         const int gj = j0 + j - 1;
-        if (gi == 0) {
+        if (topo.west(gi)) {
           sum -= dt * Asx(j, i - 1) * Ex(j, i - 1);
         }
-        if (gi == nxGlobal - 1) {
+        if (topo.east(gi)) {
           sum += dt * Asx(j, i) * Ex(j, i);
         }
-        if (gj == 0) {
+        if (topo.south(gj)) {
           sum -= dt * Asy(j - 1, i) * Ey(j - 1, i);
         }
-        if (gj == nyGlobal - 1) {
+        if (topo.north(gj)) {
           sum += dt * Asy(j, i) * Ey(j, i);
         }
         if (isEtaBc(j, i + 1) != 0.0) {
-          sum += dt * Asx(j, i) * Ex(j, i) - Sxp(j, i) * (etaBcValue(j, i + 1) - eta(j, i));
+          const real_t dv = dt * Asx(j, i) * Ex(j, i) -
+                            Sxp(j, i) * (etaBcValue(j, i + 1) - eta(j, i));
+          sum += dv;
+          stageInflow(-dv, Ex(j, i), etaBcValue(j, i + 1));
         }
         if (isEtaBc(j, i - 1) != 0.0) {
-          sum += -dt * Asx(j, i - 1) * Ex(j, i - 1) -
-                 Sxm(j, i) * (etaBcValue(j, i - 1) - eta(j, i));
+          const real_t dv = -dt * Asx(j, i - 1) * Ex(j, i - 1) -
+                            Sxm(j, i) * (etaBcValue(j, i - 1) - eta(j, i));
+          sum += dv;
+          stageInflow(-dv, Ex(j, i - 1), etaBcValue(j, i - 1));
         }
         if (isEtaBc(j + 1, i) != 0.0) {
-          sum += dt * Asy(j, i) * Ey(j, i) - Syp(j, i) * (etaBcValue(j + 1, i) - eta(j, i));
+          const real_t dv = dt * Asy(j, i) * Ey(j, i) -
+                            Syp(j, i) * (etaBcValue(j + 1, i) - eta(j, i));
+          sum += dv;
+          stageInflow(-dv, Ey(j, i), etaBcValue(j + 1, i));
         }
         if (isEtaBc(j - 1, i) != 0.0) {
-          sum += -dt * Asy(j - 1, i) * Ey(j - 1, i) -
-                 Sym(j, i) * (etaBcValue(j - 1, i) - eta(j, i));
+          const real_t dv = -dt * Asy(j - 1, i) * Ey(j - 1, i) -
+                            Sym(j, i) * (etaBcValue(j - 1, i) - eta(j, i));
+          sum += dv;
+          stageInflow(-dv, Ey(j - 1, i), etaBcValue(j - 1, i));
         }
       },
-      outflow);
+      outflow, keIn, headNum);
   audit_.boundaryOutflow += outflow;
+  stageKeInflux_ += keIn;
+  stageHeadRatioNum_ += headNum;
+  stageHeadRatioDen_ += keIn;
 }
 
 }  // namespace frehg::swe

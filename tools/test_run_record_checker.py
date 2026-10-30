@@ -101,6 +101,27 @@ def main() -> int:
     expect("unfinished record accepted with --allow-partial", broken,
            ["--allow-partial"], True)
 
+    # Stage-3 §3.2 --expect hook: the resolved configuration must carry the
+    # expected value; a missing key or a different value fails (the override
+    # anti-vacuity check — an override that never reached a run is caught).
+    carried = copy.deepcopy(VALID)
+    carried["configuration"]["groundwater"] = {"reallocation": "disabled"}
+    expect("--expect with the carried value accepted", carried,
+           ["--expect", "groundwater.reallocation=disabled"], True)
+    expect("--expect with a different value rejected", carried,
+           ["--expect", "groundwater.reallocation=legacy"], False)
+    expect("--expect with a missing key rejected", VALID,
+           ["--expect", "groundwater.reallocation=disabled"], False)
+    carried_warn = copy.deepcopy(VALID)
+    carried_warn["warnings"] = ["domain.periodic.x: bottom_elevation jumps across the x seam"]
+    expect("record with a warnings list accepted (W0.9)", carried_warn,
+           ["--ranks", "4", "--threads", "1"], True)
+
+    carried_bool = copy.deepcopy(VALID)
+    carried_bool["configuration"]["domain"] = {"periodic": {"x": True}}
+    expect("--expect maps YAML booleans to true/false", carried_bool,
+           ["--expect", "domain.periodic.x=true"], True)
+
     if failures:
         print("run-record checker negative tests: FAIL:", ", ".join(failures))
         return 1

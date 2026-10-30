@@ -1,0 +1,76 @@
+# ob3 — tidal-prism ledger gate (Stage-3 plan §6, phase T2).
+# A 10 x 20 flat basin, 2 m deep at rest, with a sinusoidal stage on the
+# north row (0.2 m amplitude, 1 h period, input/tide.dat) and explicit
+# velocity-0 walls on the other three edges (the g4 bring-up rule: default
+# edges are legacy-transmissive). The gate runs the zero_gradient and
+# external lanes (rewriting the tide BC's inflow block) and asserts, per
+# lane, the surface ledger closure, and BETWEEN lanes that the cumulative
+# stage exchange per cycle agrees to the Fr^2 class — the closure changes
+# the momentum of the inflow, never the volumetric exchange (plan P14:
+# each mode conserves exactly; Q differs at O(Fr^2), and the gate records
+# max Fr^2 as its own anti-vacuity bound of the comparison).
+#
+# THE inflow BLOCK IS THE T2 TARGET SCHEMA (gate-first, plan §2.3):
+# frehg --validate rejects this file until W2.1 lands.
+simulation:
+  id: ob3-tidal-basin
+  title: Stage-3 ob3 tidal-prism and ledger closure per inflow closure
+
+domain:
+  nx: 10
+  ny: 20
+  nz: 1
+  dx: 10.0
+  dy: 10.0
+  dz: 1.0
+  bottom_elevation: {constant: -2.0}
+
+time:
+  dt: 5.0
+  t_end: 7200.0
+  output_interval: 300.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.02}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+
+boundary_conditions:
+  - name: tide-stage
+    region: {polygon: [[-1.0, 190.0], [101.0, 190.0], [101.0, 201.0], [-1.0, 201.0]]}
+    target: surface
+    kind: eta
+    value: {series: {file: input/tide.dat}}
+    inflow:
+      closure: external           # the gate rewrites this per lane
+  - name: wall-west
+    region: {polygon: [[-1.0, -1.0], [10.0, -1.0], [10.0, 190.0], [-1.0, 190.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-east
+    region: {polygon: [[90.0, -1.0], [101.0, -1.0], [101.0, 190.0], [90.0, 190.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-south
+    region: {polygon: [[-1.0, -1.0], [101.0, -1.0], [101.0, 10.0], [-1.0, 10.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]

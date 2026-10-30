@@ -1,0 +1,75 @@
+# et6 — root-distribution exactness (Stage-3 plan §10, T6): the et0(2)
+# geometry — 1 x 2 columns, dz 0.05 with stretch 1.2, beds 0 and -0.12
+# with follow_terrain OFF so column 2 is partially masked and L = 0.33 m
+# cuts a cell mid-interval — under K = 1e-15 (no redistribution) and a
+# Feddes range with alpha_F = 1 (h3 = -1000, h4 = -2000), 10 fixed
+# substeps, Ss = 0 (S3-A9: with Ss > 0 part of the sink is funded from
+# compressible storage and the theta identity is no longer exact). Per
+# cell the depletion must be EXACTLY the sink's integral — Delta theta_k
+# = uptake_k t (the root_uptake interval mean, dz-free on the
+# partial-cell-trimmed regular mesh) — the audit T_act equals 2 T_pot t,
+# and the uniform lane's fully-covered cells share ONE sink value
+# T_pot / L. The harness runs a uniform-profile and
+# a linear-profile lane (it rewrites root_profile), and reads the
+# root_uptake interval-mean output — the Field3 IntervalRates leg's
+# first consumer (S3-A7).
+simulation:
+  id: et6-roots
+  title: Stage-3 et6 root-fraction exactness on a stretched masked grid
+
+domain:
+  nx: 2
+  ny: 1
+  nz: 14
+  dx: 1.0
+  dy: 1.0
+  dz: 0.05
+  dz_stretch: 1.2
+  bottom_elevation: {file: input/et6_dem.dat}
+
+time:
+  dt: 60.0
+  t_end: 600.0
+  output_interval: 600.0
+
+modules:
+  groundwater: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 60.0, dt_min: 60.0, dt_max: 60.0}
+  specific_storage: 0.0
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: frozen, ksx: 1.0e-15, ksy: 1.0e-15, ksz: 1.0e-15,
+       theta_s: 0.45, theta_r: 0.067, vg_alpha: 1.6, vg_n: 1.37}
+  map: {constant: frozen}
+
+evapotranspiration:
+  potential: prescribed
+  prescribed: {constant: 2.0e-7}
+  open_water: false
+
+vegetation:
+  types:
+    - name: grass
+      lai: 2.0
+      extinction: 0.5
+      leaf_resistance: 100.0
+      root_depth: 0.33
+      root_profile: uniform
+      feddes: {h3: -1000.0, h4: -2000.0}
+  map: {constant: grass}
+
+initial_conditions:
+  groundwater:
+    head: {constant: -0.5}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, root_uptake]
+    atmosphere: [transpiration_rate, transpiration_unrealised_rate]

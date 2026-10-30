@@ -1,0 +1,102 @@
+# et8d — held-seepage salt, D9 (Stage-3 plan §9, T5; driver redesigned
+# under S3-A8 — the side-head authorings produced no measurable
+# exfiltration): a 1 x 2 coupled strip over a 1 m sand column whose
+# BOTTOM head (1.2 m pressure head at the 1 m-deep bottom face = 0.2 m
+# above hydrostatic under the surface water table, K = 1e-6) drives a gentle
+# upward Darcy flux (~1e-4 m per 60 s step) onto a DRY surface. With
+# min_depth = 5e-3 m the exchanged depth stays below the application
+# threshold for ~40 steps — the seepage is HELD in the accumulator —
+# then applies and the surface stays wet (a steady seepage pond). The subsurface
+# is at 10 psu: the salt of the exfiltrated water must leave the top
+# cells as the water leaves (W5.9 debits exfNew A sKp every step) and
+# sit in the surface salt store while the water is held, so total salt
+# (subsurface + store + surface) is constant to rounding and the
+# top-cell subs_adjust stays at rounding. Once the held depth crosses
+# min_depth the water applies and the store releases into the new pond.
+simulation:
+  id: et8d-held-seepage
+  title: Stage-3 et8d held-seepage salt store
+
+domain:
+  nx: 2
+  ny: 1
+  nz: 10
+  dx: 1.0
+  dy: 1.0
+  dz: 0.1
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 60.0
+  t_end: 14400.0
+  output_interval: 1200.0
+
+modules:
+  surface_water: true
+  groundwater: true
+  transport: true
+
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 5.0e-03
+  wetting_face_depth: 1.0e-03
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 60.0, dt_min: 60.0, dt_max: 60.0}
+  specific_storage: 1.0e-5
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: sand, ksx: 1.0e-6, ksy: 1.0e-6, ksz: 1.0e-6,
+       theta_s: 0.41, theta_r: 0.05, vg_alpha: 4.0, vg_n: 2.5}
+  map: {constant: sand}
+
+coupling: {mode: sync}
+
+atmosphere:
+  air_temperature: {constant: 20.0}
+  surface_temperature: {constant: 20.0}
+  pressure: {constant: 101.3}
+  relative_humidity: {constant: 0.6}
+  wind_speed: {constant: 2.0}
+  wind_speed_floor: 0.5
+
+evapotranspiration:
+  potential: bulk
+  open_water: true
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 0.0}
+  surface_update: consistent
+  subsurface_update: consistent
+  surface_dryout: store
+
+boundary_conditions:
+  - name: bottom-head
+    region: {polygon: [[-0.5, -0.5], [2.5, -0.5], [2.5, 1.5], [-0.5, 1.5]]}
+    target: groundwater_bottom
+    kind: head
+    value: {constant: 1.2}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+  groundwater:
+    water_table: {constant: 0.0}
+  transport:
+    surface: {constant: 0.0}
+    groundwater: {constant: 10.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+    groundwater: [hydraulic_head, water_content]
+    transport: [concentration, concentration_surface, salt_store]

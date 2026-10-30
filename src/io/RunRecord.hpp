@@ -18,6 +18,7 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
 namespace YAML {
 class Node;
@@ -50,6 +51,13 @@ class RunRecord {
   /// Replace the closure section (final mass-audit budgets; rank-0 values).
   void setClosure(const std::string& yamlText);
 
+  /// Append a non-fatal advisory to the record's `warnings:` list (Stage-3
+  /// W0.9). The constructor seeds the list with the configuration's
+  /// validation warnings; runtime findings (seam discontinuities, truncated
+  /// root zones, entrance-head diagnostics) are added through this. Rank-0
+  /// state; callers log the message themselves (log::warn).
+  void addWarning(const std::string& message);
+
   /// Write the record. Collective on the construction communicator (merges
   /// the timer tree). \p finished marks a completed run; mid-run flushes
   /// pass false so a killed run's record stays truthful.
@@ -62,6 +70,7 @@ class RunRecord {
   std::string staticText_;  ///< provenance-through-BC YAML (constant part)
   std::string solverText_;  ///< solver section body (YAML map or empty)
   std::string closureText_; ///< closure section body (YAML map or empty)
+  std::vector<std::string> warnings_;  ///< `warnings:` list (W0.9; may be empty)
   std::chrono::steady_clock::time_point began_;
 };
 

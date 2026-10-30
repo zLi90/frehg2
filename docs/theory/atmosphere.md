@@ -94,3 +94,14 @@ The chain is gated by g4 (analytic drawdown + evaporative concentration,
 (equilibrium relaxation + the measured-inlet-convolved channel plume,
 `regression.g7`); unit hand-value tables cover every formula above
 (`unit.all`, suites `BulkAerodynamic` and `MetForcing`).
+
+## Aerodynamic resistance selection (Stage-3 T5)
+
+`atmosphere.aerodynamic_resistance.law` selects r_a for the
+evapotranspiration consumers only — `liu2006` (the v2.0 fit, default),
+`fao56` (208/u2, eq. 47), or `log_profile` (the neutral two-roughness
+form). The Q4/Q5 bulk consumers (legacy surface/soil bulk evaporation,
+the heat module's latent and sensible fluxes) stay pinned to `liu2006`:
+their goldens embed it, and with `modules.temperature` the schema
+requires the ET volume and the heat flux to share it.
+

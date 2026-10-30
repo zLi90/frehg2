@@ -86,10 +86,9 @@ void RichardsSolver::computeFluxes(real_t dtg) {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const int nz = grid_.nz();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   const real_t dx = grid_.dx();
   const real_t dy = grid_.dy();
   const real_t az = mesh_.areaZ();
@@ -113,6 +112,10 @@ void RichardsSolver::computeFluxes(real_t dtg) {
   Field2<real_t> cplDept = coupled ? cpl_.dept : Field2<real_t>();
   Field2<real_t> cplAvail = coupled ? cpl_.avail : Field2<real_t>();
   Field2<int> cplMode = coupled ? cplMode_ : Field2<int>();
+  // Stage-3 T5 (W5.5): ET columns add qVap to the top face guard-free.
+  const bool et = etActive_;
+  Field2<int> etCol = et ? etColumn_ : Field2<int>();
+  Field2<real_t> etQ = et ? qVap_ : Field2<real_t>();
 
   // x faces (darcy_flux "x" branch, subroutines.c:32-46). Slot (j, i, k) is
   // the face between cells i and i+1; slot (j, 0, k) is the west
@@ -123,8 +126,10 @@ void RichardsSolver::computeFluxes(real_t dtg) {
           {1, 0, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         const int giMinus = i0 + i - 1;
-        const bool westEdgeFace = (giMinus < 0);
-        const bool eastEdgeFace = (giMinus == nxGlobal - 1);
+        // Stage-3 T3: no edge faces on a periodic axis — the seam face
+        // takes the interior Darcy form with the wrapped neighbor's halo.
+        const bool westEdgeFace = topo.outsideX(giMinus);
+        const bool eastEdgeFace = topo.east(giMinus);
         const real_t faceA = ax(j, i, k);
         real_t q = 0.0;
         if (westEdgeFace) {
@@ -152,8 +157,8 @@ void RichardsSolver::computeFluxes(real_t dtg) {
             const real_t kn = conductivityFromHead(
                 soilAt(vga, vgn, wcs, wcr, aev, j, i + 1, k), h(j, i + 1, k), ks);
             kface = 0.5 * (kc + kn);
-            const bool minusInDomain = (giMinus >= 0);
-            const bool plusInDomain = (giMinus + 1 <= nxGlobal - 1);
+            const bool minusInDomain = !topo.outsideX(giMinus);
+            const bool plusInDomain = !topo.outsideX(giMinus + 1);
             if (minusInDomain && plusInDomain &&
                 (gid(j, i, k) < 0 || gid(j, i + 1, k) < 0)) {
               kface = 0.0;  // subroutines.c:99
@@ -200,8 +205,8 @@ void RichardsSolver::computeFluxes(real_t dtg) {
           {0, 1, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         const int gjMinus = j0 + j - 1;
-        const bool southEdgeFace = (gjMinus < 0);
-        const bool northEdgeFace = (gjMinus == nyGlobal - 1);
+        const bool southEdgeFace = topo.outsideY(gjMinus);
+        const bool northEdgeFace = topo.north(gjMinus);
         const real_t faceA = ay(j, i, k);
         real_t q = 0.0;
         if (southEdgeFace) {
@@ -224,8 +229,8 @@ void RichardsSolver::computeFluxes(real_t dtg) {
             const real_t kn = conductivityFromHead(
                 soilAt(vga, vgn, wcs, wcr, aev, j + 1, i, k), h(j + 1, i, k), ks);
             kface = 0.5 * (kc + kn);
-            const bool minusInDomain = (gjMinus >= 0);
-            const bool plusInDomain = (gjMinus + 1 <= nyGlobal - 1);
+            const bool minusInDomain = !topo.outsideY(gjMinus);
+            const bool plusInDomain = !topo.outsideY(gjMinus + 1);
             if (minusInDomain && plusInDomain &&
                 (gid(j, i, k) < 0 || gid(j + 1, i, k) < 0)) {
               kface = 0.0;
@@ -329,7 +334,11 @@ void RichardsSolver::computeFluxes(real_t dtg) {
               if (q <= 0.0) {
                 q = 0.0;
               }
-              if (topCode(j, i) == static_cast<int>(GwBcCode::Flux)) {
+              if (et && etCol(j, i) != 0) {
+                // W5.5: the channel's capped flux, no guard (D1's other
+                // half — the corrector's one-sided wc > wcr test).
+                q += etQ(j, i) * az;
+              } else if (topCode(j, i) == static_cast<int>(GwBcCode::Flux)) {
                 const real_t v = topValue(j, i);
                 if ((v > 0.0 && wc(j, i, k) > wcr(j, i, k)) || v < 0.0) {
                   q += v * az;
@@ -338,7 +347,9 @@ void RichardsSolver::computeFluxes(real_t dtg) {
             }
           } else {
             const int code = topCode(j, i);
-            if (code == static_cast<int>(GwBcCode::Flux)) {
+            if (et && etCol(j, i) != 0) {
+              q = etQ(j, i) * az;  // W5.5 uncoupled, guard-free
+            } else if (code == static_cast<int>(GwBcCode::Flux)) {
               q = topValue(j, i) * az;
             } else if (code == static_cast<int>(GwBcCode::Head)) {
               const real_t kface = ksz(j, i, k);  // saturated top, :102-105
@@ -411,6 +422,11 @@ void RichardsSolver::applyCoupledTopBookkeeping(real_t dtg) {
   Field2<real_t> topValue = topValue_;
   Field2<real_t> eta = cpl_.eta, dept = cpl_.dept, avail = cpl_.avail;
   Field2<real_t> seepAccum = cpl_.seepAccum, gain = cpl_.gain;
+  // Stage-3 T5 (W5.5): ET columns strip exactly the channel's flux —
+  // any sign, no depth test (qVap != 0 only in mode 0 by construction).
+  const bool et = etActive_;
+  Field2<int> etCol = et ? etColumn_ : Field2<int>();
+  Field2<real_t> etQ = et ? qVap_ : Field2<real_t>();
 
   real_t exchanged = 0.0;
   real_t bounced = 0.0;
@@ -444,8 +460,16 @@ void RichardsSolver::applyCoupledTopBookkeeping(real_t dtg) {
           }
         }
         seepAccum(j, i) += q * dtg / az;
-        if (topCode(j, i) == static_cast<int>(GwBcCode::Flux) && topValue(j, i) > 0.0 &&
-            wc(j, i, kTop) > wcr(j, i, kTop) && dept(j, i) <= minDepth) {
+        if (et && etCol(j, i) != 0) {
+          // W5.5: the vapor left through the atmosphere, not the surface
+          // — remove the channel's exact volume from the exchange
+          // accumulator (any sign: condensation adds), and book IT (not
+          // the whole top face — the D2 fix) as the evaporated volume.
+          seepAccum(j, i) -= etQ(j, i) * dtg;
+          sumV += etQ(j, i) * dtg * az;
+        } else if (topCode(j, i) == static_cast<int>(GwBcCode::Flux) &&
+                   topValue(j, i) > 0.0 && wc(j, i, kTop) > wcr(j, i, kTop) &&
+                   dept(j, i) <= minDepth) {
           seepAccum(j, i) -= topValue(j, i) * dtg;
           sumV += topValue(j, i) * dtg * az;
         }
@@ -500,6 +524,40 @@ void RichardsSolver::updateWaterContent(real_t dtg) {
       },
       ssVolume);
   audit_.ssStorage = ssVolume;
+
+  if (vegActive_) {
+    // Stage-3 T6 (W6.4, S3-A9 form): the root-uptake sink as a SEPARATE
+    // post-kernel — inserting even a guarded branch into the pinned
+    // update kernel above perturbs the compiler's fma contraction and
+    // breaks default_bitwise (measured on b2), so the kernel body stays
+    // byte-identical and the sink applies after it. The distribution
+    // wc -= (dtg rRho S V)/coeff is the in-kernel numerator term to one
+    // rounding (no golden pins the vegetated path; the W6.4 unit gate's
+    // 1e-12/1e-14 hold). The ss-audit contribution of the changed theta
+    // is accumulated and added.
+    Field3<real_t> trSink = sink_;
+    real_t ssDelta = 0.0;
+    Kokkos::parallel_reduce(
+        "gw_update_wc_sink",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
+            {1, 1, 0}, {nyl + 1, nxl + 1, nz}),
+        KOKKOS_LAMBDA(const int j, const int i, const int k, real_t& sum) {
+          if (gid(j, i, k) < 0 || trSink(j, i, k) == 0.0) {
+            return;
+          }
+          const real_t volume = az * dz3d(j, i, k);
+          const real_t coeff =
+              volume * (rRho(j, i, k) + rRho(j, i, k) * ss *
+                                            (h(j, i, k) - hn(j, i, k)) /
+                                            wcs(j, i, k));
+          const real_t dTheta = dtg * rRho(j, i, k) * trSink(j, i, k) * volume / coeff;
+          wc(j, i, k) -= dTheta;
+          sum -= dTheta * volume * rRho(j, i, k) * ss *
+                 (h(j, i, k) - hn(j, i, k)) / wcs(j, i, k);
+        },
+        ssDelta);
+    audit_.ssStorage += ssDelta;
+  }
 }
 
 void RichardsSolver::enforceMoistureBc() {
@@ -560,7 +618,6 @@ void RichardsSolver::finalizeWaterContent() {
   Field3<real_t> wc = wc_, wcs = wcs_, wcr = wcr_, vloss = vloss_, h = h_;
   Field3<real_t> dz3d = mesh_.dz3d();
   Field3<PetscInt> gid = grid_.gid3();
-
   // The final θ clamp with volume-loss accounting (solve_groundwater
   // :165-186); the reduction feeds the mass audit.
   real_t lost = 0.0;

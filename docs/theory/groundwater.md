@@ -200,6 +200,58 @@ closes to rounding every step by construction (`GwModule.AuditIdentity…`
 asserts ≤ 1e-12), and a fully closed domain conserves volume to better than
 1e-8 relative per step (plan §10 P2; `GwModule.ClosedColumnConservesMass`).
 
+## Post-allocation modes (Stage-3 T1, `groundwater.reallocation`)
+
+The PCA post-allocation step (`Reallocate.cpp`) restores h ↔ θ consistency
+after the corrector and redistributes over-saturation excess. Its legacy
+form performs four actions per step: (1) over-saturated cells (θ ≥ θs)
+send their excess up/down the head gradient and **drop** the lateral
+share; (2) saturated-contact cells restore θ := θ(h_predicted), which
+**creates** water when θ(h) > θ (the net creation measured at 7–64 % of
+the exfiltration on the 2026Frehg2 study cases, report_V2); (3) isolated
+unsaturated cells re-derive h := h(θ) — conservative; (4) column-end
+remainders and sub-`min_depth` vents are dropped.
+
+`reallocation: legacy` (default) is the v2.0 behavior, byte-identical.
+`reallocation: disabled` runs the sweep with every **non-conservative**
+action removed: no sends, no drops, no θ := θ(h) creation; the isolated
+h := h(θ) restore is kept verbatim; the over-saturation excess is left to
+the finalize clamp (audited as `vloss`). The `realloc` and
+`realloc_dropped` audit columns are **exactly zero** under `disabled`
+(gates rl1–rl3), and the ledger closes as
+`Δvolume = boundary_in − ss_storage − vloss`.
+
+**Domain of applicability (S3-A4, measured).** `disabled` is for
+vadose-dominated problems. Near saturation the PCA corrector relies on the
+legacy consistency restore; without it the clamp mints water at draining
+cells and deletes it at filling ones, and the dynamics amplify rounding
+chaotically (O(1) orientation divergence on a block saturated to the
+surface, while the vadose battery passes at 1e-12). Runs with substantial
+saturated interiors should use `legacy`; `disabled`'s clamp cost is
+visible per cell in the `vloss` output and per run in the audit column.
+Amendment S3-A4 records the three alternative fringe restores that were
+measured and rejected (branch flips at the 0.9999 θs mark; a blend that
+pins the water table; a 1/Ss extension that blows up); a conserving
+redesign of the saturated-contact restore is an open owner decision
+(plan contingency C-RL).
+
+With the per-cell diagnostics requested
+(`output.variables.groundwater: [realloc_created, realloc_dropped,
+vloss]`), both modes book every created and discarded volume per cell;
+the sums reproduce the audit columns exactly (gate rl2) and the fields
+checkpoint/restart bitwise (gate rl-restart).
+
+## Periodic lateral topology (Stage-3 T3)
+
+A periodic axis has no side boundary: no side codes exist there
+(BoundarySet attaches no faces), the 7-point matrix legs stay live across
+the seam through the wrapped gid halo, the edge Darcy-face forms and the
+baroclinic edge ratios take their interior expressions with the wrapped
+neighbor's halos, the terrain-following face slopes are computed across
+the seam, and the boundary-inflow audit books nothing there. Gates: pd2-gw
+(roll equivalence on a periodic heterogeneous block), pd5 (confined Darcy
+profile with zero x flux through the wrapped legs).
+
 ## Bulk soil evaporation (v2 Q4, plan §3.2)
 
 `groundwater.evaporation` (mode `bulk`, uncoupled runs only) marks the

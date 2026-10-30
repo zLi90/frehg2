@@ -1,0 +1,78 @@
+# dg1 — seepage_rate ledger-identity gate (Stage-3 plan §8, phase T4).
+# A 4 x 4 x 8 coupled box (dx = dy = 2 m, soil 2 m), SUBCYCLED dt = 1 s
+# with dtg up to 10 s — most surface steps see no subsurface substep, so
+# the per-step snapshot `seepage` (qss) is 0 on wet cells at most output
+# instants while the interval-mean `seepage_rate` is not (the V3 finding
+# the gate's anti-vacuity check reproduces). The y+ side head stands
+# 0.3 m above the surface (exfiltration under the wet rows) and the
+# south-west corner starts ponded over a deep water table
+# (infiltration): both signs of the exchange are in the ledger identity
+#   | sum(rate * A * dt_out) - delta(mass_audit.seepage) | <= 1e-12 * max(|delta|, 1e-12)
+# per output interval. The point monitor feeds the dg2 decimation gate.
+#
+# THE seepage_rate VARIABLE AND output.monitor_interval ARE THE T4 TARGET
+# SCHEMA (gate-first, plan §2.3): frehg --validate rejects this file until
+# W4.1-W4.3 land.
+simulation:
+  id: dg1-seepage
+  title: Stage-3 dg1 interval-mean seepage rate vs the coupled ledger
+
+domain:
+  nx: 4
+  ny: 4
+  nz: 8
+  dx: 2.0
+  dy: 2.0
+  dz: 0.25
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 1.0
+  t_end: 3600.0
+  output_interval: 300.0
+
+modules:
+  surface_water: true
+  groundwater: true
+
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-03
+
+groundwater:
+  timestep: {dt_init: 5.0, dt_min: 1.0, dt_max: 10.0}
+  specific_storage: 1.0e-5
+  reallocation: disabled        # the vadose-conservative mode (T1)
+
+soil:
+  types:
+    - {name: loamy-sand, ksx: 1.0e-5, ksy: 1.0e-5, ksz: 1.0e-5,
+       theta_s: 0.41, theta_r: 0.05, vg_alpha: 2.0, vg_n: 1.8}
+  map: {constant: loamy-sand}
+
+coupling: {mode: subcycled}
+
+initial_conditions:
+  surface:
+    eta: {file: input/dg1_eta0.dat}   # ponded SW corner (0.1 m), dry elsewhere
+  groundwater:
+    water_table: {constant: -1.5}
+
+boundary_conditions:
+  - name: uphill-head
+    region: {polygon: [[-1.0, 5.9], [9.0, 5.9], [9.0, 9.0], [-1.0, 9.0]]}
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 0.3}}  # above the 0 m surface: exfiltration
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, seepage, seepage_rate]
+    groundwater: [hydraulic_head, water_content]
+  monitors:
+    - {name: p_corner, i: 0, j: 0, variables: [eta, depth]}

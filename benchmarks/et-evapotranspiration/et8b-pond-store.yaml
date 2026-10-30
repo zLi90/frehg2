@@ -1,0 +1,72 @@
+# et8b — the surface salt store, O4 (Stage-3 plan §9, T5): a 1 x 1
+# surface-only pond, 5 mm at 35 psu, the full et-met open-water demand
+# evaporates it to dryness (~55 min at ~1.5e-6 m/s), a 2 mm rain pulse
+# at t = 7200 s rewets it. With surface_dryout: store the identity
+# s(t) h(t) = 35 h0 holds at every output (evaporation removes water
+# only; rain adds salt-free volume; the store carries the salt through
+# the dry spell and W5.7(b) releases it on rewet), surf_mass drops to 0
+# at dry-out with surf_store = 35 h0 A, and total salt is constant to
+# rounding. The harness's delete lane (et8c) asserts the v2.0 behavior
+# LOSES exactly 35 h0 A into surf_adjust — the real negative.
+simulation:
+  id: et8b-pond-store
+  title: Stage-3 et8b pond dry-out salt store and release
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 10.0
+  t_end: 10800.0
+  output_interval: 600.0
+
+modules:
+  surface_water: true
+  transport: true
+
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+  rainfall:
+    series: {file: input/et8b_rain.dat}
+
+atmosphere:
+  air_temperature: {constant: 25.0}
+  surface_temperature: {constant: 30.0}
+  pressure: {constant: 101.3}
+  relative_humidity: {constant: 0.3}
+  wind_speed: {constant: 8.0}
+  wind_speed_floor: 0.5
+
+evapotranspiration:
+  potential: bulk
+  open_water: true
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 0.0}
+  surface_update: consistent
+  surface_dryout: store
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.005}
+  transport:
+    surface: {constant: 35.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+    transport: [concentration_surface, salt_store]
+    atmosphere: [evaporation_rate, wet_time]

@@ -1,0 +1,81 @@
+# ob5 — no-free-energy gate (Stage-3 plan §6, phase T2).
+# The 2026-10-26 wind x heterogeneity diagnosis in miniature (report_V1):
+# a 20 x 30 basin shoaling toward a constant stage on the north row
+# (eta = 0), seeded with an along-shore jet (uu = 0.3 m/s in the 5 rows by
+# the stage) and a +1 mm x-asymmetric eta kick. Under closure external the
+# stage boundary can only ABSORB kinetic energy (the entrance head is
+# paid), so the domain KE must decay monotonically once the seed's initial
+# adjustment is over, and the KE influx through the stage faces stays
+# negligible. Under zero_gradient the inflow imports the interior momentum
+# for free and the KE influx must exceed the external lane's by >= 10x —
+# the gate's REAL negative lane and its anti-vacuity proof in one (the
+# mechanism that sustained the production gyre; plan §16 C-OB5 holds the
+# fallback if this contrast needs more than 30 s of runtime).
+# The x edges carry explicit velocity-0 walls up to the stage row (the
+# production v11C layout S0-1 recommended); the south edge is a wall.
+#
+# THE inflow BLOCK IS THE T2 TARGET SCHEMA (gate-first, plan §2.3):
+# frehg --validate rejects this file until W2.1 lands.
+simulation:
+  id: ob5-gyre
+  title: Stage-3 ob5 no-free-energy at an external stage boundary
+
+domain:
+  nx: 20
+  ny: 30
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {file: input/ob5_dem.dat}
+
+time:
+  dt: 0.5
+  t_end: 1200.0
+  output_interval: 30.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.025}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+
+initial_conditions:
+  surface:
+    eta: {file: input/ob5_eta0.dat}
+    uu: {file: input/ob5_uu0.dat}
+
+boundary_conditions:
+  - name: sea-stage
+    region: {polygon: [[-1.0, 29.0], [21.0, 29.0], [21.0, 31.0], [-1.0, 31.0]]}
+    target: surface
+    kind: eta
+    value: {constant: 0.0}
+    inflow:
+      closure: external           # the gate rewrites this per lane
+  - name: wall-west
+    region: {polygon: [[-1.0, -1.0], [0.75, -1.0], [0.75, 29.0], [-1.0, 29.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-east
+    region: {polygon: [[19.25, -1.0], [21.0, -1.0], [21.0, 29.0], [19.25, 29.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-south
+    region: {polygon: [[-1.0, -1.0], [21.0, -1.0], [21.0, 0.75], [-1.0, 0.75]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]

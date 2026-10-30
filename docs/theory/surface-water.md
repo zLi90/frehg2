@@ -166,6 +166,63 @@ of the algorithm, not defects.
 Dead legacy code found during the port is recorded in
 [removed-features.md](removed-features.md).
 
+## Inflow closure at prescribed-stage boundaries (Stage-3 T2)
+
+At a `kind: eta` (stage) boundary the elevation is prescribed and the
+boundary-face velocity is back-solved from continuity (the mass-consistent
+reconstruction below) — that part is exact and unchanged. What is
+selectable (`boundary_conditions[].inflow.closure`) is the **momentum**
+the advection stencils read across the boundary:
+
+- **`zero_gradient`** (default, bitwise v2.0): the upwind stencil of the
+  first interior face reads the reconstruction, i.e. effectively its own
+  velocity — the inflow arrives already carrying the interior momentum and
+  pays no entrance head. Valid where the boundary cuts a uniform flow (a
+  channel, a through-flowing reach). Where the outer water is still it is
+  a **free energy source**: a recirculation entering and leaving through
+  the same stage row gains ½ρv²Q per pass and can self-sustain (the
+  2026-10 wind × heterogeneity campaign's 3-D gyre; 928 W measured against
+  a ±0.05 mm entrance head, report_V1). The run record measures this:
+  `stage_ke_influx_J` (cumulative incoming kinetic energy through
+  stage-adjacent faces) and `stage_entrance_head_ratio` (head actually
+  paid per v²/2g), with a run-end warning when fast inflow pays under half
+  the Bernoulli head.
+- **`external`**: the stage cells are an external reservoir moving at
+  `inflow.velocity` (constant or series per component; default still).
+  Reservoir faces (both cells external-stage, or one external-stage and
+  one outside the domain) enter the advection stencils at the reservoir
+  state, and self-advection across them takes the conservative d(u²/2)
+  form, so a steady entrance costs exactly (v² − u_ext²)/2g — a naive
+  zero substitution with the upwind weight would charge 2·v²/2g (the
+  prototype's factor-two finding). Flow rates, the reconstruction,
+  continuity and transport are untouched; the volumetric exchange changes
+  only at O(Fr²) (gate ob3 measures it).
+- **Coupled deposits on stage cells** (seepage, bounce-back, vents) are
+  booked in `mass_audit.stage_deposit` under either closure; under
+  `external` they are also removed through the reservoir before the
+  velocity update (under `zero_gradient` the v2.0 dynamics — the one-step
+  pressure kick and unbooked deletion — are preserved bitwise, now
+  measured).
+
+Flather/radiation forms were considered and rejected for this stage: with
+a clamped stage they overdetermine the boundary (they belong to a future
+radiation BC kind, not to `kind: eta`). Gates: ob1 (the discrete-chain
+entrance head, all three lanes), ob2/ob4 unit, ob3 (ledger + tidal
+prism), ob5 (no-free-energy vs the zero-gradient contrast), ob8 (b6 under
+`external`, nightly record).
+
+## Periodic lateral topology (Stage-3 T3)
+
+Under `domain.periodic` a seam face is an interior face: the free-surface
+matrix keeps both legs live (their columns resolve through the wrapped gid
+halo), the closed-edge leg fold and the zero-explicit-flux edge rules do
+not apply, the boundary audit books nothing there, and the superbee
+far-neighbor stencil reads the real wrapped values. The stage
+reconstruction of eta conditions skips periodic axes (their faces carry
+computed velocities). The behavioral proof is the pd2 roll-equivalence
+gate: a run with all inputs rolled k columns equals the base run rolled k,
+to 1e-11 under the strict solver.
+
 ## Wind stress (v2 Q6, plan §5.2)
 
 The quadratic relative-velocity stress with thin-layer attenuation is

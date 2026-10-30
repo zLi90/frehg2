@@ -129,6 +129,11 @@ scalar_value-temperature,groundwater_side-west,coupled,tested,CoupledModule.Side
 scalar_value-temperature,groundwater_side-east,coupled,tested,CoupledModule.SideThermalDirichletAdmittedUnderCoupling;regression.heat_orient
 scalar_value-temperature,groundwater_side-south,coupled,tested,CoupledModule.SideThermalDirichletAdmittedUnderCoupling;regression.heat_orient
 scalar_value-temperature,groundwater_side-north,coupled,tested,CoupledModule.SideThermalDirichletAdmittedUnderCoupling;regression.heat_orient
+edge-bc,periodic-x-axis,any,schema-rejected,regression.s3.pd6
+edge-bc,periodic-y-axis,any,schema-rejected,regression.s3.pd6
+eta-inflow-zero_gradient,surface,any,tested,regression.s3.ob1;regression.s3.ob3;regression.s3.ob5;SweModule.ExternalStageInflowPaysTheBernoulliEntranceHead
+eta-inflow-external,surface,uncoupled,tested,regression.s3.ob1;regression.s3.ob3;regression.s3.ob5
+eta-inflow-external,surface,coupled,tested,CoupledModule.ExternalStageAbsorbsAndBooksCoupledDeposits;regression.s3.ob8.b6.ss
 # ---- groundwater_top ---------------------------------------------------
 head-constant,groundwater_top,uncoupled,tested,regression.b2;GwModule.PrescribedHeadTopInfiltrates
 head-constant,groundwater_top,coupled,schema-rejected,ConfigTest.RejectsCoupledGroundwaterTopHead

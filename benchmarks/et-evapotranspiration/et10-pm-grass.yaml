@@ -1,0 +1,92 @@
+# et10 — model-level Penman–Monteith (Stage-3 plan §11, T7): a 1 x 1 x 20
+# grass column under the FAO-56 hourly Example-19 daytime lane (N'Diaye,
+# 14.00–15.00 h; benchmarks/et-evapotranspiration/reference/
+# fao56-examples.yaml). The vegetation is the FAO reference grass as a
+# dense canopy: LAI 2.88 (the 24·h rule for h = 0.12 m), extinction 11 so
+# tau = e^{-31.7} ~ 1.7e-14 (the ground channels are off to below the
+# gate tolerance), r_l = 100 -> r_c = 69.44 s/m (the FAO reference
+# value), albedo 0.23, Feddes alpha = 1 (wetland form, h well above h3)
+# on wet soil with K ~ 0 and Ss = 0 (et6's exactness conditions: the
+# sink integrates to T_pot untouched). The radiation closes FAO's budget
+# exactly: shortwave_incoming = R_s,FAO and longwave_in chosen so
+# eps (LW_in - sigma T_K^4) = -R_nl,FAO; ground-heat fraction 0.1.
+# Asserts (run_regression.py et10): (1) the audit T_act/h equals
+# gate_et.pm_q_form() with the model's constants to 1e-10; (2) the rate
+# in mm/h is within delta_conv (+ rounding) of FAO's published 0.63 —
+# delta_conv measured 0.016166 mm/h (2.58 %), tolerance 1.2x by S3-A10.
+# Negative: albedo 0.23 -> 0.20 fails (1).
+simulation:
+  id: et10-pm-grass
+  title: Stage-3 et10 Penman-Monteith grass column vs FAO-56 Example 19
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 20
+  dx: 1.0
+  dy: 1.0
+  dz: 0.05
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 60.0
+  t_end: 3600.0
+  output_interval: 3600.0
+
+modules:
+  groundwater: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 60.0, dt_min: 60.0, dt_max: 60.0}
+  specific_storage: 0.0
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: frozen, ksx: 1.0e-15, ksy: 1.0e-15, ksz: 1.0e-15,
+       theta_s: 0.45, theta_r: 0.067, vg_alpha: 1.6, vg_n: 1.37}
+  map: {constant: frozen}
+
+# FAO-56 Example 19, 14.00-15.00 h: T 38 C, RH 52 %, u2 3.3 m/s at 2 m,
+# P = Eq. 7 at 8 m a.s.l.; R_s = 2.450 MJ m-2 h-1; LW_in closes
+# eps (LW_in - sigma T_K^4) = -R_nl,FAO = -38.1386 W/m^2.
+atmosphere:
+  air_temperature: {constant: 38.0}
+  pressure: {constant: 101.20547063485098}
+  relative_humidity: {constant: 0.52}
+  wind_speed: {constant: 3.3}
+  shortwave_incoming: {constant: 680.5555555555555}
+  longwave_in: {constant: 492.1667580050841}
+  aerodynamic_resistance:
+    law: fao56
+    reference_height: 2.0
+
+evapotranspiration:
+  potential: penman_monteith
+  open_water: false
+  energy:
+    ground_heat_fraction: {water: 0.0, soil: 0.1, canopy: 0.1}
+
+vegetation:
+  types:
+    - name: fao-grass
+      lai: 2.88
+      extinction: 11.0
+      leaf_resistance: 100.0
+      root_depth: 0.5
+      root_profile: uniform
+      feddes: {h3: -1000.0, h4: -2000.0}
+      albedo: 0.23
+  map: {constant: fao-grass}
+
+initial_conditions:
+  groundwater:
+    head: {constant: -0.2}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [water_content, root_uptake]
+    atmosphere: [transpiration_rate, transpiration_unrealised_rate]

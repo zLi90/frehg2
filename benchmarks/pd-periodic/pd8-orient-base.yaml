@@ -1,0 +1,73 @@
+# pd8-orient-base — pd8 surface dihedral battery base (Stage-3 plan §7, T3).
+# An 8 x 8 (dx = dy = 5 m) torus-in-x basin: exactly-periodic bed bump,
+# oblique wind (u10 = 6, v10 = 3 — the battery rotates the vector with
+# the domain), a tracer slab riding the wind across the seam, y walls.
+# The W3.7 flag swap maps the axis-swapping transforms onto periodic y;
+# a pass proves the periodic surface path axis-generic. Run by
+# regression.s3.pd8 through run_dihedral_battery (swe and transport
+# tolerance classes).
+simulation:
+  id: pd8-orient-base
+  title: Stage-3 pd8 periodic surface orientation base
+
+domain:
+  nx: 8
+  ny: 8
+  nz: 1
+  dx: 5.0
+  dy: 5.0
+  dz: 1.0
+  bottom_elevation: {file: input/pd8_dem.dat}
+  periodic: {x: true}
+
+time:
+  dt: 1.0
+  t_end: 300.0
+  output_interval: 300.0
+
+modules:
+  surface_water: true
+  transport: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+  wind:
+    enabled: true
+    law: garratt
+    cap: 0.0035
+    u10: {constant: 6.0}
+    v10: {constant: 3.0}
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+  transport:
+    surface: {file: input/pd8_tracer0.dat}
+
+boundary_conditions:
+  - name: wall-south
+    region: {polygon: [[-1.0, -1.0], [41.0, -1.0], [41.0, 4.9], [-1.0, 4.9]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+  - name: wall-north
+    region: {polygon: [[-1.0, 35.1], [41.0, 35.1], [41.0, 41.0], [-1.0, 41.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 1.0e-9}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+    transport: [concentration_surface]

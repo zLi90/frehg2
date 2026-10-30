@@ -34,6 +34,7 @@
 #ifndef FREHG_GW_RICHARDSSOLVER_HPP
 #define FREHG_GW_RICHARDSSOLVER_HPP
 
+#include "atm/EtFormulas.hpp"
 #include "atm/MetForcing.hpp"
 #include "bc/BoundarySet.hpp"
 #include "core/Config.hpp"
@@ -97,6 +98,15 @@ struct GwStepAudit {
   /// the realized top-face Darcy flux, so the Corrector's moisture guard
   /// is already applied (v2 Q4, plan §3.2; the g5(i) observable).
   real_t evap = 0.0;
+  /// Stage-3 T5 (W5.4): the ET soil channel's step books [m^3, positive
+  /// out]. etDemand = f_dry E_s A dtg summed over ET columns; etApplied =
+  /// qVap A dtg (supply-capped); unrealised = demand - applied, booked by
+  /// the gw_mass_audit columns (W5.10).
+  real_t etDemand = 0.0;   ///< f_dry E_s A dtg summed over ET columns
+  real_t etApplied = 0.0;  ///< qVap A dtg (supply-capped)
+  /// Stage-3 T6 (W6.6): the transpiration channel's step books [m^3].
+  real_t trDemand = 0.0;   ///< rootFrac T_pot A dtg summed over root cells
+  real_t trApplied = 0.0;  ///< sink V dtg (Feddes- and supply-limited)
   /// \name Coupled-run terms (zero in groundwater-only runs; plan §10 P3)
   ///@{
   /// Net upward volume through coupled top faces this step [m^3], the
@@ -129,6 +139,12 @@ struct GwCoupling {
   Field2<real_t> seepAccum;    ///< exchanged-not-yet-applied depth [m] (RW)
   Field2<real_t> avail;        ///< remaining infiltrable depth this window [m]
   Field2<real_t> gain;         ///< surface deposits this surface step [m]
+  // Stage-3 T5 (plan §9 W5.4): the surface channel's wet-time clock, read
+  // by the soil channel's dry-fraction split. stepStart is t - dt of the
+  // running surface step (set by Coupler::step before the substep loop).
+  real_t stepStart = 0.0;           ///< surface-step start time [s]
+  Field2<real_t> wetClockStepStart; ///< wet clock at the step start [s]
+  Field2<real_t> wetFrac;           ///< this surface step's wet fraction [-]
 };
 
 /// The groundwater module.
@@ -153,6 +169,9 @@ class RichardsSolver {
   /// (exfiltration allowed, infiltration prohibited — the legacy
   /// bctype_GW[5] = 2 semantics with qtop from any configured flux BC).
   void attachCoupling(const GwCoupling& coupling) { cpl_ = coupling; }
+  /// Stage-3 T5 (W5.4): the running surface step's start time (the wet
+  /// clock's linear-growth origin); set by Coupler::step per step.
+  void setCouplingStepStart(real_t t) { cpl_.stepStart = t; }
 
   /// Wire the transport module's scalar state in (called once by the driver
   /// before the first step when transport is active; plan §10 P4). With
@@ -212,6 +231,10 @@ class RichardsSolver {
   /// Window volume [m^3] each column's post-allocation vented onto the
   /// surface (coupled runs; the surface transport adds it to the exchange).
   const Field2<real_t>& windowVentVolume() const { return ventWin_; }
+  /// Stage-3 T5 (W5.6): the ET vapor volume of the running window [m^3].
+  const Field2<real_t>& windowVapourVolume() const { return vapWin_; }
+  /// Stage-3 T6 (W6.5): the root-uptake volume of the running window [m^3].
+  const Field3<real_t>& windowSinkVolume() const { return sinkWin_; }
 
   /// Advance the subsurface state by \p dtg, evaluating series-valued
   /// boundary conditions at time \p t (the end-of-step time, matching the
@@ -226,6 +249,59 @@ class RichardsSolver {
   ///@{
   const Field3<real_t>& head() const { return h_; }           ///< pressure head [m]
   const Field3<real_t>& waterContent() const { return wc_; }  ///< volumetric moisture
+  ///@}
+
+  /// \name Stage-3 T1 per-cell cumulative post-allocation diagnostics
+  /// (plan W1.3) — allocated only when an output or restart requests them
+  /// (hasReallocDiagnostics()); [m^3], signed per the audit conventions.
+  ///@{
+  bool hasReallocDiagnostics() const { return reallocDiag_; }  ///< fields allocated?
+
+  /// \name Stage-3 T5 (plan §9 W5.4): the ET soil channel
+  /// (gw/Evapotranspiration.cpp). Active iff setupEvapotranspiration ran.
+  ///@{
+  /// Stage the soil-channel membership, ktop, theta_fc and the clock
+  /// fields from the configuration (fatal on groundwater_top overlap).
+  void setupEvapotranspiration(const FrehgConfig& config);
+  /// Stage-3 T6 (W6.3): stage the vegetation map, tau, Feddes parameters
+  /// and the per-cell root fractions (renormalised on shallow columns).
+  void setupVegetation(const FrehgConfig& config);
+  bool etActive() const { return etActive_; }        ///< soil channel on
+  const Field2<int>& etColumn() const { return etColumn_; }  ///< 1 on ET columns
+  const Field2<real_t>& etQVap() const { return qVap_; }     ///< applied flux [m/s]
+  const Field2<real_t>& etSoilTime() const { return soilTime_; }  ///< cumulative [s]
+  const Field2<real_t>& etWetClockLast() const { return wetClockLast_; }  ///< consumed clock [s]
+  Field2<real_t>& etSoilTimeMutable() { return soilTime_; }       ///< restart restore
+  Field2<real_t>& etWetClockLastMutable() { return wetClockLast_; }  ///< restart restore
+  /// \name Stage-3 T6 (plan §10): vegetation / transpiration state.
+  ///@{
+  bool vegActive() const { return vegActive_; }  ///< vegetation configured
+  const Field2<real_t>& vegCanopyTau() const { return vegTau_; }  ///< tau [-]
+  const Field3<real_t>& rootUptakeSink() const { return sink_; }  ///< this substep [1/s]
+  const Field3<real_t>& sinkStepWindow() const { return sinkStepWin_; }  ///< sink dtg window
+  const Field2<real_t>& trAppliedDepth() const { return trAppliedDepth_; }  ///< applied depth window [m]
+  const Field2<real_t>& trUnrealisedDepth() const { return trUnrealisedDepth_; }  ///< unrealised window [m]
+  /// Zero the transpiration step windows (the driver reads then resets).
+  void resetTrDepths();
+  ///@}
+
+  real_t etDemand() const { return etDemand_; }      ///< step demand sum [m^3]
+  real_t etApplied() const { return etApplied_; }    ///< step applied sum [m^3]
+  /// Per-cell applied/unrealised depth accumulated since the last reset
+  /// (the W5.10 interval-rate contributors; Simulation reads then resets
+  /// once per outer step).
+  const Field2<real_t>& etAppliedDepth() const { return etAppliedDepth_; }  ///< applied depth window [m]
+  const Field2<real_t>& etUnrealisedDepth() const { return etUnrealisedDepth_; }  ///< unrealised depth window [m]
+  /// Zero the per-step depth windows (the driver calls after reading).
+  void resetEtDepths();
+  ///@}
+  /// Cumulative water CREATED per cell by theta := theta(h) consistency.
+  const Field3<real_t>& reallocCreated() const { return reallocCreated_; }
+  /// Cumulative water DROPPED per cell by the legacy sweep's sends/drops.
+  const Field3<real_t>& reallocDroppedCell() const { return reallocDroppedCell_; }
+  /// The cumulative finalize-clamp volume per cell (always allocated; it
+  /// feeds the vloss audit column).
+  const Field3<real_t>& vlossField() const { return vloss_; }
   ///@}
 
   /// Per-unit-area x Darcy flux staged for output [m/s]. The internal flux
@@ -289,6 +365,11 @@ class RichardsSolver {
   /// The dtg of the last executed step (the legacy Vgflux step,
   /// groundwater.c:1639).
   real_t lastDtg() const { return dtgCurrent_; }
+  /// Restart (S3-A9): restore the last substep's dtg — a restarted
+  /// subcycled window may take ZERO substeps before the first transport
+  /// step, which then divides by this value and reads the (also
+  /// restored) stale per-substep fluxes, the documented legacy quirk.
+  void restoreLastDtg(real_t dtg) { dtgCurrent_ = dtg; }
   ///@}
 
   /// \name Baroclinic state (diagnostics/tests; held at 1 without an
@@ -369,6 +450,12 @@ class RichardsSolver {
   /// surface-layer soil relative humidity alpha_1(theta_top) (Geng &
   /// Boufadel Eq. 6). Negative rates (condensation) pass through (V2-A13).
   void updateBulkEvaporation(real_t t);
+  /// Stage-3 T5 (W5.4): per-substep soil-channel flux qVap (potential x
+  /// limiter x dry fraction, supply-capped), clocks and audit sums.
+  void updateEvapotranspiration(real_t t, real_t dtg);
+  /// Stage-3 T6 (W6.3): per-substep canopy potential and the Feddes- and
+  /// supply-limited root-uptake sink (O7: runs regardless of inundation).
+  void updateTranspiration(real_t t, real_t dtg);
 
   // Corrector (Corrector.cpp).
   /// Classify each coupled top face for step \p dtg (the capacity/supply
@@ -431,6 +518,8 @@ class RichardsSolver {
   /// Window face volumes [m^3] (empty until enableTransportWindow()).
   Field3<real_t> qxWin_, qyWin_, qzWin_;
   Field2<real_t> ventWin_;
+  Field2<real_t> vapWin_;   ///< ET vapor volume this window [m^3] (W5.6)
+  Field3<real_t> sinkWin_;  ///< root-uptake volume this window [m^3] (W6.5)
   /// Per-step correction from the legacy receiver-face mirror of the
   /// post-allocation transfers to the full crossed-face path [m^3/s]
   /// (qzF layout; the window adds qzF + this).
@@ -456,6 +545,13 @@ class RichardsSolver {
   Field3<real_t> rVisc_, rViscXp_, rViscYp_, rViscZp_;
   Field3<real_t> vloss_;
   Field3<real_t> room_, sendUp_, sendDown_;  ///< post-allocation scratch
+  /// Stage-3 T1: groundwater.reallocation == disabled — the sweep runs
+  /// with its non-conservative actions removed (S3-A4; Reallocate.cpp).
+  bool reallocOff_ = false;
+  /// Stage-3 T1 (W1.3): per-cell cumulative creation/drop diagnostics are
+  /// requested (fields below allocated) — default runs are untouched.
+  bool reallocDiag_ = false;
+  Field3<real_t> reallocCreated_, reallocDroppedCell_;
   Field3<real_t> qOut_;  ///< scratch for the per-area flux accessors
   real_t dtgCurrent_ = 0.0;  ///< the step's dtg (post-allocation flux bookkeeping)
 
@@ -468,6 +564,50 @@ class RichardsSolver {
   Field2<int> evapMask_;
   Field2<int> evapKtop_;
   atm::MetForcing met_;
+  // Stage-3 T5 (W5.4): the ET soil channel. qVap_ is the applied top
+  // vapor flux [m/s, positive up] the predictor/corrector read on ET
+  // columns (guard-free, D1); the clocks implement the time-basis
+  // complementarity; the audit sums feed gw_mass_audit's
+  // soil_evaporation columns.
+  bool etActive_ = false;
+  EvapotranspirationConfig etCfg_;
+  TimeSeries etPrescribedSeries_;
+  atm::AeroParams etAero_;
+  AtmosphereConfig::AeroResistance etAeroLaw_ = AtmosphereConfig::AeroResistance::Liu2006;
+  Field2<int> etColumn_;          ///< 1 on soil-channel columns
+  Field2<int> etKtop_;            ///< device ktop of the ET columns
+  Field2<real_t> etThetaFc_;      ///< per-column field capacity (beta limiter)
+  Field2<real_t> etAlbedo_;       ///< per-column top soil albedo (PM, T7)
+  HostField3<real_t> thetaFcHost_;  ///< staged theta_fc (ctor; W5.1 default)
+  HostField3<real_t> albedoHost_;   ///< staged soil albedo (ctor; PM, T7)
+  Field2<real_t> qVap_;           ///< applied flux this substep [m/s]
+  Field2<real_t> wetClockLast_;   ///< consumed wet clock [s] (checkpointed)
+  Field2<real_t> soilTime_;       ///< cumulative soil-evaporation time [s]
+  real_t etDemand_ = 0.0;         ///< this substep's demand sum [m^3]
+  real_t etApplied_ = 0.0;        ///< this substep's applied sum [m^3]
+  // Stage-3 T6 (W6.3): static vegetation — the canopy transmission tau_
+  // scales the ground channels; rootFrac_/feddes parameters feed the
+  // per-substep transpiration sink sink_ [1/s] that the predictor and
+  // corrector both read (W6.4). The step windows feed the audits, the
+  // root_uptake output and the transport factor (W6.5).
+  bool vegActive_ = false;
+  Field2<real_t> vegTau_;         ///< Beer-Lambert transmission [-] (1 = bare)
+  Field2<real_t> vegTPotFactor_;  ///< (1 - tau) [-]
+  Field2<real_t> vegRc_;          ///< canopy resistance r_c [s/m]
+  Field2<real_t> vegAlbedo_;      ///< per-column canopy albedo (PM, T7)
+  Field2<int> vegCol_;            ///< 1 on vegetated columns
+  Field2<real_t> vegH1_, vegH2_, vegH3_, vegH4_;  ///< Feddes heads [m]
+  Field2<int> vegHasH12_;         ///< anaerobic cutoff configured
+  Field3<real_t> rootFrac_;       ///< per-cell root fraction [-] (sums to 1)
+  Field2<real_t> tPot_;           ///< this substep's T_pot [m/s]
+  Field3<real_t> sink_;           ///< this substep's uptake sink [1/s]
+  Field3<real_t> sinkStepWin_;    ///< sink dtg window [(1/s) s] (root_uptake)
+  Field2<real_t> trAppliedDepth_;    ///< applied depth window [m]
+  Field2<real_t> trUnrealisedDepth_; ///< unrealised depth window [m]
+  real_t trDemand_ = 0.0;         ///< this substep's T demand [m^3]
+  real_t trApplied_ = 0.0;        ///< this substep's T applied [m^3]
+  Field2<real_t> etAppliedDepth_;     ///< applied depth since last reset [m]
+  Field2<real_t> etUnrealisedDepth_;  ///< unrealised depth since last reset [m]
   /// Coupled top-exchange mode per column, refreshed each substep
   /// (amendment A13; SERGHEI GwBC.h:277-288): 0 = dry seepage face,
   /// 1 = wet Dirichlet (capacity-limited), 2 = wet supply-limited flux.

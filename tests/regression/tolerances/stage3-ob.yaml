@@ -1,0 +1,52 @@
+# stage3-ob.yaml — tolerances for the Stage-3 open-boundary (T2) gates.
+# Every bound carries the gate and its authoring rationale (Stage-3 plan
+# §2.3); changes only by amendment (S3-A*). Authoring chain values
+# (scripts/test_ob_gates.py, 2026-10-27): lane A u_in 0.3052 m/s
+# (continuum closed form 0.3067, 0.5 % discretisation dev), R_A 0.9996;
+# lane C u_in 1.3385 (4.39 x A), R_C 0.0019.
+ob1:
+  # Model face velocities vs the discrete chain. The chain shares the
+  # model's formulas exactly; first green (strict solver) measured 1.8e-6
+  # relative on both external lanes — 1e-4 keeps 56x headroom and still
+  # fails the factor-two weight-1 entrance by 3 orders.
+  velocity_rel: 1.0e-4
+  # Trailing-window span of the inflow-face velocity over the last 10 % of
+  # the outputs (240 s of 2400 s).
+  steady_abs: 1.0e-9
+  # Entrance-head ratio vs the chain's own ratio.
+  ratio_abs: 0.05
+  # Lane C (the real negative): u_C >= contrast_factor * u_A and
+  # R_C <= ratio_cap. Chain: 4.39x and 0.0019 — large headroom both ways.
+  contrast_factor: 2.0
+  ratio_cap: 0.2
+ob3:
+  # Per-lane surface ledger closure, scaled by the gross stage exchange X
+  # (with the 1e-12 m^3 absolute rounding floor). Runs STRICT (jacobi,
+  # rtol 1e-13): under the default rtol 1e-8 the residual is the solver
+  # class (measured -6.6e-4 m^3); strict measured 1.2e-8 / 2.5e-8 m^3 over
+  # X = 3.0e4 across 1440 steps — 1e-11 keeps 12x headroom over that
+  # accumulation while still failing the 1e-6 m^3 synthetic hole.
+  ledger_rel: 1.0e-11
+  # Between-lane per-cycle prism agreement: |dP|/P <= max(prism_coef *
+  # Fr^2_max, prism_floor_rel). Fr^2 is measured in-gate from max |v| and
+  # the stage-row depth; at the case scale (v ~ 0.02 m/s, h ~ 2 m)
+  # Fr^2 ~ 2e-5, so the floor carries the bound — recorded either way.
+  prism_coef: 2.0
+  prism_floor_rel: 1.0e-3
+ob5:
+  # Frames to skip before the monotone-decay assertion (the seed's initial
+  # adjustment): 2 frames = 60 s.
+  settle_frames: 2
+  # Per-frame KE rise tolerance as a fraction of KE0 (exchange ripple).
+  rise_rel: 1.0e-6
+  # External-lane cumulative stage-face KE influx vs KE0. First execution
+  # measured 6.2e-3 (74 J of 1.2e4 J): the seeded slosh does exchange
+  # pressure-accelerated water through the entrance faces, which carries
+  # REAL kinetic energy — the plan's 1e-3 guess assumed a quiet boundary.
+  # Bound 2e-2 (3.2x headroom); the discriminator is the zero_gradient
+  # contrast below (measured 90x against the 10x gate).
+  influx_rel: 2.0e-2
+  # The real negative + anti-vacuity: zero_gradient influx >= factor x
+  # external influx and >= floor_j [J].
+  contrast_factor: 10.0
+  influx_floor_j: 1.0

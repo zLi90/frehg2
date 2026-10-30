@@ -386,6 +386,8 @@ TEST(GwModule, ReallocationSurplusModesDropOrConserve) {
   for (const bool redistribute : {false, true}) {
     MiniGw sim;
     sim.cfg = gwBaseConfig(1, 1, 10, 0.05, 0.5);
+    // asserts the legacy post-allocation (kept selectable; Stage-3 §2.7)
+    sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
     frehg::SoilType sand = testSoil(3.0e-4);
     sand.name = "sand";
     frehg::SoilType clay = testSoil(1.52e-6);
@@ -426,6 +428,76 @@ TEST(GwModule, ReallocationSurplusModesDropOrConserve) {
   EXPECT_LE(droppedTotal[1], 1.0e-9);
 }
 
+TEST(GwModule, ReallocationOffConservesWaterExactly) {
+  // Stage-3 T1 gate rl1 (plan §5; owner decision O9). The sand-over-clay
+  // scenario of ReallocationSurplusModesDropOrConserve — the regime where
+  // the legacy sweep is most active — run with reallocation: off. Nothing
+  // may be transferred, created, or dropped: the realloc audit terms are
+  // EXACTLY zero every step and the ledger closes without them.
+  const std::vector<real_t> ids = {0, 0, 0, 1, 1, 1, 1, 1, 1, 1};
+  const std::string dir = writeFlatFile("soil_id_off.dat", ids);
+  MiniGw sim;
+  sim.cfg = gwBaseConfig(1, 1, 10, 0.05, 0.5);
+  frehg::SoilType sand = testSoil(3.0e-4);
+  sand.name = "sand";
+  frehg::SoilType clay = testSoil(1.52e-6);
+  clay.name = "clay";
+  clay.thetaS = 0.4686;
+  clay.thetaR = 0.106;
+  clay.vgAlpha = 1.04;
+  clay.vgN = 1.395;
+  clay.aev = 0.0;
+  sim.cfg.soil.types = {sand, clay};
+  sim.cfg.soil.map.fromFile = true;
+  sim.cfg.soil.map.file = "soil_id_off.dat";
+  sim.cfg.soil.map.constantName.clear();
+  sim.cfg.configDir = dir;
+  sim.cfg.initialConditions.groundwater.value.constant = 0.14;
+  sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Off;
+  sim.cfg.boundaryConditions = {topBc(frehg::BcKind::Head, 0.0, 1, 1)};
+  sim.build();
+  const real_t v0 = sim.volume();
+  real_t prev = v0;
+  for (int n = 0; n < 200; ++n) {
+    sim.step();
+    const real_t v = sim.volume();
+    const frehg::gw::GwStepAudit& a = sim.gw->audit();
+    EXPECT_EQ(a.reallocAdjust, 0.0) << "step " << n;
+    EXPECT_EQ(a.reallocDropped, 0.0) << "step " << n;
+    EXPECT_EQ(a.cplVent, 0.0) << "step " << n;
+    const real_t residual = (v - prev) - (a.boundaryIn - a.ssStorage - a.vloss);
+    ASSERT_LE(std::fabs(residual), 1.0e-12) << "step " << n;
+    prev = v;
+  }
+  EXPECT_GT(sim.volume(), v0);  // the infiltration front still advances
+}
+
+TEST(GwModule, ReallocationOffKeepsIsolatedHeadsOnTheRetentionCurve) {
+  // Stage-3 T1 gate rl1 (S3-A4 final semantics): disabled keeps the
+  // conservative isolated-cell restore verbatim, so in a column with no
+  // saturation anywhere (flux top, moist IC) EVERY cell's head sits bitwise
+  // on the van Genuchten retention curve h(theta) after each step, exactly
+  // as under legacy — while the non-conservative actions never run (the
+  // companion test asserts the exact-zero audit under forced saturation).
+  MiniGw sim;
+  sim.cfg = gwBaseConfig(1, 1, 10, 0.05, 0.5);
+  sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Off;
+  sim.cfg.boundaryConditions = {topBc(frehg::BcKind::Flux, -1.0e-6, 1, 1)};
+  sim.build();
+  for (int n = 0; n < 20; ++n) {
+    sim.step();
+    const frehg::gw::VgSoil soil{5.9, 2.68, 0.46, 0.04, -0.02};
+    for (int k = 0; k < 10; ++k) {
+      const real_t wc = interior3(sim.gw->waterContent(), 1, 1, k);
+      if (wc < 0.9999 * soil.thetaS) {
+        const real_t h = interior3(sim.gw->head(), 1, 1, k);
+        EXPECT_EQ(h, frehg::gw::headFromWaterContent(soil, wc))
+            << "step " << n << " k " << k;
+      }
+    }
+  }
+}
+
 TEST(GwModule, AdaptiveStepGrowsInQuietFlowAndStaysClamped) {
   // Equilibrium column: dq = 0, so dtg grows by the legacy factor 1.25 per
   // step until dt_max clamps it (adaptive_time_step:1709-1719).
@@ -455,6 +527,8 @@ TEST(GwModule, ReallocateRestoresIsolatedHeadConsistency) {
   // (reallocate_water_content:995-999).
   MiniGw sim;
   sim.cfg = gwBaseConfig(1, 1, 10, 0.05, 0.5);
+  // asserts the legacy post-allocation (kept selectable; Stage-3 §2.7)
+  sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
   sim.build();
   sim.step();
   for (int k = 2; k < 8; ++k) {
@@ -630,6 +704,117 @@ TEST(GwMesh, UniformTerrainLayersStackBelowEachBed) {
   // zcell reports centers in the un-shifted datum, below each local bed.
   EXPECT_NEAR(mesh.zCellHost()(0, 0, 0), -0.05, 1.0e-14);
   EXPECT_NEAR(mesh.zCellHost()(0, 1, 0), -0.15, 1.0e-14);
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Stage-3 T6 et0 (part 2, plan §10): vegetation formulas and the sink sign.
+// ---------------------------------------------------------------------------
+
+TEST(GwEt, RootFractionsIntegrateToOneOnStretchedMaskedColumns) {
+  // The et0(2) geometry: 1 x 2 columns, dz 0.05 with stretch 1.2, beds 0
+  // and -0.12 with follow_terrain OFF (column 2's top cells are masked),
+  // L = 0.33 m cuts a cell mid-interval. Uniform and linear profiles both
+  // sum to 1 per column after staging (closed-form integrals; W6.2/W6.3).
+  for (const bool linear : {false, true}) {
+    const std::vector<real_t> beds = {0.0, -0.12};
+    const std::string dir = writeFlatFile("veg_dem.dat", beds);
+    MiniGw sim;
+    sim.cfg = gwBaseConfig(2, 1, 14, 0.05, 60.0);
+    sim.cfg.domain.dzStretch = 1.2;
+    sim.cfg.domain.bottomElevation.fromFile = true;
+    sim.cfg.domain.bottomElevation.file = "veg_dem.dat";
+    sim.cfg.configDir = dir;
+    sim.cfg.initialConditions.groundwater.form =
+        frehg::GroundwaterInitialConfig::Form::Head;
+    sim.cfg.initialConditions.groundwater.value.constant = -0.5;
+    sim.cfg.evapotranspiration.enabled = true;
+    sim.cfg.evapotranspiration.potential =
+        frehg::EvapotranspirationConfig::Potential::Prescribed;
+    sim.cfg.evapotranspiration.prescribed.constant = 2.0e-7;
+    sim.cfg.evapotranspiration.openWater = false;
+    frehg::VegetationType grass;
+    grass.name = "grass";
+    grass.lai = 2.0;
+    grass.extinction = 0.5;
+    grass.leafResistance = 100.0;
+    grass.rootDepth = 0.33;
+    grass.profile = linear ? frehg::VegetationType::RootProfile::Linear
+                           : frehg::VegetationType::RootProfile::Uniform;
+    grass.h3 = -1000.0;
+    grass.h4 = -2000.0;
+    sim.cfg.vegetation.enabled = true;
+    sim.cfg.vegetation.types = {grass};
+    sim.cfg.vegetation.mapConstantName = "grass";
+    sim.build();
+    auto host = Kokkos::create_mirror_view(sim.gw->rootUptakeSink());
+    auto frac = Kokkos::create_mirror_view(sim.gw->sinkStepWindow());
+    // Read the staged fractions through one substep's sink at alpha = 1,
+    // uncapped: sink_k dz_k / T_pot = rootFrac_k exactly.
+    sim.step();
+    Kokkos::deep_copy(host, sim.gw->rootUptakeSink());
+    auto hDz = Kokkos::create_mirror_view(sim.mesh->dz3d());
+    Kokkos::deep_copy(hDz, sim.mesh->dz3d());
+    const auto& ktop = sim.mesh->ktop();
+    for (int i = 1; i <= 2; ++i) {
+      real_t sum = 0.0;
+      for (int k = 0; k < 14; ++k) {
+        sum += host(1, static_cast<std::size_t>(i), static_cast<std::size_t>(k)) *
+               hDz(1, static_cast<std::size_t>(i), static_cast<std::size_t>(k));
+      }
+      // T_pot = (1 - tau) E_pot with tau = exp(-k LAI) = exp(-1).
+      const real_t tPot = (1.0 - std::exp(-1.0)) * 2.0e-7;
+      EXPECT_NEAR(sum / tPot, 1.0, 1.0e-12) << "column " << i
+          << (linear ? " linear" : " uniform");
+      EXPECT_GE(ktop(0, static_cast<std::size_t>(i) - 1), i == 2 ? 1 : 0);
+    }
+  }
+}
+
+TEST(GwModule, SinkInSaturatedConfinedCellDropsHeadBySinkOverSs) {
+  // W6.4's sign-fixing test: one saturated confined cell (theta = theta_s,
+  // h > 0), Ss > 0, impermeable faces, a constant sink S for one step:
+  //   h - hn = -S dtg / Ss   (to 1e-12 relative)
+  //   theta  = theta_s        (to 1e-14)
+  // The corrector identity holds exactly only when the predictor carries
+  // the same sink with the same sign.
+  MiniGw sim;
+  sim.cfg = gwBaseConfig(1, 1, 1, 0.5, 60.0);
+  sim.cfg.groundwater.specificStorage = 1.0e-4;
+  sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Off;
+  frehg::SoilType sealed = testSoil(0.0);  // impermeable: no face flux
+  sim.cfg.soil.types = {sealed};
+  sim.cfg.initialConditions.groundwater.form =
+      frehg::GroundwaterInitialConfig::Form::Head;
+  sim.cfg.initialConditions.groundwater.value.constant = 2.0;  // saturated
+  sim.cfg.evapotranspiration.enabled = true;
+  sim.cfg.evapotranspiration.potential =
+      frehg::EvapotranspirationConfig::Potential::Prescribed;
+  sim.cfg.evapotranspiration.prescribed.constant = 1.0e-6;
+  sim.cfg.evapotranspiration.openWater = false;
+  frehg::VegetationType marsh;
+  marsh.name = "marsh";
+  marsh.lai = 1.0e9;  // tau -> 0: T_pot = E_pot exactly at lai -> inf
+  marsh.extinction = 1.0;
+  marsh.leafResistance = 0.0;
+  marsh.rootDepth = 0.5;
+  marsh.h3 = -1000.0;  // alpha = 1 at any wet head
+  marsh.h4 = -2000.0;
+  sim.cfg.vegetation.enabled = true;
+  sim.cfg.vegetation.types = {marsh};
+  sim.cfg.vegetation.mapConstantName = "marsh";
+  sim.build();
+  const real_t thetaS = sim.cfg.soil.types[0].thetaS;
+  const real_t hn = interior3(sim.gw->head(), 1, 1, 0);
+  sim.step();
+  const real_t h = interior3(sim.gw->head(), 1, 1, 0);
+  const real_t theta = interior3(sim.gw->waterContent(), 1, 1, 0);
+  // S = T_pot / dz = 1e-6 / 0.5 = 2e-6 1/s; dh = -S dtg / Ss.
+  const real_t sinkRate = 1.0e-6 / 0.5;
+  const real_t expected = -sinkRate * 60.0 / 1.0e-4;
+  EXPECT_NEAR((h - hn) / expected, 1.0, 1.0e-12);
+  EXPECT_NEAR(theta, thetaS, 1.0e-14);
 }
 
 }  // namespace

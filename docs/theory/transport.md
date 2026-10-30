@@ -256,3 +256,24 @@ scalar exchange through the seepage term — and the kind takes no `value`
 (the condition is the homogeneous relation itself). This is the g5
 (Geng & Boufadel bare-soil salinization) boundary physics, landed complete
 and unit-gated ahead of the Q4 capability PRs per §3.4 caveat 4.
+
+## The surface salt store (Stage-3 T5, O4)
+
+Under `transport.surface_dryout: store` — **the shipped default since the
+T8 default-flip evaluation** (every gate green with unchanged tolerances;
+the v2.0 `discard` remains available and stays pinned in the goldens and
+default-bitwise lanes) — a drying surface cell (salinity only) moves its
+remaining scalar mass into a per-cell store [psu·m³] instead
+of being discarded (the v2.0 `discard` mode books it into `surf_adjust` and
+loses it), and returns to the water at the cell's first wet step — after
+the limiter, bounds and dilution, so the released mass is never clipped.
+Only positive mass is storable; a negative dry-cell residual (an
+advective artifact against a dry front) stays in `surf_adjust` as in the
+legacy path. Held seepage (water exfiltrated below `min_depth`, carried
+in the exchange accumulator) moves its salt into the store as the water
+leaves the subsurface (D9), so the applied water later carries no second
+copy. The surface ledger identity becomes
+`Δ(surf_mass + surf_store) = exchange + surf_source + surf_boundary +
+surf_adjust + surf_anchor` — the store transfers are internal. See
+`theory/evapotranspiration.md` for the full T5 salt rules.
+

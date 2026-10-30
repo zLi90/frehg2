@@ -205,6 +205,52 @@ add_test(NAME unit.g678_gates.negative
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_g678_gates.py)
 set_tests_properties(unit.g678_gates.negative PROPERTIES LABELS "unit")
 
+# Stage-3 shared-harness battery (Stage-3 plan §3.1/§6.3): h5_bitwise
+# hash/compare sensitivity and the FREHG_STAGE3_OVERRIDES application are
+# provably able to fail before any stage3 gate relies on them.
+add_test(NAME unit.s3_shared
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_s3_shared.py)
+set_tests_properties(unit.s3_shared PROPERTIES LABELS "unit")
+
+# Stage-3 T1 rl gate-logic battery (plan §6.3): the ledger identity is
+# checked two independent ways on synthetic consistent tables, and every rl
+# criterion is provably able to fail on corrupted input. Green while the rl
+# gates themselves are red (gate-first, plan §2.3).
+add_test(NAME unit.rl_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_rl_gates.py)
+set_tests_properties(unit.rl_gates.negative PROPERTIES LABELS "unit")
+
+# Stage-3 T2 ob gate-logic battery (plan §6.3): the discrete chain checked
+# against its own residuals and the continuum Bernoulli+Manning closed
+# form; every ob criterion provably able to fail, incl. the factor-two
+# weight-1 entrance.
+add_test(NAME unit.ob_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_ob_gates.py)
+set_tests_properties(unit.ob_gates.negative PROPERTIES LABELS "unit")
+
+# Stage-3 T3 pd gate-logic battery (plan §6.3): the discrete wind-friction
+# balance checked against its own fixed point and the continuum closed
+# form; every pd criterion provably able to fail (seam glitch, booked seam
+# flux, wrapped-leg x-flux leak).
+add_test(NAME unit.pd_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_pd_gates.py)
+set_tests_properties(unit.pd_gates.negative PROPERTIES LABELS "unit")
+
+# Stage-3 T4 dg gate-logic battery (plan §6.3): the rate-ledger identity
+# verified on an exact synthetic bookkeeping pair; every dg criterion
+# provably able to fail (dropped-substep rate frame, vacuous V3 lane,
+# perturbed decimated column, lost forced row).
+add_test(NAME unit.dg_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_dg_gates.py)
+set_tests_properties(unit.dg_gates.negative PROPERTIES LABELS "unit")
+
+# Stage-3 T5 et gate-logic battery (plan §6.3): the bulk potential chain
+# two independent ways, the FAO-56/log-profile hand values, t_d, the salt
+# closed forms; every et criterion provably able to fail.
+add_test(NAME unit.et_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_et_gates.py)
+set_tests_properties(unit.et_gates.negative PROPERTIES LABELS "unit")
+
 # ---------------------------------------------------------------------------
 # Benchmark configuration validation (part of the P0 exit criteria)
 # ---------------------------------------------------------------------------
@@ -220,6 +266,34 @@ foreach(case
     g4-evap/g4a-drawdown
     g4-evap/g4b-concentration
     g4-evap/g4d-drain
+    rl-realloc/rl2-tidal-box
+    rl-realloc/rl3-steady-column
+    rl-realloc/rl5-orient-base
+    ob-openbc/ob1-channel
+    ob-openbc/ob3-tidal-basin
+    ob-openbc/ob5-gyre
+    pd-periodic/pd1-alongshore
+    pd-periodic/pd2-surface
+    pd-periodic/pd2-gw
+    pd-periodic/pd2-coupled
+    pd-periodic/pd4-tidal-periodic
+    pd-periodic/pd5-confined
+    pd-periodic/pd8-orient-base
+    dg-diagnostics/dg1-seepage
+    et-evapotranspiration/et1-column
+    et-evapotranspiration/et1b-coupled
+    et-evapotranspiration/et2-coupled-dry
+    et-evapotranspiration/et3-pond-switch
+    et-evapotranspiration/et4-balance
+    et-evapotranspiration/et7-cap
+    et-evapotranspiration/et8a-soil-salt
+    et-evapotranspiration/et8b-pond-store
+    et-evapotranspiration/et8d-held-seepage
+    et-evapotranspiration/et9-tidal-flat
+    et-evapotranspiration/et9-noet
+    et-evapotranspiration/et5-canopy
+    et-evapotranspiration/et6-roots
+    et-evapotranspiration/et10-pm-grass
     g9-wind/g9a-setup
     g9-wind/g9b-linear
     g9-wind/g9c-slope
@@ -538,6 +612,159 @@ add_test(NAME regression.b6_subcycled
           --work ${CMAKE_BINARY_DIR}/regression/b6-subcycled)
 set_tests_properties(regression.b6_subcycled PROPERTIES
   LABELS "regression" ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+
+# ---------------------------------------------------------------------------
+# Stage-3 gates (Stage-3 plan §3.3). The default-bitwise gate reproduces the
+# T0 reference hashes on the dev toolchain (exit 77 = skipped elsewhere);
+# its --allow list is the plan §2.6 declared-exception channel, extended only
+# by the phase that declares the exception.
+# ---------------------------------------------------------------------------
+# The --allow globs are the plan §2.6 DECLARED EXCEPTIONS, extended only by
+# the phase that declares them: T2 appends mass_audit's stage_deposit column
+# (coupled runs) and books the edge-diffusion term into the transport/
+# temperature audits' surf_boundary (audit-only, W2.5). Physical fields and
+# point monitors stay bitwise — the audits' own correctness is gated by the
+# ledger identities (b-gates, rl2/rl3, ob3).
+add_test(NAME regression.s3.default_bitwise
+  COMMAND ${_regress} default-bitwise ${_regress_args}
+          --allow "monitor/mass_audit" --allow "monitor/transport_audit"
+          --allow "monitor/temperature_audit"
+          --work ${CMAKE_BINARY_DIR}/regression/s3-default-bitwise)
+set_tests_properties(regression.s3.default_bitwise PROPERTIES
+  LABELS "stage3_local" ENVIRONMENT "${_regress_env}" SKIP_RETURN_CODE 77
+  TIMEOUT 1800)
+
+# Stage-3 T1 reallocation gates (plan §5; authored FAILING per §2.3 — they
+# use the T1 target schema and fail "capability absent" until it lands).
+# rl5 reuses two existing batteries under the off override; the staged r1
+# hook (--expect) proves the override reached every run.
+foreach(gate rl2 rl3 rl4 rl-restart)
+  add_test(NAME regression.s3.${gate}
+    COMMAND ${_regress} ${gate} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-${gate})
+  set_tests_properties(regression.s3.${gate} PROPERTIES LABELS "stage3"
+    ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+endforeach()
+
+# S3-A4: the disabled battery runs on the VADOSE base in rl-realloc/ (the
+# saturated x-orient gw block is outside the mode's domain — the missing
+# consistency restore amplifies rounding chaotically there; measured O(1)
+# orientation divergence, Reallocate.cpp header).
+add_test(NAME regression.s3.rl5.orient_off
+  COMMAND ${_regress} rl5-orient ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-rl5-orient)
+set_tests_properties(regression.s3.rl5.orient_off PROPERTIES LABELS "stage3"
+  ENVIRONMENT
+  "${_regress_env};FREHG_STAGE3_OVERRIDES=groundwater.reallocation=disabled"
+  TIMEOUT 1800)
+
+# Stage-3 T2 open-boundary gates (plan §6; authored FAILING per §2.3 — red
+# evidence stage3/records/T2/red/). ob8 (b6 under external) is nightly.
+foreach(gate ob1 ob3 ob5)
+  add_test(NAME regression.s3.${gate}
+    COMMAND ${_regress} ${gate} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-${gate})
+  set_tests_properties(regression.s3.${gate} PROPERTIES LABELS "stage3"
+    ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+endforeach()
+
+# Stage-3 T3 periodic gates (plan §7; authored FAILING per §2.3 — red
+# evidence stage3/records/T3/red/). pd3 is the wrapped-rank mpi lane; pd8
+# runs the dihedral battery with the W3.7 periodic-axis flag swap.
+foreach(gate pd1 pd2 pd4 pd5 pd6 pd8 pd-restart)
+  add_test(NAME regression.s3.${gate}
+    COMMAND ${_regress} ${gate} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-${gate})
+  set_tests_properties(regression.s3.${gate} PROPERTIES LABELS "stage3"
+    ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+endforeach()
+
+add_test(NAME regression.s3.pd3
+  COMMAND ${_regress} pd3 ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-pd3)
+set_tests_properties(regression.s3.pd3 PROPERTIES LABELS "stage3;mpi"
+  ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 1800)
+
+# Stage-3 T4 diagnostics gates (plan §8; authored FAILING per §2.3 — red
+# evidence stage3/records/T4/red/): dg1 interval-mean seepage rate vs the
+# coupled ledger, dg2 monitor decimation (bitwise row subset + forced
+# rows), dg-restart (the acc_* checkpoint round trip).
+foreach(gate dg1 dg2 dg-restart)
+  add_test(NAME regression.s3.${gate}
+    COMMAND ${_regress} ${gate} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-${gate})
+  set_tests_properties(regression.s3.${gate} PROPERTIES LABELS "stage3"
+    ENVIRONMENT "${_regress_env}" TIMEOUT 1800)
+endforeach()
+
+# Stage-3 T5 evapotranspiration gates (plan §9; authored FAILING per §2.3
+# — red evidence stage3/records/T5/red/). et-rank is the 4-rank mpi lane;
+# et-orient runs the dihedral battery on the coupled ET + store base.
+foreach(gate et1 et2 et3 et4 et7 et8 et9 et-orient et-restart
+             et4-t et5 et6 et7-t et8-t et9-veg et-veg-restart et10)
+  add_test(NAME regression.s3.${gate}
+    COMMAND ${_regress} ${gate} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-${gate})
+  set_tests_properties(regression.s3.${gate} PROPERTIES LABELS "stage3"
+    ENVIRONMENT "${_regress_env}" TIMEOUT 3600)
+endforeach()
+
+# Stage-3 T8 (plan §12 W8.4): p1 backend-invariance lanes for the Stage-3
+# kernels — ob3 (open-boundary volume books), the pd2 coupled lane
+# (periodic wrap through the full coupled+transport stack) and et9 (the ET
+# tidal-flat smoke) under {OpenMP-4 + aij} and {OpenMP-4 + aijkokkos},
+# with each gate's own unchanged criteria (the serial default-mode runs
+# are the existing regression.s3.{ob3,pd2,et9} entries; per-solver bounds
+# per V2-A4).
+foreach(mt aij aijkokkos)
+  add_test(NAME regression.s3.p1.ob3.omp4.${mt}
+    COMMAND ${_regress} ob3 --mat-type ${mt} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-p1-ob3-${mt})
+  set_tests_properties(regression.s3.p1.ob3.omp4.${mt} PROPERTIES
+    LABELS "stage3_nightly"
+    ENVIRONMENT "FI_PROVIDER=tcp;UCX_TLS=tcp,self,sm;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
+    PROCESSORS 4 TIMEOUT 7200)
+  add_test(NAME regression.s3.p1.pd2coupled.omp4.${mt}
+    COMMAND ${_regress} pd2 --pd2-lane coupled --mat-type ${mt} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-p1-pd2coupled-${mt})
+  set_tests_properties(regression.s3.p1.pd2coupled.omp4.${mt} PROPERTIES
+    LABELS "stage3_nightly"
+    ENVIRONMENT "FI_PROVIDER=tcp;UCX_TLS=tcp,self,sm;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
+    PROCESSORS 4 TIMEOUT 7200)
+  add_test(NAME regression.s3.p1.et9.omp4.${mt}
+    COMMAND ${_regress} et9 --mat-type ${mt} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-p1-et9-${mt})
+  set_tests_properties(regression.s3.p1.et9.omp4.${mt} PROPERTIES
+    LABELS "stage3_nightly"
+    ENVIRONMENT "FI_PROVIDER=tcp;UCX_TLS=tcp,self,sm;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
+    PROCESSORS 4 TIMEOUT 7200)
+endforeach()
+
+add_test(NAME regression.s3.et-rank
+  COMMAND ${_regress} et-rank ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-et-rank)
+set_tests_properties(regression.s3.et-rank PROPERTIES LABELS "stage3;mpi"
+  ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 3600)
+
+foreach(variant ss td)
+  add_test(NAME regression.s3.ob8.b6.${variant}
+    COMMAND ${_regress} b6 --variant ${variant} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-ob8-b6-${variant})
+  set_tests_properties(regression.s3.ob8.b6.${variant} PROPERTIES
+    LABELS "stage3_nightly"
+    ENVIRONMENT
+    "${_regress_env};FREHG_STAGE3_OB8=external"
+    TIMEOUT 43200)
+endforeach()
+
+add_test(NAME regression.s3.rl5.coupled_salt_rank_off
+  COMMAND ${_regress} rank-invariance-coupled-salt --mode strict ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-rl5-coupled-salt)
+set_tests_properties(regression.s3.rl5.coupled_salt_rank_off PROPERTIES
+  LABELS "stage3;mpi"
+  ENVIRONMENT
+  "${_regress_env};FREHG_STAGE3_OVERRIDES=groundwater.reallocation=disabled"
+  PROCESSORS 4 TIMEOUT 1800)
 
 add_test(NAME regression.g1.b1_restart.amg
   COMMAND ${_regress} b1-restart --solver amg ${_regress_args}

@@ -56,3 +56,14 @@ included. If you add a stencil that reads a ghost the exchanger does not
 deliver (e.g. a wider stencil), the rank-invariance regression lanes are
 the net that catches it — the legacy code's silent fallback-to-upwind at
 rank interfaces is exactly the class of bug they exist for.
+
+## Periodic wrap (Stage-3 T3)
+
+Under `domain.periodic` the `Grid` neighbor ranks wrap, and the exchanger
+needs no changes: receives post with tag `200 + dir` from `neighbor_[dir]`
+and sends go to the same neighbor with tag `200 + (dir ^ 1)`, so the two
+messages between a rank and itself (`px == 1`) or between the only two
+ranks of an axis (`px == 2`, both neighbors the same rank) are matched by
+tag, never by source. The gid exchange in `Grid::buildGlobalIds` pairs its
+tags the same way (100/101, 102/103). `mpi.halo` carries a periodic case
+at n = 1, 2, 4 asserting the west/east halos hold the far edge's columns.

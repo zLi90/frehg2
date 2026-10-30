@@ -5,6 +5,7 @@
 
 #include "core/Logger.hpp"
 #include "core/Timer.hpp"
+#include "atm/PenmanMonteith.hpp"
 #include "io/GridDataReader.hpp"
 #include "swe/SweFormulas.hpp"
 
@@ -83,6 +84,26 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
     // per step; the schema guarantees the atmosphere block is present.
     met_ = atm::MetForcing(config.atmosphere, config);
   }
+  // Stage-3 T5 (W5.3): the ET open-water channel replaces the legacy
+  // evaporation keys (schema-exclusive); its bulk/prescribed potential is
+  // evaluated in beginStep like the legacy modes.
+  if (config.evapotranspiration.enabled && config.evapotranspiration.openWater) {
+    etOpenWater_ = true;
+    etCfg_ = config.evapotranspiration;
+    if (etCfg_.potential == EvapotranspirationConfig::Potential::Bulk) {
+      met_ = atm::MetForcing(config.atmosphere, config);
+    } else if (etCfg_.potential ==
+               EvapotranspirationConfig::Potential::PenmanMonteith) {
+      // Stage-3 T7 (W7.3): PM reads the met block and the ET consumers'
+      // r_a law (the schema guarantees the radiation pair is configured).
+      met_ = atm::MetForcing(config.atmosphere, config);
+      etAeroLaw_ = config.atmosphere.aeroResistance;
+      etAero_ = {config.atmosphere.aeroRefHeight, config.atmosphere.aeroZ0m,
+                 config.atmosphere.aeroZ0h, config.atmosphere.aeroDisplacement};
+    } else if (etCfg_.prescribed.fromSeries) {
+      etPrescribedSeries_ = TimeSeries::fromFile(config.resolvePath(etCfg_.prescribed.file));
+    }
+  }
   if (windCfg_.enabled) {
     windForcing_ = WindForcing(
         windCfg_, [&config](const std::string& file) { return config.resolvePath(file); });
@@ -128,8 +149,25 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
   Srhs_ = alloc("swe_Srhs");
   etaBcValue_ = alloc("swe_eta_bc_value");
   isEtaBc_ = alloc("swe_is_eta_bc");
+  isExternalStage_ = alloc("swe_is_external_stage");
+  resFaceX_ = alloc("swe_res_face_x");
+  resFaceY_ = alloc("swe_res_face_y");
+  uResX_ = alloc("swe_u_res_x");
+  vResY_ = alloc("swe_v_res_y");
   rainMask_ = alloc("swe_rain_mask");
   evapMask_ = alloc("swe_evap_mask");
+  if (etOpenWater_) {
+    evapRemoved_ = alloc("swe_et_removed");
+    rainAdded_ = alloc("swe_et_rain_added");
+    wetFrac_ = alloc("swe_et_wet_frac");
+    wetClock_ = alloc("swe_et_wet_clock");
+    wetClockStepStart_ = alloc("swe_et_wet_clock_start");
+    Kokkos::deep_copy(evapRemoved_, 0.0);
+    Kokkos::deep_copy(rainAdded_, 0.0);
+    Kokkos::deep_copy(wetFrac_, 0.0);
+    Kokkos::deep_copy(wetClock_, 0.0);
+    Kokkos::deep_copy(wetClockStepStart_, 0.0);
+  }
   frictionCoef_ = alloc("swe_friction_coef");
 
   halo_.add("swe_eta", eta_);
@@ -145,6 +183,11 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
   halo_.add("swe_Fv", Fv_);
   halo_.add("swe_bottom", bottom_);
   halo_.add("swe_is_eta_bc", isEtaBc_);
+  halo_.add("swe_is_external_stage", isExternalStage_);
+  halo_.add("swe_res_face_x", resFaceX_);
+  halo_.add("swe_res_face_y", resFaceY_);
+  halo_.add("swe_u_res_x", uResX_);
+  halo_.add("swe_v_res_y", vResY_);
   halo_.add("swe_eta_bc_value", etaBcValue_);
 
   readBathymetry(config);
@@ -376,6 +419,115 @@ void SurfaceSolver::buildBoundaryLists(const BoundarySet& boundaries) {
         KOKKOS_LAMBDA(const std::size_t m) { marker(lj(m), li(m)) = 1.0; });
   }
   halo_.exchange({"swe_is_eta_bc"});
+
+  // Stage-3 T2 (plan §6 W2.2): mark EXTERNAL-closure stage cells (a signed
+  // marker catches closure mismatches on shared faces first) and build the
+  // static reservoir-face masks the momentum stencils read.
+  Field2<real_t> extMark = isExternalStage_;
+  for (const DeviceBcList& list : etaBcs_) {
+    const real_t code =
+        list.bc->inflowClosure() == BcInflowClosure::External ? 1.0 : -1.0;
+    hasExternal_ = hasExternal_ || (code > 0.0);
+    auto lj = list.j;
+    auto li = list.i;
+    long clash = 0;
+    Kokkos::parallel_reduce(
+        "swe_mark_external_stage",
+        Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
+        KOKKOS_LAMBDA(const std::size_t m, long& bad) {
+          const real_t prev = extMark(lj(m), li(m));
+          if (prev != 0.0 && prev != code) {
+            ++bad;
+          }
+          extMark(lj(m), li(m)) = code;
+        },
+        clash);
+    long clashGlobal = 0;
+    MPI_Allreduce(&clash, &clashGlobal, 1, MPI_LONG, MPI_SUM, grid_.comm());
+    if (clashGlobal > 0) {
+      log::fatal(log::msg()
+                 << "eta boundary '" << list.bc->name() << "': " << clashGlobal
+                 << " stage cell(s) already carry the other inflow closure — "
+                    "overlapping stage regions must declare the same closure");
+    }
+  }
+  {
+    int ext = hasExternal_ ? 1 : 0;
+    MPI_Allreduce(MPI_IN_PLACE, &ext, 1, MPI_INT, MPI_MAX, grid_.comm());
+    hasExternal_ = (ext != 0);
+  }
+  if (hasExternal_) {
+    halo_.exchangeWithCorners({"swe_is_external_stage"});
+    const int nyl = grid_.nyLocal();
+    const int nxl = grid_.nxLocal();
+    const int i0 = grid_.i0();
+    const int j0 = grid_.j0();
+    // Stage-3 T3: on a periodic axis nothing is "outside" — a stage cell
+    // next to the seam has interior wrapped neighbors, not reservoir faces.
+    const Grid::EdgeTopology topo = grid_.edgeTopology();
+    Field2<real_t> faceX = resFaceX_, faceY = resFaceY_;
+    long reservoirFaces = 0;
+    Kokkos::parallel_reduce(
+        "swe_reservoir_faces",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {0, 0}, {nyl + 2, nxl + 2}),
+        KOKKOS_LAMBDA(const int j, const int i, long& count) {
+          const auto outside = [&](int jc, int ic) {
+            const int gi = i0 + ic - 1;
+            const int gj = j0 + jc - 1;
+            return topo.outsideX(gi) || topo.outsideY(gj);
+          };
+          const auto external = [&](int jc, int ic) {
+            return !outside(jc, ic) && extMark(jc, ic) > 0.0;
+          };
+          // A reservoir face lies INSIDE the external reservoir: both cells
+          // external-stage, or one external-stage and the other outside the
+          // global domain. A face between two outside cells is not one.
+          const auto reservoirFace = [&](int ja, int ia, int jb, int ib) {
+            const bool a = external(ja, ia);
+            const bool b = external(jb, ib);
+            return (a || b) && (a || outside(ja, ia)) && (b || outside(jb, ib));
+          };
+          if (i <= nxl && reservoirFace(j, i, j, i + 1)) {
+            faceX(j, i) = 1.0;
+            if (j >= 1 && j <= nyl && i >= 1) {
+              ++count;  // owned faces only, for the setup report
+            }
+          }
+          if (j <= nyl && reservoirFace(j, i, j + 1, i)) {
+            faceY(j, i) = 1.0;
+            if (i >= 1 && i <= nxl && j >= 1) {
+              ++count;
+            }
+          }
+          // Closure mismatch across a shared face (plan §13.A): an
+          // external and a zero_gradient stage cell side by side would
+          // give the face two momentum semantics — counted here (negative
+          // sentinel) and made fatal below.
+          const auto mismatch = [&](int ja, int ia, int jb, int ib) {
+            return !outside(ja, ia) && !outside(jb, ib) &&
+                   extMark(ja, ia) * extMark(jb, ib) < 0.0;
+          };
+          if ((i <= nxl && mismatch(j, i, j, i + 1)) ||
+              (j <= nyl && mismatch(j, i, j + 1, i))) {
+            count -= 1000000;
+          }
+        },
+        reservoirFaces);
+    if (reservoirFaces < 0) {
+      log::fatal("eta boundaries: stage cells share a face but declare "
+                 "different inflow closures");
+    }
+    halo_.exchangeWithCorners({"swe_res_face_x", "swe_res_face_y"});
+    long facesGlobal = 0;
+    MPI_Allreduce(&reservoirFaces, &facesGlobal, 1, MPI_LONG, MPI_SUM, grid_.comm());
+    if (facesGlobal == 0 && grid_.rank() == 0) {
+      log::warn(log::msg()
+                << "inflow closure external: no reservoir face exists (a "
+                   "one-cell-thick interior stage line); the closure behaves "
+                   "as zero_gradient");
+    }
+  }
 }
 
 void SurfaceSolver::buildCooPattern() {
@@ -499,7 +651,28 @@ void SurfaceSolver::beginStep(real_t t) {
   audit_ = SurfaceStepAudit{};
 
   rain_ = rainIsSeries_ ? rainSeries_.value(t) : rainConstant_;
-  if (evapMode_ == SurfaceWaterConfig::EvapMode::Bulk) {
+  if (etOpenWater_) {
+    // Stage-3 T5 (W5.3): E_w of the selected potential (bulk with
+    // r_s = 0, alpha = 1 — the open-water rate — or the prescribed
+    // series; T7 adds PM with r_s = 0 at the water albedo/G fraction).
+    // The schema made the legacy keys exclusive with the block.
+    if (etCfg_.potential == EvapotranspirationConfig::Potential::Bulk) {
+      const atm::MetSample met = met_.sample(t);
+      evap_ = atm::evaporationRate(met.surfaceTemperatureC, met.pressureKpa,
+                                   met.windSpeed, met.airSpecificHumidity);
+    } else if (etCfg_.potential ==
+               EvapotranspirationConfig::Potential::PenmanMonteith) {
+      const atm::MetSample met = met_.sample(t);
+      const real_t rA = atm::aeroResistance(etAeroLaw_, met.windSpeed, etAero_);
+      evap_ = atm::penmanMonteithRate(
+          met.airTemperatureC, met.pressureKpa, met.airSpecificHumidity,
+          met.shortwaveIncoming, met.longwaveIn, etCfg_.energy.albedoWater,
+          etCfg_.energy.gFractionWater, rA, 0.0);
+    } else {
+      evap_ = etCfg_.prescribed.fromSeries ? etPrescribedSeries_.value(t)
+                                           : etCfg_.prescribed.constant;
+    }
+  } else if (evapMode_ == SurfaceWaterConfig::EvapMode::Bulk) {
     // Open-water potential rate: q_g = q_sat(T_s) (plan §3.2 mode 2). T_s
     // is spatially uniform until Q5 transports temperature, so one rate
     // serves every cell (and the transport dilution's scalar path).
@@ -528,6 +701,44 @@ void SurfaceSolver::beginStep(real_t t) {
         "swe_eta_bc_value",
         Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
         KOKKOS_LAMBDA(const std::size_t m) { value(lj(m), li(m)) = current; });
+  }
+  // Stage-3 T2: refresh the external reservoirs' velocity state at the
+  // reservoir faces (read by the momentum stencils, W2.3). Faces between
+  // two external-stage cells of different BCs take the last writer — the
+  // setup made closure mismatches fatal, and both BCs of a same-closure
+  // overlap write the same series or the geometry separates them.
+  if (hasExternal_) {
+    Field2<real_t> resX = resFaceX_, resY = resFaceY_;
+    Field2<real_t> uRes = uResX_, vRes = vResY_;
+    for (DeviceBcList& list : etaBcs_) {
+      if (list.bc->inflowClosure() != BcInflowClosure::External) {
+        continue;
+      }
+      const real_t uExt = list.bc->inflowU(t);
+      const real_t vExt = list.bc->inflowV(t);
+      auto lj = list.j;
+      auto li = list.i;
+      Kokkos::parallel_for(
+          "swe_reservoir_state",
+          Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
+          KOKKOS_LAMBDA(const std::size_t m) {
+            const int j = lj(m);
+            const int i = li(m);
+            if (resX(j, i - 1) != 0.0) {
+              uRes(j, i - 1) = uExt;
+            }
+            if (resX(j, i) != 0.0) {
+              uRes(j, i) = uExt;
+            }
+            if (resY(j - 1, i) != 0.0) {
+              vRes(j - 1, i) = vExt;
+            }
+            if (resY(j, i) != 0.0) {
+              vRes(j, i) = vExt;
+            }
+          });
+    }
+    halo_.exchangeWithCorners({"swe_u_res_x", "swe_v_res_y"});
   }
   for (DeviceBcList& list : dischargeBcs_) {
     list.current = list.bc->value(t);

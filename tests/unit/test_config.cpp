@@ -84,6 +84,21 @@ TEST_F(ConfigTest, MinimalConfigIsValid) {
   EXPECT_TRUE(result.ok()) << joined(result);
 }
 
+TEST_F(ConfigTest, ValidationWarningsDoNotInvalidate) {
+  // Stage-3 W0.9 channel contract: ok() ignores warnings, a clean minimal
+  // configuration carries none, and loadConfig carries the list into the
+  // materialized config (empty here; the first rule that emits a warning —
+  // T1's inert-reallocation-key advisories — asserts the populated path).
+  ValidationResult synthetic;
+  synthetic.warnings.push_back("some.key: advisory");
+  EXPECT_TRUE(synthetic.ok());
+  const ValidationResult result = validate(kBaseConfig);
+  EXPECT_TRUE(result.ok()) << joined(result);
+  EXPECT_TRUE(result.warnings.empty());
+  const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(kBaseConfig));
+  EXPECT_TRUE(cfg.validationWarnings.empty());
+}
+
 TEST_F(ConfigTest, LoadMaterializesDefaults) {
   const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(kBaseConfig));
   EXPECT_EQ(cfg.simulation.id, "unit-test");
@@ -587,6 +602,173 @@ TEST_F(ConfigTest, RejectsScalarCauchyInCoupledRuns) {
   ASSERT_FALSE(result.ok());
   EXPECT_TRUE(hasError(result, "kind scalar_cauchy applies to uncoupled groundwater runs only"))
       << joined(result);
+}
+
+TEST_F(ConfigTest, ReallocationModeParsesRoundTripsAndRejectsLegacyOnlyKeys) {
+  // Stage-3 T1 gate rl1 (plan W1.1; owner decision O9). groundwater.
+  // reallocation: default legacy, disabled selects restoreHeadFromWaterContent
+  // both round-trip through the resolved configuration; unknown values are
+  // ("off" would be a YAML-1.1 boolean, S3-A3); the legacy-only knobs under
+  // disabled raise WARNINGS (not errors —
+  // the resolved config materializes them, and existing case files must
+  // stay valid if the T8 default flip lands), and the inert realloc_*
+  // outputs warn too.
+  const std::string base = kGwTransportConfig;
+  const frehg::FrehgConfig byDefault = frehg::loadConfig(writeConfig(base));
+  EXPECT_EQ(byDefault.groundwater.reallocation,
+            frehg::GroundwaterConfig::Reallocation::Legacy);
+  EXPECT_NE(frehg::resolvedConfigYaml(byDefault).find("reallocation: legacy"),
+            std::string::npos);
+
+  std::string text = base;
+  const std::string gwNeedle = "  specific_storage: 1.0e-5";
+  text.replace(text.find(gwNeedle), gwNeedle.size(),
+               "  specific_storage: 1.0e-5\n  reallocation: disabled");
+  const ValidationResult offOk = validate(text);
+  EXPECT_TRUE(offOk.ok()) << joined(offOk);
+  EXPECT_TRUE(offOk.warnings.empty()) << offOk.warnings.front();
+  const frehg::FrehgConfig off = frehg::loadConfig(writeConfig(text));
+  EXPECT_EQ(off.groundwater.reallocation, frehg::GroundwaterConfig::Reallocation::Off);
+  EXPECT_NE(frehg::resolvedConfigYaml(off).find("reallocation: disabled"), std::string::npos);
+
+  // "off" is deliberately NOT a value (S3-A3): YAML 1.1 parsers (PyYAML —
+  // the gate harness and the run-record checker) read it as the boolean
+  // false, which corrupts every round trip. The schema rejects it.
+  std::string bad = base;
+  bad.replace(bad.find(gwNeedle), gwNeedle.size(),
+              "  specific_storage: 1.0e-5\n  reallocation: off");
+  const ValidationResult rejected = validate(bad);
+  ASSERT_FALSE(rejected.ok());
+  EXPECT_TRUE(hasError(rejected, "invalid value 'off'")) << joined(rejected);
+
+  std::string inert = base;
+  inert.replace(inert.find(gwNeedle), gwNeedle.size(),
+                "  specific_storage: 1.0e-5\n  reallocation: disabled\n"
+                "  reallocation_surplus: redistribute\n"
+                "  density_coupling: {enabled: true, reallocation_gradient: density}");
+  inert += "output:\n  filename: out/output.h5\n"
+           "  variables: {groundwater: [realloc_created]}\n";
+  // kGwTransportConfig already carries an output block; strip the original.
+  const std::string outNeedle = "output: {filename: out/output.h5}\n";
+  inert.replace(inert.find(outNeedle), outNeedle.size(), "");
+  const ValidationResult inertResult = validate(inert);
+  EXPECT_TRUE(inertResult.ok()) << joined(inertResult);
+  ASSERT_EQ(inertResult.warnings.size(), 3u);
+  EXPECT_NE(inertResult.warnings[0].find("reallocation_surplus"), std::string::npos);
+  EXPECT_NE(inertResult.warnings[1].find("reallocation_gradient"), std::string::npos);
+  EXPECT_NE(inertResult.warnings[2].find("realloc_created"), std::string::npos);
+  const frehg::FrehgConfig carried = frehg::loadConfig(writeConfig(inert));
+  EXPECT_EQ(carried.validationWarnings.size(), 3u);
+}
+
+TEST_F(ConfigTest, PeriodicTopologyParsesRoundTripsAndRejectsThinAxes) {
+  // Stage-3 T3 gate pd6/pd7 schema side (plan §13.B): domain.periodic
+  // parses, defaults to false/false, round-trips through the resolved
+  // configuration (gate r1), and rejects an axis thinner than 3 cells.
+  const frehg::FrehgConfig plain = frehg::loadConfig(writeConfig(kBaseConfig));
+  EXPECT_FALSE(plain.domain.periodicX);
+  EXPECT_FALSE(plain.domain.periodicY);
+  const std::string resolvedPlain = frehg::resolvedConfigYaml(plain);
+  EXPECT_NE(resolvedPlain.find("periodic:"), std::string::npos);
+
+  std::string per = kBaseConfig;
+  const std::string needle = "domain:";
+  per.replace(per.find(needle), needle.size(), "domain:\n  periodic: {x: true}");
+  const ValidationResult ok = validate(per);
+  EXPECT_TRUE(ok.ok()) << joined(ok);
+  const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(per));
+  EXPECT_TRUE(cfg.domain.periodicX);
+  EXPECT_FALSE(cfg.domain.periodicY);
+  EXPECT_NE(frehg::resolvedConfigYaml(cfg).find("x: true"), std::string::npos);
+
+  std::string thin = per;
+  const std::string nxNeedle = "nx: 4";
+  ASSERT_NE(thin.find(nxNeedle), std::string::npos);
+  thin.replace(thin.find(nxNeedle), nxNeedle.size(), "nx: 2");
+  const ValidationResult rejected = validate(thin);
+  ASSERT_FALSE(rejected.ok());
+  EXPECT_TRUE(hasError(rejected, "needs nx >= 3")) << joined(rejected);
+}
+
+TEST_F(ConfigTest, InflowClosureParsesRoundTripsAndRejectsMisuse) {
+  // Stage-3 T2 gate ob7 (plan §13.A). The inflow block parses on kind eta,
+  // defaults to zero_gradient, resolves its closure (round trip, gate r1),
+  // and rejects: inflow on a non-eta kind, and velocity under
+  // zero_gradient.
+  std::string base = kBaseConfig;
+  const std::string bcBlock =
+      "boundary_conditions:\n"
+      "  - name: stage\n"
+      "    region: {polygon: [[-0.1, -0.1], [1.1, -0.1], [1.1, 1.1], [-0.1, 1.1]]}\n"
+      "    target: surface\n"
+      "    kind: eta\n"
+      "    value: {constant: 0.5}\n";
+  const frehg::FrehgConfig plain = frehg::loadConfig(writeConfig(base + bcBlock));
+  ASSERT_EQ(plain.boundaryConditions.size(), 1u);
+  EXPECT_EQ(plain.boundaryConditions[0].inflowClosure,
+            frehg::BcInflowClosure::ZeroGradient);
+  EXPECT_NE(frehg::resolvedConfigYaml(plain).find("closure: zero_gradient"),
+            std::string::npos);
+
+  const std::string ext = base + bcBlock +
+      "    inflow:\n      closure: external\n"
+      "      velocity: {u: {constant: 0.1}, v: {constant: -0.05}}\n";
+  const ValidationResult extOk = validate(ext);
+  EXPECT_TRUE(extOk.ok()) << joined(extOk);
+  const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(ext));
+  EXPECT_EQ(cfg.boundaryConditions[0].inflowClosure, frehg::BcInflowClosure::External);
+  EXPECT_DOUBLE_EQ(cfg.boundaryConditions[0].inflowU.constant, 0.1);
+  EXPECT_DOUBLE_EQ(cfg.boundaryConditions[0].inflowV.constant, -0.05);
+  const std::string resolved = frehg::resolvedConfigYaml(cfg);
+  EXPECT_NE(resolved.find("closure: external"), std::string::npos);
+  EXPECT_NE(resolved.find("u:"), std::string::npos);
+
+  std::string wrongKind = base + bcBlock +
+      "    inflow: {closure: external}\n";
+  wrongKind.replace(wrongKind.find("kind: eta"), 9, "kind: velocity");
+  wrongKind.replace(wrongKind.find("value: {constant: 0.5}"), 22,
+                    "value: {constant: 0.0}");
+  const ValidationResult rejectedKind = validate(wrongKind);
+  ASSERT_FALSE(rejectedKind.ok());
+  EXPECT_TRUE(hasError(rejectedKind, "applies to kind eta only")) << joined(rejectedKind);
+
+  const std::string zgVel = base + bcBlock +
+      "    inflow:\n      closure: zero_gradient\n"
+      "      velocity: {u: {constant: 0.1}}\n";
+  const ValidationResult rejectedVel = validate(zgVel);
+  ASSERT_FALSE(rejectedVel.ok());
+  EXPECT_TRUE(hasError(rejectedVel, "only valid with closure external"))
+      << joined(rejectedVel);
+}
+
+TEST_F(ConfigTest, MonitorIntervalAndSeepageRateParseRoundTripAndRejectMisuse) {
+  // Stage-3 T4 (plan §8 W4.2/W4.3): output.monitor_interval parses, defaults
+  // to 0 (every step), resolves (round trip, gate r1); seepage_rate is a
+  // surface variable that requires the groundwater module.
+  std::string base = kBaseConfig;
+  const frehg::FrehgConfig plain = frehg::loadConfig(writeConfig(base));
+  EXPECT_DOUBLE_EQ(plain.output.monitorInterval, 0.0);
+
+  std::string withInterval = base;
+  withInterval.replace(withInterval.find("output: {filename: out/output.h5}"),
+                       33,
+                       "output:\n  filename: out/output.h5\n"
+                       "  monitor_interval: 60\n");
+  const ValidationResult intervalOk = validate(withInterval);
+  EXPECT_TRUE(intervalOk.ok()) << joined(intervalOk);
+  const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(withInterval));
+  EXPECT_DOUBLE_EQ(cfg.output.monitorInterval, 60.0);
+  EXPECT_NE(frehg::resolvedConfigYaml(cfg).find("monitor_interval: 60"),
+            std::string::npos);
+
+  std::string rateNoGw = base;
+  rateNoGw.replace(rateNoGw.find("output: {filename: out/output.h5}"), 33,
+                   "output:\n  filename: out/output.h5\n"
+                   "  variables: {surface: [eta, seepage_rate]}\n");
+  const ValidationResult rejected = validate(rateNoGw);
+  ASSERT_FALSE(rejected.ok());
+  EXPECT_TRUE(hasError(rejected, "requires modules.groundwater"))
+      << joined(rejected);
 }
 
 TEST_F(ConfigTest, SubsurfaceUpdateAndReallocationGradientParseAndRoundTrip) {
@@ -1148,3 +1330,129 @@ TEST_F(ConfigTest, AcceptsPetscOptionsFilePassThrough) {
 }
 
 }  // namespace
+
+
+// ---------------------------------------------------------------------------
+// Stage-3 T7 (plan §11/§13.C): the Penman-Monteith configuration rules.
+// ---------------------------------------------------------------------------
+
+namespace {
+/// kAtmosphereBlock plus the T7 incident-radiation pair.
+const char* kPmAtmosphereBlock = R"(atmosphere:
+  air_temperature: {constant: 20.0}
+  pressure: {constant: 101.325}
+  specific_humidity: {constant: 2.9e-3}
+  wind_speed: {constant: 1.0}
+  shortwave_incoming: {constant: 500.0}
+  longwave_in: {constant: 350.0}
+)";
+}  // namespace
+
+TEST_F(ConfigTest, AcceptsPenmanMonteithOpenWater) {
+  // T7 removed the "not available before phase T7" rule: PM with the
+  // radiation pair validates (open water only; no soil/vegetation albedo
+  // requirements fire).
+  std::string text = kBaseConfig;
+  text += kPmAtmosphereBlock;
+  text += "evapotranspiration:\n  potential: penman_monteith\n";
+  const ValidationResult result = validate(text);
+  EXPECT_TRUE(result.ok()) << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsPenmanMonteithWithoutRadiationPair) {
+  std::string text = kBaseConfig;
+  text += kAtmosphereBlock;  // no shortwave_incoming / longwave_in
+  text += "evapotranspiration:\n  potential: penman_monteith\n";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result,
+                       "penman_monteith: requires atmosphere.shortwave_incoming"))
+      << joined(result);
+  EXPECT_TRUE(hasError(result, "penman_monteith: requires atmosphere.longwave_in"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsPenmanMonteithWithTemperatureModule) {
+  // DoD T7: PM + modules.temperature pinned rejected (the heat module's
+  // latent flux uses the bulk rate at the simulated temperature).
+  std::string text = kBaseConfig;
+  const std::string mods = "modules: {surface_water: true}";
+  ASSERT_NE(text.find(mods), std::string::npos);
+  text.replace(text.find(mods), mods.size(),
+               "modules: {surface_water: true, temperature: true}");
+  text += kPmAtmosphereBlock;
+  text += "evapotranspiration:\n  potential: penman_monteith\n";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result,
+                       "penman_monteith with modules.temperature is not available"))
+      << joined(result);
+}
+
+TEST_F(ConfigTest, RejectsPenmanMonteithWithoutTypeAlbedos) {
+  // Soil channel: every soil type needs an albedo; vegetation: every
+  // vegetation type needs one.
+  std::string text = kGwTransportConfig;
+  text += kPmAtmosphereBlock;
+  text += R"(evapotranspiration:
+  potential: penman_monteith
+  open_water: false
+  soil: {limiter: none}
+vegetation:
+  types:
+  - {name: marsh, lai: 2.5, extinction: 0.5, leaf_resistance: 100.0,
+     root_depth: 0.3, feddes: {h3: -4.0, h4: -80.0}}
+  map: {constant: marsh}
+)";
+  const ValidationResult result = validate(text);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(hasError(result,
+                       "penman_monteith with the soil channel needs every soil "
+                       "type's albedo"))
+      << joined(result);
+  EXPECT_TRUE(hasError(result,
+                       "penman_monteith with vegetation needs every vegetation "
+                       "type's albedo"))
+      << joined(result);
+}
+
+
+TEST_F(ConfigTest, SurfaceDryoutDefaultIsStoreAfterTheT8Flip) {
+  // Stage-3 T8 (W8.2/W8.3, S3-A11): the salt-store default-flip evaluation
+  // passed everywhere, so the shipped default is `store`; an explicit
+  // `discard` still parses (the v2.0 behavior, golden-pinned), and the
+  // ET + salinity rule fires only on an EXPLICIT discard.
+  std::string base = kGwTransportConfig;
+  const std::string mods = "modules: {groundwater: true, transport: true}";
+  base.replace(base.find(mods), mods.size(),
+               "modules: {surface_water: true, groundwater: true, transport: true}");
+  const std::string ic = "initial_conditions:";
+  base.replace(base.find(ic), ic.size(),
+               "surface_water:\n"
+               "  friction: {coefficient: {constant: 0.02}}\n"
+               "  min_depth: 1.0e-6\n"
+               "  wetting_face_depth: 1.0e-6\n"
+               "initial_conditions:\n"
+               "  surface: {eta: {constant: 0.1}}");
+  const std::string icTr = "  transport: {groundwater: {constant: 25.0}}";
+  base.replace(base.find(icTr), icTr.size(),
+               "  transport:\n"
+               "    groundwater: {constant: 25.0}\n"
+               "    surface: {constant: 25.0}");
+  const frehg::FrehgConfig byDefault = frehg::loadConfig(writeConfig(base));
+  EXPECT_EQ(byDefault.transport.surfaceDryout,
+            frehg::TransportConfig::SurfaceDryout::Store);
+  EXPECT_NE(frehg::resolvedConfigYaml(byDefault).find("surface_dryout: store"),
+            std::string::npos);
+
+  std::string text = base;
+  const std::string needle = "transport:\n  scheme: {advection: upwind}";
+  text.replace(text.find(needle), needle.size(),
+               "transport:\n  surface_dryout: discard\n"
+               "  scheme: {advection: upwind}");
+  const frehg::FrehgConfig pinned = frehg::loadConfig(writeConfig(text));
+  EXPECT_EQ(pinned.transport.surfaceDryout,
+            frehg::TransportConfig::SurfaceDryout::Delete);
+  EXPECT_NE(frehg::resolvedConfigYaml(pinned).find("surface_dryout: discard"),
+            std::string::npos);
+}

@@ -27,7 +27,9 @@ seconds):
 
 Surface fields (`eta`, `depth`, `uu`, `vv`, `seepage`) are 2D arrays of
 `NY*NX` values flattened as `j*NX + i`. Groundwater fields
-(`hydraulic_head`, `water_content`, `qx`, `qy`, `qz`) are 3D arrays
+(`hydraulic_head`, `water_content`, `qx`, `qy`, `qz`, and the Stage-3
+cumulative per-cell diagnostics `realloc_created`, `realloc_dropped`,
+`vloss` [m³], allocated only when requested) are 3D arrays
 flattened as `(j*NX + i)*NZ + k`, `k = 0` at the top layer; cells outside
 the active subsurface are NaN. Transport writes `concentration` (the
 subsurface grid) and `concentration_surface` (the surface grid). Each
@@ -35,14 +37,51 @@ dataset carries `units`, `long_name`, and `time` attributes. `eta` is
 absolute free-surface elevation; `depth` is `eta − bottom`; `seepage`
 (coupled runs) is the surface-applied exchange rate [m/s], positive upward.
 
+**Snapshot vs interval-mean rates (Stage-3 T4).** `seepage` is a PER-STEP
+sample of the applied rate (the legacy qss observable): in a subcycled run
+most surface steps apply no exchange, so the sample at an output instant is
+usually 0 even while water is flowing — never integrate it. For analysis
+use `seepage_rate`: the interval MEAN of the complete coupled surface gain
+(applied seepage + bounce-back + vent deposits) in m/s, positive upward,
+normalized over the true elapsed time between output writes, so
+`sum over cells of rate · cell_area · Δt_out` equals the increment of the
+audit's cumulative `seepage` column over the same interval exactly (the dg1
+gate holds this to 1e-12). The frame at `t = t_start` is zeros (no interval
+has elapsed). The accumulators restart bitwise (checkpoint fields
+`acc_<name>` and the scalar `acc_t_prev`).
+
+**The `/atmosphere` group (Stage-3 T5).** With the ET block,
+`output.variables.atmosphere` selects `evaporation_rate`,
+`soil_evaporation_rate` and `soil_evaporation_unrealised_rate`
+(interval-MEAN rates in m/s, positive out — the same registry semantics
+as `seepage_rate`: `sum(rate · area · Δt_out)` recovers the audited
+volumes exactly) plus the cumulative complementarity clocks `wet_time`
+and `soil_evaporation_time` [s] (per cell, `wet_time +
+soil_evaporation_time ≤ t` always). Transport adds `salt_store`
+[psu·m³] — the per-cell surface salt store under
+`transport.surface_dryout: store`; the transport audit's instantaneous
+`surf_store` column is its global total, and
+`Δ(surf_mass + surf_store)` closes on the unchanged ledger RHS.
+
 **Monitors.** `/monitor/<name>` is a growing table with one row per time
 step. Its `columns` attribute is the CSV header, e.g. `time,depth,vv`, and
 `i`/`j` attributes record the sampled cell.
 
+**Row decimation (Stage-3 T4).** `output.monitor_interval: <seconds>`
+decimates the ROW WRITES of every `/monitor` table (point monitors and the
+audits alike). Audit columns still accumulate every step, so a decimated
+run's row at time t is bitwise the row the every-step run writes at t;
+rows are forced at checkpoint instants and at `t_end` (the dg2 gate).
+Default 0 = one row per step, the v2.0 behavior.
+
 **Mass audits.** `/monitor/mass_audit` (surface) is written whenever the
 SWE module runs. Its columns (`columns` attribute:
-`time,volume,rain,evaporation,boundary_outflow,bc_inflow[,seepage],clamped`
-— `seepage` only in coupled runs) are the running water-volume budget,
+`time,volume,rain,evaporation,boundary_outflow,bc_inflow[,seepage],clamped[,stage_deposit]`
+— `seepage` and `stage_deposit` only in coupled runs; `stage_deposit`
+(Stage-3 T2) is the cumulative coupled deposit on prescribed-stage cells,
+removed through the reservoir under `inflow: {closure: external}` or
+booked-in-place under `zero_gradient`, so the coupled surface identity
+closes with stage conditions present) are the running water-volume budget,
 reduced across all ranks. `clamped` measures the volume the legacy
 below-bed clamp creates (a scheme defect reported as data; ~1.6 % of rain
 in the b5 regime, effectively zero elsewhere) plus, since v2 Q4, the
@@ -59,7 +98,10 @@ module runs, with columns
 (`evaporation` only with `groundwater.evaporation` configured: the
 cumulative actual evaporated volume through the bulk-soil zone, read off
 the realized top-face flux — the g5(i) observable) — the
-subsurface identity closes to rounding
+subsurface identity closes to rounding. Under
+`groundwater.reallocation: disabled` (Stage-3 T1) the `realloc` and
+`realloc_dropped` columns are exactly zero and the identity reduces to
+`Δvolume = boundary_in − ss_storage − vloss`. It closes to rounding
 (`Δvolume = boundary_in − ss_storage + realloc − vloss`; the evaporation
 column is a sub-account of `boundary_in`, not an extra term). In coupled runs
 the exchanged volume appears symmetrically: positive `seepage` in the
@@ -169,6 +211,8 @@ Top-level sections:
 | `modules` | module flags, coupling mode, density-coupling state |
 | `boundary_conditions` | per BC: name, target, kind, value (series files carry their SHA-256), polygon vertex count and bounding box, global member-cell count |
 | `timers` | the full hierarchical timer tree (count, min/mean/max seconds over ranks) — identical numbers to the end-of-run stdout table, plus the `init`, `io/output`, `io/checkpoint`, `io/run_record`, `halo` (message passing), and `monitors` sections |
+| `closure` (additions) | Stage-3 T2 adds `stage_deposit_m3` (coupled runs) and, with any eta condition, `stage_ke_influx_J` + `stage_entrance_head_ratio` — the free-energy observables of the inflow closure (theory/surface-water.md); a zero_gradient run whose inflow imports kinetic energy without paying the entrance head warns at run end |
+| `warnings` | non-fatal advisories, present only when there are any (Stage-3): configuration keys that are legal but inert under the current mode (also printed by `frehg --validate` as `WARNING:` lines) and runtime findings; a run with warnings is still a valid run |
 | `solver` | per-system linear-solver telemetry: solves, iteration mean/max, rebuilds, retries, setup/solve seconds |
 | `closure` | the final cumulative mass-audit budgets (surface and groundwater) |
 

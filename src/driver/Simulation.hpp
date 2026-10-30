@@ -26,6 +26,7 @@
 #include "gw/TerrainMetric.hpp"
 #include "io/Checkpoint.hpp"
 #include "io/Hdf5Output.hpp"
+#include "io/IntervalRates.hpp"
 #include "io/Monitor.hpp"
 #include "io/RunRecord.hpp"
 #include "swe/SurfaceSolver.hpp"
@@ -62,12 +63,24 @@ class Simulation {
   void runCoupledLoop(real_t t0);
   void buildTransport();
   void stepTransport(real_t t, real_t dt, real_t dtgLast);
-  void writeOutputs(real_t t);
+  /// Write field outputs under the dataset key \p label; \p tActual (< 0:
+  /// same as the label) is the true state time the interval-rate outputs
+  /// normalize over (Stage-3 T4 W4.1 — adaptive loops can cross a label).
+  void writeOutputs(real_t label, real_t tActual = -1.0);
   void recordMonitors(real_t t);
-  void recordMassAudit(real_t t);
-  void recordGwMassAudit(real_t t);
-  void recordTransportAudit(real_t t);
-  void recordTemperatureAudit(real_t t);
+  /// The audit recorders ACCUMULATE every step; \p writeRow decimates the
+  /// row write only (Stage-3 T4 W4.3, output.monitor_interval).
+  void recordMassAudit(real_t t, bool writeRow = true);
+  void recordGwMassAudit(real_t t, bool writeRow = true);
+  void recordTransportAudit(real_t t, bool writeRow = true);
+  void recordTemperatureAudit(real_t t, bool writeRow = true);
+  /// True when a monitor/audit row is due at \p t: every step with
+  /// monitor_interval 0/absent, else at the first step reaching the next
+  /// interval multiple, or \p forced (a checkpoint instant or t_end).
+  bool monitorRowDue(real_t t, bool forced);
+  /// Stage-3 T5 (W5.10): per-outer-step ET contributions to the
+  /// atmosphere interval rates (and the soil depth-window reset).
+  void addEtRateContributions();
   void writeCheckpoint(real_t t, long step, real_t labelTime = -1.0);
   /// Refresh the run record's dynamic sections (solver telemetry, closure)
   /// and rewrite it. Collective (v2 plan §2A).
@@ -90,6 +103,7 @@ class Simulation {
   std::unique_ptr<io::Checkpoint> checkpoint_;
   std::unique_ptr<io::RunRecord> runRecord_;
   std::vector<std::unique_ptr<io::Monitor>> monitors_;
+  std::unique_ptr<io::IntervalRates> rates_;  ///< interval-mean rate outputs (T4)
   std::unique_ptr<io::Monitor> massAudit_;
   std::unique_ptr<io::Monitor> gwMassAudit_;
   std::unique_ptr<io::Monitor> transportAudit_;
@@ -97,6 +111,8 @@ class Simulation {
 
   /// Current adaptive subsurface step [s] (groundwater-only runs).
   real_t dtg_ = 0.0;
+  /// Next monitor/audit row-write boundary [s] (monitor_interval > 0).
+  real_t nextMonitorRow_ = 0.0;
 
   // Running global volume budgets, maintained on the audit owner rank.
   real_t cumRain_ = 0.0;
@@ -105,12 +121,18 @@ class Simulation {
   real_t cumBcInflow_ = 0.0;
   real_t cumSeepage_ = 0.0;
   real_t cumClamped_ = 0.0;  ///< running below-bed clamp creation [m^3]
+  /// Running coupled deposit on prescribed-stage cells [m^3] (Stage-3 T2).
+  real_t cumStageDeposit_ = 0.0;
   real_t cumGwBoundary_ = 0.0;
   real_t cumGwStorage_ = 0.0;
   real_t cumGwRealloc_ = 0.0;
   real_t cumGwDropped_ = 0.0;
   real_t cumGwVloss_ = 0.0;
   real_t cumGwEvap_ = 0.0;
+  real_t cumGwEtApplied_ = 0.0;      ///< ET soil channel applied [m^3] (T5)
+  real_t cumGwEtUnrealised_ = 0.0;   ///< ET soil channel unrealised [m^3] (T5)
+  real_t cumGwTrApplied_ = 0.0;      ///< transpiration applied [m^3] (T6)
+  real_t cumGwTrUnrealised_ = 0.0;   ///< transpiration unrealised [m^3] (T6)
   real_t cumTrExchange_ = 0.0;
   real_t cumTrSurfSource_ = 0.0;
   real_t cumTrSurfBoundary_ = 0.0;

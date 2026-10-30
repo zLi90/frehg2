@@ -24,6 +24,7 @@ add_library(frehg_core STATIC
   bc/BoundarySet.cpp
   io/GridDataReader.cpp
   io/Hdf5Output.cpp
+  io/IntervalRates.cpp
   io/Monitor.cpp
   io/Checkpoint.cpp
   io/RunRecord.cpp
@@ -74,6 +75,7 @@ add_library(frehg_gw STATIC
   gw/RichardsSolver.cpp
   gw/Predictor.cpp
   gw/Corrector.cpp
+  gw/Evapotranspiration.cpp
   gw/Reallocate.cpp
   gw/AdaptiveStep.cpp
   gw/Baroclinic.cpp)

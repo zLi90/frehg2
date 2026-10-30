@@ -195,6 +195,14 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
   // instance registers a parallel "t_*" set.
   const std::string p = spec_.prefix + "_";
   if (surf_.active) {
+    // Stage-3 T5 (W5.7/O4): the surface salt store — salinity only, under
+    // transport.surface_dryout: store. Halo-free (cell-local).
+    if (!spec_.isTemperature &&
+        config.transport.surfaceDryout == TransportConfig::SurfaceDryout::Store) {
+      store_ = true;
+      sStore_ = Field2<real_t>(p + "store", ny2, nx2);
+      Kokkos::deep_copy(sStore_, 0.0);
+    }
     sSurf_ = Field2<real_t>(p + "surf", ny2, nx2);
     smSurf_ = Field2<real_t>(p + "sm_surf", ny2, nx2);
     sSurfKp_ = Field2<real_t>(p + "surf_kp", ny2, nx2);
@@ -647,6 +655,23 @@ real_t ScalarSolver::ownedSubsurfaceMass() const {
       },
       mass);
   return mass;
+}
+
+real_t ScalarSolver::surfaceStoreTotal() const {
+  if (!store_) {
+    return 0.0;
+  }
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  Field2<real_t> store = sStore_;
+  real_t total = 0.0;
+  Kokkos::parallel_reduce(
+      "transport_store_total",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i, real_t& sum) { sum += store(j, i); },
+      total);
+  return total;
 }
 
 }  // namespace frehg::transport

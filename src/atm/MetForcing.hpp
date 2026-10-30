@@ -30,6 +30,10 @@ struct MetSample {
   real_t windSpeed = 0.0;
   real_t shortwave = 0.0;            ///< absorbed SW [W/m^2] (Q5)
   real_t longwaveIn = 0.0;           ///< incident LW [W/m^2] (Q5)
+  /// Incident R_s [W/m^2] for the Penman-Monteith potential (Stage-3
+  /// T7; each channel applies its own albedo). Distinct from the Q5
+  /// `shortwave`, which stays absorbed SW.
+  real_t shortwaveIncoming = 0.0;
 };
 
 /// Configured met forcing, evaluated per step on the host.
@@ -51,6 +55,7 @@ class MetForcing {
     load(atm_.windSpeed, windSpeed_);
     load(atm_.shortwave, shortwave_);
     load(atm_.longwaveIn, longwaveIn_);
+    load(atm_.shortwaveIncoming, shortwaveIncoming_);
   }
 
   /// True when an atmosphere block was configured (sample() is only
@@ -72,6 +77,7 @@ class MetForcing {
     }
     out.shortwave = value(atm_.shortwave, shortwave_);
     out.longwaveIn = value(atm_.longwaveIn, longwaveIn_);
+    out.shortwaveIncoming = value(atm_.shortwaveIncoming, shortwaveIncoming_);
     if (atm_.humidityIsRelative) {
       out.airSpecificHumidity =
           value(atm_.relativeHumidity, relativeHumidity_) *
@@ -87,6 +93,7 @@ class MetForcing {
   TimeSeries airTemperature_, surfaceTemperature_, pressure_;
   TimeSeries specificHumidity_, relativeHumidity_, windSpeed_;
   TimeSeries shortwave_, longwaveIn_;
+  TimeSeries shortwaveIncoming_;
 };
 
 }  // namespace frehg::atm

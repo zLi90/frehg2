@@ -107,6 +107,19 @@ class Coupler {
   /// observable; output variable "seepage" and checkpoint field "qss").
   const Field2<real_t>& seepageRate() const { return qss_; }
 
+  /// This step's complete coupled surface deposit per cell [m] (applied
+  /// seepage + bounce-back + vent): what the audit reduces into the
+  /// cumulative seepage column, and the seepage_rate contributor (T4 W4.2).
+  const Field2<real_t>& gain() const { return gain_; }
+
+  /// Stage-3 T5 (W5.9): switch the held-seepage salt bookkeeping on
+  /// (called by the driver when ET + the salt store are active).
+  void enableHeldSeepageSalt();
+  bool heldSeepageSalt() const { return heldSalt_; }  ///< the W5.9 path is on
+  /// Newly exfiltrated depth this surface step [m] (excludes the held
+  /// backlog; valid after step()).
+  const Field2<real_t>& exfNew() const { return exfNew_; }
+
   /// Exchanged-not-yet-applied depth [m] (checkpoint field "seep_accum";
   /// nonzero when the dry-cell hold rule is active).
   const Field2<real_t>& seepAccum() const { return seepAccum_; }
@@ -145,6 +158,11 @@ class Coupler {
   Field2<real_t> avail_;      ///< window infiltration budget [m]
   Field2<real_t> gain_;       ///< coupled surface deposits this step [m]
   Field2<real_t> qss_;        ///< applied seepage rate [m/s]
+  // Stage-3 T5 (W5.9): held-seepage salt support (allocated only when the
+  // transport runs the store path; heldSalt_ gates the extra kernel work).
+  bool heldSalt_ = false;
+  Field2<real_t> heldPrev_;   ///< held (positive) backlog at window start [m]
+  Field2<real_t> exfNew_;     ///< newly exfiltrated depth this step [m]
 
   CouplingAudit audit_;
 };

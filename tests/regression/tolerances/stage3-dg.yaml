@@ -1,0 +1,15 @@
+# stage3-dg.yaml — tolerances for the Stage-3 diagnostics (T4) gates.
+# Every bound carries the gate and its authoring rationale (Stage-3 plan
+# §2.3); changes only by amendment (S3-A*).
+dg1:
+  # The rate-ledger identity: both sides sum the SAME per-step gain
+  # numbers (the rate field per cell over steps; the audit per step over
+  # cells), so only summation-order rounding and the write-time /(dt)*(dt)
+  # round trip separate them. Authored 1e-12 relative with a 1e-12 m^3
+  # absolute floor (plan §8); adjudicated at first green if the measured
+  # reordering class needs it.
+  ledger_rel: 1.0e-12
+dg2:
+  # Bitwise row-subset property — exact by construction (decimation only
+  # skips row WRITES; accumulation is unchanged). No tolerance.
+  exact: true

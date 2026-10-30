@@ -208,9 +208,8 @@ void ScalarSolver::stageSubsurfaceFarNeighbors() {
 void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   const int nz = grid_.nz();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
   const bool superbee = superbee_;
@@ -299,6 +298,14 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
   Field2<int> cauchy = cauchyTop_;
   Field2<real_t> ssee = coupled ? sseepage_ : Field2<real_t>();
   Field2<real_t> dept = coupled ? surf_.dept : Field2<real_t>();
+  // Stage-3 T5 (W5.8): the ET top-cell vapour factor (consistent update
+  // only — the window carries the channel's exact vapour volume).
+  const bool etTopOn = subs_.etActive && consistentSub;
+  Field2<int> etCol = etTopOn ? subs_.etColumn : Field2<int>();
+  Field2<real_t> vapWin = etTopOn ? subs_.vapWindow : Field2<real_t>();
+  // Stage-3 T6 (W6.5): the root-uptake window (consistent update only).
+  const bool vegOn = subs_.vegActive && consistentSub;
+  Field3<real_t> sinkWin = vegOn ? subs_.sinkWindow : Field3<real_t>();
   Field2<real_t> sSurf = coupled ? sSurf_ : Field2<real_t>();
   const real_t az = subs_.az;
   const real_t dx = grid_.dx();
@@ -321,10 +328,11 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         }
         const int gi = i0 + i - 1;
         const int gj = j0 + j - 1;
-        const bool westCell = (gi == 0);
-        const bool eastCell = (gi == nxGlobal - 1);
-        const bool southCell = (gj == 0);
-        const bool northCell = (gj == nyGlobal - 1);
+        // Stage-3 T3: all false on a periodic axis.
+        const bool westCell = topo.west(gi);
+        const bool eastCell = topo.east(gi);
+        const bool southCell = topo.south(gj);
+        const bool northCell = topo.north(gj);
         const int columnTop = kTop(j, i);
         const bool isTop = (k == columnTop);
         const real_t volume = az * dz3d(j, i, k);
@@ -460,7 +468,11 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
           // enters at the pinned/zero-gradient ghost value, which is the
           // top cell itself). The salt-specific zero-flux machinery never
           // applies.
-          const bool topFlux = (topCode(j, i) == kBcFlux);
+          // Stage-3 T5 (W5.8): an ET column's top face passes water but
+          // no scalar (the cauchy relation) — the vapour leaves its salt
+          // behind, and the update pass's exact factor concentrates it.
+          const bool topFlux = (topCode(j, i) == kBcFlux) ||
+                               (etTopOn && etCol(j, i) != 0);
           if (thermal) {
             skm = coupled ? 0.0 : ((qzm != 0.0) ? s(j, i, k) : 0.0);
           } else if (cauchy(j, i) != 0) {
@@ -649,10 +661,17 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         }
         const real_t volume = az * dz3d(j, i, k);
         const real_t kap = kappaFactor * (1.0 - wcsUpd(j, i, k));
-        const real_t vgflux =
+        real_t vgflux =
             (wcn(j, i, k) + kap) * volume +
             dtFlux * (qx(j, i, k) - qx(j, i - 1, k) + qy(j, i, k) - qy(j - 1, i, k) +
                        qzF(j, i, k + 1) - qzF(j, i, k));
+        real_t cellSink = 0.0;
+        if (vegOn) {
+          // W6.5: the uptake left through no face — subtract its window
+          // volume from the flux volume (water out, salt stays).
+          cellSink = sinkWin(j, i, k);
+          vgflux -= cellSink;
+        }
         real_t value = (vgflux > 0.0) ? sm(j, i, k) / vgflux : 0.0;
         const real_t raw = value;
 
@@ -668,7 +687,45 @@ void ScalarSolver::stepSubsurface(real_t t, real_t dt, real_t dtgLast) {
         if (coupledEvapTop && legacyAllowance) {
           hi += 0.01;  // evaporative-concentration allowance (scalar.c:452-458)
         }
-        if ((cauchy(j, i) != 0 || (coupledEvapTop && !legacyAllowance)) &&
+        if (vegOn && cellSink > 0.0 && vgflux > 0.0 &&
+            !(etTopOn && etCol(j, i) != 0 && k == kTop(j, i))) {
+          // W6.5: the exact concentration factor of the root uptake on a
+          // non-top cell (the top cell's combined factor is below). The
+          // window anchors on the cell's own previous value.
+          const real_t sOld = s(j, i, k);
+          if (sOld < lo) {
+            lo = sOld;
+          }
+          if (sOld > hi) {
+            hi = sOld;
+          }
+          hi *= (vgflux + cellSink) / vgflux;
+        }
+        if (etTopOn && etCol(j, i) != 0 && k == kTop(j, i) && vgflux > 0.0) {
+          // Stage-3 T5 (W5.8): the ET channel's exact factor from the
+          // window vapour volume — the vapour passed the top face with NO
+          // scalar, so removing exactly IT from the flux volume gives
+          //   evaporation (vap > 0):  f = (Vgflux + vap) / Vgflux on hi;
+          //   condensation (vap < 0): f = Vgflux / (Vgflux - vap) on lo.
+          // The window anchors on the cell's own previous value like the
+          // cauchy path (a concentrating top cell must not be clipped to
+          // a fresher neighbor). This replaces the post-step-depth
+          // coupledEvapTop flag on ET columns (D5); non-ET columns keep
+          // the legacy branch below.
+          const real_t sOld = s(j, i, k);
+          if (sOld < lo) {
+            lo = sOld;
+          }
+          if (sOld > hi) {
+            hi = sOld;
+          }
+          const real_t vap = vapWin(j, i) + cellSink;  // W6.5: combined
+          if (vap > 0.0) {
+            hi *= (vgflux + vap) / vgflux;
+          } else if (vap < 0.0 && vgflux - vap > 0.0) {
+            lo *= vgflux / (vgflux - vap);
+          }
+        } else if ((cauchy(j, i) != 0 || (coupledEvapTop && !legacyAllowance)) &&
             k == kTop(j, i) && vgflux > 0.0) {
           // scalar_cauchy top cell (v2 §3.2): the limiter window admits the
           // exact concentration/dilution the top-face water flux implies.

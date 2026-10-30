@@ -45,6 +45,25 @@ sake.
 - a layout/attribute assertion in the HDF5 tests or the owning module's
   test if the variable carries new semantics.
 
+## The interval-rate pattern (Stage-3 T4)
+
+A quantity that is physically a FLUX (volume moved per step) must not ship
+as a snapshot of the last step's rate — in a subcycled run most steps carry
+nothing and the samples are misleading (the `seepage` lesson, report_V3).
+Register it with the `io::IntervalRates` registry instead
+(`Simulation.cpp`, next to the `seepage_rate` registration):
+
+1. `rates_->add(group, name, meta)` at construction, only when requested;
+2. per step, add the per-cell deposit [m] into the accumulator with
+   `rates_->addInto(name, field)` — the SAME numbers the audit reduces, so
+   the dg1-class identity `sum(rate · area · Δt_out) == Δ(audit column)`
+   holds by construction (author that gate for the new variable);
+3. nothing else: `writeOutputs` writes `acc/(t − t_prev)` [m/s] and resets,
+   and the checkpoint carries `acc_<name>` + `acc_t_prev` automatically.
+
+The Field3 (1/s) leg of the registry arrives with its first consumer
+(T6 `root_uptake`, plan W6.6).
+
 ## Things that are easy to get wrong
 
 - **Restart is not output.** If the new quantity is *prognostic* (the next

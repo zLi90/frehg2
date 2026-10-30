@@ -1,0 +1,69 @@
+# stage3-et.yaml — tolerances for the Stage-3 evapotranspiration (T5)
+# gates. Every bound carries the gate and its authoring rationale
+# (Stage-3 plan §9); changes only by amendment (S3-A*).
+et1:
+  # Lane a (S3-A8): NEW path vs the v2.0 bulk path. The chains are the
+  # same expression tree (alpha_barton copies the w_g lines verbatim, the
+  # unbinding cap leaves qVap = E_s, the uncoupled legacy branches carry
+  # no guard) and the first 15 substeps are BITWISE; the build's default
+  # -ffp-contract=fast then lets the compiler contract the shared
+  # expression differently in the two kernels (the legacy kernel is
+  # pinned by default_bitwise and cannot be re-canonicalized), giving a
+  # +-1 ulp rate difference first measured at substep 16 (theta
+  # 5.6e-17). Through the vG front it peaks transiently (theta 1.3e-9,
+  # head 3.9e-9 at 14400 s) and decays (1.8e-11 at day end). Bounds at
+  # >= 25x the measured peaks, 5 orders below any physical defect.
+  a_theta_abs: 1.0e-7
+  a_head_abs: 1.0e-7
+  # Lane b (S3-A8, coupled D1 lane): the old path's predictor never sees
+  # the sink while saturated, the new path's does — the first-output
+  # top-cell head difference must exceed this floor (the one-substep
+  # Ss head response to E = 1e-6 is E*dtg/(Ss*dz) = 1e-6*60/(1e-5*0.02)
+  # = 300 m-class demand against the water-table relaxation; measured at
+  # first green and recorded here).
+  d1_head_floor: 1.0e-2
+  # Both paths remove water; their cumulative removals converge (the new
+  # path books soil_evaporation; the old path's correction is read from
+  # the gw audit) — bound adjudicated at first green.
+  removal_rel: 1.0e-6
+et2:
+  # Coupled-dry vs uncoupled trajectory (plan: solver class).
+  traj_rel: 1.0e-10
+et3:
+  pond_rel: 1.0e-12       # (1) E_w t and the depth identity, pond phase
+  dryout_rel: 1.0e-12     # (1) the dry-out budget h0 = open + |clamped| + exch
+  combined_rel: 1.0e-10   # (3) open + soil = E_w t while alpha_1 = 1
+  continuity_rel: 1.0e-3  # (4) soil rate / E_w in the first full dry frame
+  v20_violation_min: 1.0e-3  # the real negative must violate (3) by more
+et4:
+  balance_rel: 1.0e-12    # DeltaS = -integral(applied)
+et7:
+  cap_abs: 1.0e-14        # unrealised = demand - applied bookkeeping
+et8:
+  conserve_rel: 1.0e-12   # total-salt identities (a totals, b)
+  # a per-cell: K = 1e-12 (K = 0 is outside the vG solver's domain)
+  # redistributes 6.7e-7 relative over the 2 h horizon; 15x headroom.
+  cell_rel: 1.0e-5
+  pond_rel: 1.0e-12       # s h = s0 h0 while wet (b)
+  adjust_rel: 1.0e-12     # subs_adjust / subs_anchor vs total mass (a)
+  # d: the D9 observables — the FULL audit identity closes (measured
+  # 4.2e-15) and surf_adjust == 0 exactly (v2.0's deletion channel never
+  # fires); subs_boundary (bottom influx 0.047) and subs_anchor (the
+  # theta-basis re-anchor, 0.040) are booked data, not losses.
+  held_rel: 1.0e-6   # subs_adjust bound (measured 3.4e-14 / M)
+et9:
+  ledger_water_rel: 1.0e-10   # vs cumulative |stage exchange|
+  # Salt audit identity under the DEFAULT solver over 5400 dt=2 steps
+  # (the smoke runs production settings): measured residual 2.7e-9 —
+  # the per-step reduced-sum rounding accumulation class (the strict et8
+  # lanes hold the same identity at 4e-15). 37x headroom.
+  ledger_salt_rel: 1.0e-7
+  substep_ratio_max: 1.2      # ET lane dtg count vs noET
+  zone_floor_m3: 1.0e-6       # anti-vacuity: both channels active
+et10:
+  exact_rel: 1.0e-10          # T_act vs pm_q_form (measured 1.7e-16)
+  # delta_conv = |PM_q(model constants) - FAO chain ET0| on the 14-15 h
+  # lane, measured 0.016166 mm/h (2.58 %) by et0 part 4; 1.2x headroom
+  # (S3-A10). fao_rounding: the published 0.63 is printed to 0.01 mm/h.
+  delta_conv_mm_h: 0.0194
+  fao_rounding_mm_h: 0.005

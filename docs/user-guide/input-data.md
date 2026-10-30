@@ -74,3 +74,12 @@ where the key says otherwise:
 
 Wind direction series are interpolated on the circle, so sample them
 finely enough that successive values differ well below 180°.
+
+## Vegetation map (Stage-3 T6)
+
+`vegetation.map.file` is an integer raster in the j·nx + i order:
+**0 = bare** (no canopy, no roots — the cell behaves exactly as without
+the block), k ≥ 1 selects `vegetation.types[k−1]`. An all-zero map is
+legal (a warning notes the block is inert). `vegetation.lai.file`
+optionally overrides each cell's LAI (same layout, reals).
+

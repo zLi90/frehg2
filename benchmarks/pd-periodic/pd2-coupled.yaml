@@ -1,0 +1,101 @@
+# pd2-coupled — seam-invariance (roll) gate, coupled lane (Stage-3 plan
+# §7, phase T3; redesigned under S3-A6). A 12 x 8 x 6 coupled basin
+# (dx = dy = 2 m, 24 m torus): the bed slopes down toward a north tide
+# stage (closure external, the T2 machinery; 0.2 m / 3600 s) over an
+# exactly-periodic x bump, salinity with CONSISTENT surface and
+# subsurface updates, reallocation disabled (T1). The basin stays WET
+# (bed <= -0.95 m under the ±0.2 m tide) and the soil column SATURATED
+# (water table at 0.0, Ss = 1e-3 so the tidal loading drives a measurable
+# seepage exchange): the first authoring (a marginally-drying row over an
+# n = 1.23 soil) was CHAOTIC (a 1e-12 single-cell bed perturbation
+# reproduced the roll deltas exactly), and the second (a vadose gap under
+# a permanently wet surface) carried a SINGULAR wetting-front event whose
+# dh/dtheta sensitivity retained O(1e-2) tracer memory of the seed in
+# both the roll pair and the 1e-12 twin — no trajectory identity can
+# gate either regime (the vadose seam is pd2-gw's lane; the saturated
+# column is this lane's domain). The roll identity here exercises the
+# coupler's seepage exchange, the saturated gw matrix wrap, both
+# transport lanes and the external-closure entrance across the seam. The
+# bed raster is the only x-dependent input — the harness rolls it for
+# the k = 3, 6 lanes, and asserts the lane is not hollow (the tidal
+# exchange moved surface salt into the top soil cells).
+simulation:
+  id: pd2-coupled
+  title: Stage-3 pd2 coupled roll invariance across the seam
+
+domain:
+  nx: 12
+  ny: 8
+  nz: 6
+  dx: 2.0
+  dy: 2.0
+  dz: 0.25
+  bottom_elevation: {file: input/pd2c_dem.dat}
+  follow_terrain: true
+  terrain_layers: uniform
+  periodic: {x: true}
+
+time:
+  dt: 2.0
+  t_end: 7200.0
+  output_interval: 1800.0
+
+modules:
+  surface_water: true
+  groundwater: true
+  transport: true
+
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-03
+
+groundwater:
+  timestep: {dt_init: 1.0, dt_min: 0.5, dt_max: 10.0}
+  specific_storage: 1.0e-3
+  reallocation: disabled        # the vadose-conservative mode (T1)
+
+soil:
+  types:
+    - {name: loamy-sand, ksx: 1.0e-5, ksy: 1.0e-5, ksz: 1.0e-5,
+       theta_s: 0.41, theta_r: 0.05, vg_alpha: 2.0, vg_n: 1.8}
+  map: {constant: loamy-sand}
+
+coupling: {mode: sync}
+
+initial_conditions:
+  surface: {eta: {constant: 0.0}}
+  groundwater: {water_table: {constant: 0.0}}
+  transport:
+    surface: {constant: 30.0}
+    groundwater: {constant: 5.0}
+
+boundary_conditions:
+  - name: tide-north
+    region: {polygon: [[-1.0, 13.9], [25.0, 13.9], [25.0, 17.0], [-1.0, 17.0]]}
+    target: surface
+    kind: eta
+    value: {series: {file: input/tide.dat}}
+    inflow:
+      closure: external
+  - name: wall-south
+    region: {polygon: [[-1.0, -1.0], [25.0, -1.0], [25.0, 1.9], [-1.0, 1.9]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 1.0e-9}
+  surface_update: consistent
+  subsurface_update: consistent
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]
+    groundwater: [hydraulic_head, water_content]
+    transport: [concentration, concentration_surface]

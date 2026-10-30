@@ -1,0 +1,50 @@
+# stage3-rl.yaml — tolerances for the Stage-3 reallocation (T1) gates.
+# Every bound carries the gate and its authoring rationale (Stage-3 plan
+# §2.3); changes only by amendment (S3-A*).
+rl2:
+  # Cumulative ledger identity, scaled by T = sum |boundary_in increments|
+  # (plan §5 gate table: exact identity, rounding class), with the
+  # check_ledger 1e-12 m^3 absolute rounding floor.
+  ledger_rel: 1.0e-12
+  # theta against the soil table's global [theta_r_min, theta_s_max].
+  theta_slack: 1.0e-12
+  # Per-cell diagnostics vs audit columns: exact by construction (W1.3).
+  percell_rel: 1.0e-12
+  # S3-A4: this box SATURATES (that is what makes its legacy lane exercise
+  # reallocation), which is outside the disabled mode's vadose domain, so
+  # the disabled lane's vloss and substeps are RECORDED here (the owner's
+  # C-RL data) and BOUNDED on rl3, where the mode is applicable.
+  # Anti-vacuity floor on the legacy lane's gross churn (plan §2.3):
+  # churn >= churn_floor_rel * T(legacy). Authoring measurement: churn
+  # 1.448 m^3 over T 0.497 m^3 (churn/T = 2.9); 0.1 keeps 29x headroom and
+  # still fails a case too quiet to exercise reallocation.
+  churn_floor_rel: 0.1
+rl3:
+  # Trailing-window theta span over the last 10 % of the run (steadiness is
+  # asserted in-gate, plan §6 design rule).
+  steady_abs: 1.0e-10
+  # max_k |qz_k - q_top| / |q_top| at the final output.
+  uniform_rel: 1.0e-8
+  # The two rl2 exactness checks reused on the disabled lane. The ledger
+  # bound is max(ledger_rel * T, ledger_abs): rl3's T is only ~0.2 m^3 and
+  # its first execution measured a 4e-13 m^3 rounding residual over 864
+  # audit rows (not a leak — it scales with rows, not throughput).
+  ledger_rel: 1.0e-12
+  ledger_abs: 1.0e-12
+  # Vadose-domain cost bounds (S3-A4, moved from rl2): the disabled-mode
+  # clamp volume and adaptive-step cost where the mode is meant to run.
+  # Adjudicated at authoring to >= 10x headroom over the measured values.
+  vloss_rel: 1.0e-4
+  substep_ratio: 1.5
+rl4:
+  # First execution (2026-10-27) measured d subs_anchor: legacy -38.7,
+  # disabled +1.32 over M_subs = 5.80e4 — a 29x reduction, but NOT down to
+  # the clamp-only level the plan's W1.7 note predicted: the coupled
+  # exchange basis contributes too. Bounds set from that measurement with
+  # headroom: disabled <= anchor_rel * M (measured 2.27e-5 relative; 4x
+  # headroom), disabled <= legacy / anchor_improvement (measured 29x; gate
+  # at 5x), and the anti-vacuity floor on the legacy anchor (measured
+  # 6.7e-4 relative; 10x headroom below).
+  anchor_rel: 1.0e-4
+  anchor_improvement: 5.0
+  anchor_legacy_floor_rel: 6.0e-5

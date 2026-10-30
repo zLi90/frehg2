@@ -41,6 +41,13 @@ Coupler::Coupler(const Grid& grid, const FrehgConfig& config, swe::SurfaceSolver
   coupling.seepAccum = seepAccum_;
   coupling.avail = avail_;
   coupling.gain = gain_;
+  // Stage-3 T5 (W5.4): the soil channel's dry-fraction split reads the
+  // surface channel's wet clock; empty views when ET is off (the kernel
+  // guards on the solver's etActive flag).
+  if (surface_.etActive()) {
+    coupling.wetClockStepStart = surface_.wetClockStepStart();
+    coupling.wetFrac = surface_.wetFrac();
+  }
   gw_.attachCoupling(coupling);
 }
 
@@ -60,6 +67,9 @@ void Coupler::step(real_t t, real_t dt) {
   surface_.refreshDepth();
 
   beginWindow();
+  // Stage-3 T5 (W5.4): the substep windows measure against this step's
+  // start (the wet clock grows linearly by wetFrac over [t - dt, t]).
+  gw_.setCouplingStepStart(t - dt);
   audit_ = CouplingAudit{};
   const auto takeGwStep = [&](real_t tt, real_t dtg) {
     gw_.step(tt, dtg);
@@ -75,6 +85,10 @@ void Coupler::step(real_t t, real_t dt) {
     audit_.gw.cplVent += a.cplVent;
     audit_.gw.cplEvap += a.cplEvap;
     audit_.gw.evap += a.evap;
+    audit_.gw.etDemand += a.etDemand;
+    audit_.gw.etApplied += a.etApplied;
+    audit_.gw.trDemand += a.trDemand;
+    audit_.gw.trApplied += a.trApplied;
     ++audit_.substeps;
   };
 
@@ -94,6 +108,10 @@ void Coupler::step(real_t t, real_t dt) {
   }
 
   applySeepage(dt);
+  // Stage-3 T2 (W2.4): deposits on prescribed-stage cells are booked, and
+  // under closure external removed through the reservoir, before the
+  // velocity update reads eta (SurfaceSolver::routeStageDeposits).
+  surface_.routeStageDeposits(gain_);
   surface_.updateVelocity();
   reduceAudit();
 }

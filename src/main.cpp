@@ -35,6 +35,11 @@ int printUsage() {
 
 int runValidate(const std::string& path) {
   const frehg::ValidationResult result = frehg::validateConfigFile(path);
+  for (const std::string& warning : result.warnings) {
+    // Non-fatal advisories (Stage-3 W0.9): shown here, logged at run start,
+    // and written to the run record; the configuration stays VALID.
+    std::cout << "WARNING: " << warning << "\n";
+  }
   if (result.ok()) {
     std::cout << "VALID: " << path << "\n";
     const frehg::FrehgConfig config = frehg::loadConfig(path);

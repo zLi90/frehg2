@@ -1,0 +1,76 @@
+# ob1 — entrance-head channel gate (Stage-3 plan §6, phase T2).
+# A 24 x 1 frictless-ish flat channel between two prescribed-stage cells:
+# west cell eta 1.005, east cell eta 1.000 over a flat bed at 0. The gate
+# harness (run_regression.py ob1) runs three lanes by rewriting the west
+# BC's inflow block:
+#   A external (still reservoir)      — the entrance pays ~v^2/2g;
+#   B external, velocity u = 0.1 m/s  — the entrance pays ~(v^2-u_ext^2)/2g;
+#   C zero_gradient                   — no entrance cost, friction only
+#                                       (the v2.0 behaviour; the REAL
+#                                       negative lane: u_C >= 2 u_A).
+# The reference is the DISCRETE steady face chain recomputed in
+# gate_openbc.py from the code's own update formulas (Momentum.cpp +
+# WetDry.cpp face geometry + the W2.3 conservative entrance), shot on Q to
+# hit the east stage; tolerances in tolerances/stage3-ob.yaml. Manning
+# n = 0.01 damps the start-up transient without altering the gated steady
+# state materially (friction carries ~0.2 mm of the 5 mm drop; the chain
+# includes it exactly). Steadiness is asserted in-gate from the trailing
+# output frames. CFL stays below the 0.5 advection-damping ramp in every
+# lane (lane C peaks at ~1.5 m/s -> CFL 0.375).
+#
+# THE inflow BLOCK IS THE T2 TARGET SCHEMA (plan §13.A, authored
+# gate-first per §2.3): frehg --validate rejects this file until W2.1
+# lands — the recorded red state.
+simulation:
+  id: ob1-channel
+  title: Stage-3 ob1 entrance-head channel between two stage reservoirs
+
+domain:
+  nx: 24
+  ny: 1
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 0.25
+  t_end: 2400.0
+  output_interval: 60.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.01}
+    thin_layer_depth: 0.1
+  viscosity: {x: 0.0, y: 0.0}
+  min_depth: 1.0e-06
+  wetting_face_depth: 1.0e-06
+
+initial_conditions:
+  surface:
+    eta: {constant: 1.0}
+
+boundary_conditions:
+  - name: west-stage
+    region: {polygon: [[-0.1, -0.1], [1.0, -0.1], [1.0, 1.1], [-0.1, 1.1]]}
+    target: surface
+    kind: eta
+    value: {constant: 1.005}
+    inflow:
+      closure: external           # lanes rewrite this block (A/B/C)
+  - name: east-stage
+    region: {polygon: [[23.0, -0.1], [24.1, -0.1], [24.1, 1.1], [23.0, 1.1]]}
+    target: surface
+    kind: eta
+    value: {constant: 1.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, uu, vv]

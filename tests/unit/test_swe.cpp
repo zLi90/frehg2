@@ -338,6 +338,119 @@ TEST(SweModule, EtaConditionHoldsTheStageAndFillsTheChannel) {
   EXPECT_LT(far, 0.47);
 }
 
+TEST(SweModule, ExternalStageInflowPaysTheBernoulliEntranceHead) {
+  // Stage-3 T2 gate ob2 (the 2026-10-26 prototype test, now on the
+  // selectable closure): a channel between two stage reservoirs (west
+  // 1.00 m external, east 0.98 m) over a flat bed. Water drawn from a
+  // still external reservoir enters at rest, so the steady entrance costs
+  // v^2/2g of head between the stage cell and the first interior cell; at
+  // the east end the flow leaves with its momentum (no recovery). The
+  // prototype measured 1.01 x v^2/2g with the at-rest stencils and
+  // 0.018 x (flow 2.3x larger) without them — the companion
+  // ZeroGradientStageKeepsTheLegacyStencils pins the latter regime.
+  MiniSim sim;
+  sim.cfg = baseConfig(12, 1, 1.0, 0.05);
+  sim.cfg.surfaceWater.gravity = 9.81;
+  sim.cfg.surfaceWater.friction.coefficient.constant = 0.03;
+  sim.cfg.initialConditions.surface.eta.constant = 0.99;
+  sim.cfg.initialConditions.surface.hasUu = true;
+  sim.cfg.initialConditions.surface.uu.constant = 0.55;
+  const auto stage = [](const std::string& name, real_t x0, real_t x1, real_t value,
+                        frehg::BcInflowClosure closure) {
+    frehg::BoundaryConditionConfig bc;
+    bc.name = name;
+    bc.polygon = {{x0, -0.1}, {x1, -0.1}, {x1, 1.1}, {x0, 1.1}};
+    bc.target = frehg::BcTarget::Surface;
+    bc.kind = frehg::BcKind::Eta;
+    bc.value.form = frehg::BcValueConfig::Form::Constant;
+    bc.value.constant = value;
+    bc.inflowClosure = closure;
+    return bc;
+  };
+  for (const bool external : {true, false}) {
+    MiniSim lane;
+    lane.cfg = sim.cfg;
+    const auto closure = external ? frehg::BcInflowClosure::External
+                                  : frehg::BcInflowClosure::ZeroGradient;
+    lane.cfg.boundaryConditions.push_back(stage("west", -0.1, 1.0, 1.00, closure));
+    lane.cfg.boundaryConditions.push_back(stage("east", 11.0, 12.1, 0.98, closure));
+    lane.build();
+    for (int n = 1; n <= 12000; ++n) {
+      lane.step(0.05 * static_cast<real_t>(n));
+    }
+    const real_t g = 9.81;
+    const real_t vIn = interiorValue(lane.swe->uu(), 1, 1);   // first interior face
+    const real_t vOut = interiorValue(lane.swe->uu(), 1, 11); // last interior face
+    const real_t head = vIn * vIn / (2.0 * g);
+    const real_t entrance = 1.00 - interiorValue(lane.swe->eta(), 1, 2);
+    if (external) {
+      ASSERT_GT(vIn, 0.3);
+      // Steady: uniform discharge (face depths: the west stage at the
+      // inflow face, the last interior cell at the outflow face).
+      EXPECT_NEAR(vOut * interiorValue(lane.swe->eta(), 1, 11), vIn * 1.00,
+                  0.005 * vIn);
+      EXPECT_GT(entrance, 0.90 * head) << "v = " << vIn;
+      EXPECT_LT(entrance, 1.15 * head) << "v = " << vIn;
+      const real_t exit = interiorValue(lane.swe->eta(), 1, 11) - 0.98;
+      EXPECT_GE(exit, 0.0);
+      EXPECT_LT(exit, 0.15 * head) << "v = " << vIn;
+    } else {
+      // The v2.0 regime: the inflow imports its own momentum, pays almost
+      // no entrance head, and runs far faster (the prototype's 2.3x).
+      ASSERT_GT(vIn, 0.9);
+      EXPECT_LT(entrance, 0.2 * head) << "v = " << vIn;
+    }
+    RecordProperty(external ? "v_in_external" : "v_in_zero_gradient",
+                   std::to_string(vIn));
+  }
+}
+
+TEST(SweModule, ExternalReservoirVelocityEntersTheEntranceForm) {
+  // Stage-3 T2 gate ob2(b): with the reservoir moving at u_ext, the steady
+  // entrance costs (v^2 - u_ext^2)/2g — the same channel as above with
+  // u_ext = 0.2 m/s must carry MORE flow than the still reservoir and pay
+  // the reduced head within the same bands.
+  MiniSim still, moving;
+  for (MiniSim* sim : {&still, &moving}) {
+    sim->cfg = baseConfig(12, 1, 1.0, 0.05);
+    sim->cfg.surfaceWater.gravity = 9.81;
+    sim->cfg.surfaceWater.friction.coefficient.constant = 0.03;
+    sim->cfg.initialConditions.surface.eta.constant = 0.99;
+    sim->cfg.initialConditions.surface.hasUu = true;
+    sim->cfg.initialConditions.surface.uu.constant = 0.55;
+    frehg::BoundaryConditionConfig west;
+    west.name = "west";
+    west.polygon = {{-0.1, -0.1}, {1.0, -0.1}, {1.0, 1.1}, {-0.1, 1.1}};
+    west.target = frehg::BcTarget::Surface;
+    west.kind = frehg::BcKind::Eta;
+    west.value.form = frehg::BcValueConfig::Form::Constant;
+    west.value.constant = 1.00;
+    west.inflowClosure = frehg::BcInflowClosure::External;
+    if (sim == &moving) {
+      west.inflowU.form = frehg::BcValueConfig::Form::Constant;
+      west.inflowU.constant = 0.2;
+    }
+    frehg::BoundaryConditionConfig east = west;
+    east.name = "east";
+    east.polygon = {{11.0, -0.1}, {12.1, -0.1}, {12.1, 1.1}, {11.0, 1.1}};
+    east.value.constant = 0.98;
+    east.inflowU = frehg::BcValueConfig();
+    sim->cfg.boundaryConditions = {west, east};
+    sim->build();
+    for (int n = 1; n <= 12000; ++n) {
+      sim->step(0.05 * static_cast<real_t>(n));
+    }
+  }
+  const real_t g = 9.81;
+  const real_t vStill = interiorValue(still.swe->uu(), 1, 1);
+  const real_t vMoving = interiorValue(moving.swe->uu(), 1, 1);
+  EXPECT_GT(vMoving, vStill);
+  const real_t entrance = 1.00 - interiorValue(moving.swe->eta(), 1, 2);
+  const real_t head = (vMoving * vMoving - 0.2 * 0.2) / (2.0 * g);
+  EXPECT_GT(entrance, 0.90 * head) << "v = " << vMoving;
+  EXPECT_LT(entrance, 1.15 * head) << "v = " << vMoving;
+}
+
 TEST(SweModule, DischargeConditionInjectsExactVolume) {
   MiniSim sim;
   sim.cfg = baseConfig(3, 3, 1.0, 1.0);

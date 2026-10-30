@@ -298,6 +298,10 @@ RunRecord::RunRecord(MPI_Comm comm, const FrehgConfig& config, const std::string
   emitter.SetDoublePrecision(17);
   emitter << top;
   staticText_ = emitter.c_str();
+
+  // Seed the warnings list with the configuration's validation advisories
+  // (Stage-3 W0.9); runtime findings append through addWarning().
+  warnings_ = config.validationWarnings;
 }
 
 RunRecord::~RunRecord() = default;
@@ -305,6 +309,8 @@ RunRecord::~RunRecord() = default;
 void RunRecord::setSolver(const std::string& yamlText) { solverText_ = yamlText; }
 
 void RunRecord::setClosure(const std::string& yamlText) { closureText_ = yamlText; }
+
+void RunRecord::addWarning(const std::string& message) { warnings_.push_back(message); }
 
 void RunRecord::flush(bool finished) {
   Timer::Scoped timer("io/run_record");
@@ -331,6 +337,13 @@ void RunRecord::flush(bool finished) {
   }
   top["timers"] = timers;
 
+  if (!warnings_.empty()) {
+    YAML::Node list(YAML::NodeType::Sequence);
+    for (const std::string& warning : warnings_) {
+      list.push_back(warning);
+    }
+    top["warnings"] = list;
+  }
   top["solver"] = solverText_.empty() ? YAML::Node(YAML::NodeType::Map)
                                       : YAML::Load(solverText_);
   top["closure"] = closureText_.empty() ? YAML::Node(YAML::NodeType::Map)

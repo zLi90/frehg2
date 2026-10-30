@@ -219,6 +219,41 @@ int main(int argc, char** argv) {
     runCase(grid, false);
     runCase(grid, true);
 
+    // Stage-3 T3 (plan §7 / mpi tier): the periodic wrap fills halos from
+    // the far edge — the west halo column carries global column nx-1 and
+    // vice versa, at every rank count (n = 1 is the self-message path,
+    // n = 2 the same-rank-both-sides path the paired tags disambiguate).
+    {
+      frehg::DomainConfig pdom = dom;
+      pdom.periodicX = true;
+      const frehg::Grid pgrid(session.comm(), pdom);
+      frehg::HaloExchanger halo(pgrid, false);
+      const std::size_t nyl = static_cast<std::size_t>(pgrid.nyLocal());
+      const std::size_t nxl = static_cast<std::size_t>(pgrid.nxLocal());
+      frehg::Field2<real_t> eta("pd_eta", nyl + 2, nxl + 2);
+      auto host = Kokkos::create_mirror_view(eta);
+      for (std::size_t j = 1; j <= nyl; ++j) {
+        for (std::size_t i = 1; i <= nxl; ++i) {
+          const int gi = pgrid.i0() + static_cast<int>(i) - 1;
+          const int gj = pgrid.j0() + static_cast<int>(j) - 1;
+          host(j, i) = 100.0 * gj + gi;
+        }
+      }
+      Kokkos::deep_copy(eta, host);
+      halo.add("pd_eta", eta);
+      halo.exchange({"pd_eta"});
+      Kokkos::deep_copy(host, eta);
+      for (std::size_t j = 1; j <= nyl; ++j) {
+        const int gj = pgrid.j0() + static_cast<int>(j) - 1;
+        const int westWrap = (pgrid.i0() - 1 + pdom.nx) % pdom.nx;
+        const int eastWrap = (pgrid.i0() + pgrid.nxLocal()) % pdom.nx;
+        check(host(j, 0) == 100.0 * gj + westWrap,
+              "periodic west halo carries the far-edge column");
+        check(host(j, nxl + 1) == 100.0 * gj + eastWrap,
+              "periodic east halo carries the far-edge column");
+      }
+    }
+
     // Unknown-name discipline (single-rank check to keep ranks collective).
     if (session.size() == 1) {
       frehg::HaloExchanger halo(grid, false);

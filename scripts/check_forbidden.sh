@@ -52,6 +52,15 @@ if [ -e "$ROOT/.gitmodules" ]; then
   fail "git submodules" "$ROOT/.gitmodules exists"
 fi
 
+# 3b. Stage-3 T3: raw global-index edge tests are banned in kernels — they
+#     silently treat a periodic seam as a boundary. Use the Grid
+#     EdgeTopology predicates (west/east/south/north/outsideX/outsideY).
+#     Grid.hpp defines the predicates; BoundarySet.cpp's footprint test and
+#     Monitor.cpp's ownership test are cell-selection (not edge semantics).
+scan_src_excluding "raw global-edge test (use Grid::EdgeTopology)" \
+  '\b(gi|gj|giMinus|gjMinus|iGlob|jGlob)[[:space:]]*(==|<|>=)[[:space:]]*(0\b|nxGlobal|nyGlobal|grid\.nx\(\)|grid\.ny\(\))' \
+  'core/Grid\.hpp|bc/BoundarySet\.cpp|io/Monitor\.cpp'
+
 # 4. Header hygiene and manual memory management. Deleted special member
 #    functions ("= delete") are C++ API design, not memory management, and
 #    are exempted.

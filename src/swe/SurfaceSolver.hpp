@@ -29,6 +29,7 @@
 #define FREHG_SWE_SURFACESOLVER_HPP
 
 #include "atm/MetForcing.hpp"
+#include "atm/EtFormulas.hpp"
 #include "swe/WindForcing.hpp"
 #include "bc/BoundarySet.hpp"
 #include "core/Config.hpp"
@@ -67,6 +68,15 @@ struct SurfaceStepAudit {
   /// mass defect (~1 % of rain), so the audit measures it instead of
   /// leaving it in the closure residual.
   real_t clampVolume = 0.0;
+  /// Stage-3 T2 (W2.4): coupled deposits (applied seepage, bounce-back,
+  /// vent) that landed on prescribed-stage cells after the solve
+  /// [m^3, + = removed from / external to the surface]. Under closure
+  /// external the deposit is removed before the velocity update (the
+  /// stage cell is an external reservoir); under zero_gradient it is
+  /// booked only and the dynamics stay bitwise v2.0 — either way the
+  /// coupled ledger closes with stage conditions present (the b6
+  /// "pre-existing unclosed audit term" of dod-Q7).
+  real_t stageDeposit = 0.0;
 };
 
 /// The shallow-water module.
@@ -110,6 +120,30 @@ class SurfaceSolver {
   /// (legacy shallowwater_velocity).
   void updateVelocity();
 
+  /// Stage-3 T2: the momentum source kernel, compiled once per closure
+  /// regime (Ext = false folds to the v2.0 expression trees — Momentum.cpp).
+  template <bool Ext>
+  void momentumSourceImpl();
+  /// Stage-3 T2: the velocity interpolation kernel, same Ext dispatch.
+  template <bool Ext>
+  void interpolateVelocityImpl();
+
+  /// Stage-3 T2 (W2.4): book this step's coupled deposits \p deposit [m]
+  /// (the coupler's gain field) on prescribed-stage cells into
+  /// audit().stageDeposit, and remove them from eta on EXTERNAL-closure
+  /// stage cells (the reservoir absorbs them before updateVelocity can
+  /// read the kick). The coupler calls it between the seepage application
+  /// and the velocity update. No eta condition: a no-op.
+  void routeStageDeposits(const Field2<real_t>& deposit);
+
+  /// \name Stage-3 T2 (W2.6): entrance-head diagnostics (rank-local)
+  ///@{
+  real_t stageKeInflux() const { return stageKeInflux_; }          ///< cumulative KE imported through stage faces [J]
+  real_t stageHeadRatioNum() const { return stageHeadRatioNum_; }  ///< entrance-head ratio numerator [m^4/s]
+  real_t stageHeadRatioDen() const { return stageHeadRatioDen_; }  ///< entrance-head ratio denominator [m^4/s]
+  bool hasExternalClosure() const { return hasExternal_; }         ///< any BC uses closure external
+  ///@}
+
   /// \name State access (device views; interiors are authoritative)
   /// The coupler writes eta and depth through these views exactly where
   /// legacy did (subsurface_source, the saturation bounce-back, and the
@@ -147,6 +181,23 @@ class SurfaceSolver {
   real_t minDepth() const { return minDepth_; }      ///< legacy min_dept
   real_t currentRain() const { return rain_; }       ///< rate of the step [m/s]
   real_t currentEvaporation() const { return evap_; }  ///< rate of the step [m/s]
+
+  /// \name Stage-3 T5 (plan §9 W5.3): the ET open-water channel state
+  /// (valid when the ET block enables the surface channel).
+  ///@{
+  bool etActive() const { return etOpenWater_; }            ///< ET surface channel on
+  /// Stage-3 T6 (W6.3): attach the canopy transmission field (the gw
+  /// module's vegCanopyTau; scales the open-water rate per cell).
+  void attachCanopyFactor(const Field2<real_t>& tau) {
+    hasCanopy_ = true;
+    canopyTau_ = tau;
+  }
+  const Field2<real_t>& evapRemoved() const { return evapRemoved_; }  ///< this step's removal [m]
+  const Field2<real_t>& rainAdded() const { return rainAdded_; }      ///< this step's masked rain [m]
+  const Field2<real_t>& wetFrac() const { return wetFrac_; }          ///< wet fraction of the step [-]
+  const Field2<real_t>& wetClock() const { return wetClock_; }        ///< cumulative wet time [s]
+  const Field2<real_t>& wetClockStepStart() const { return wetClockStepStart_; }  ///< clock at step start [s]
+  ///@}
   ///@}
 
   /// \name Restart state (plan §7): prognostic fields beyond eta/uu/vv
@@ -312,6 +363,25 @@ class SurfaceSolver {
 
   // Current-step forcing values.
   real_t rain_ = 0.0, evap_ = 0.0;
+  // Stage-3 T5 (W5.3): the ET open-water channel. etOpenWater_ switches
+  // the evapRain() branch; the fields feed the coupler's dry-fraction
+  // clock, the transport dilution (D8) and the atmosphere outputs.
+  bool etOpenWater_ = false;
+  EvapotranspirationConfig etCfg_;
+  TimeSeries etPrescribedSeries_;    ///< prescribed-potential series
+  /// Stage-3 T7 (W7.3): the PM open-water channel's r_a law (the ET
+  /// consumers' configured law; the bulk channel keeps evaporationRate's
+  /// pinned liu2006 chain).
+  atm::AeroParams etAero_;
+  AtmosphereConfig::AeroResistance etAeroLaw_ =
+      AtmosphereConfig::AeroResistance::Liu2006;
+  bool hasCanopy_ = false;           ///< a canopy factor is attached (T6)
+  Field2<real_t> canopyTau_;         ///< Beer-Lambert transmission [-]
+  Field2<real_t> evapRemoved_;       ///< per-cell removal this step [m]
+  Field2<real_t> rainAdded_;         ///< per-cell masked rain this step [m]
+  Field2<real_t> wetFrac_;           ///< wet fraction of this step [-]
+  Field2<real_t> wetClock_;          ///< cumulative wet time [s] (checkpointed)
+  Field2<real_t> wetClockStepStart_; ///< wetClock before this step's increment
   real_t windSpeed_ = 0.0;   ///< |U10| of the step [m/s]
   real_t windOmega_ = 0.0;   ///< wind direction of the step, radians from +x
   real_t windCd_ = 0.0;      ///< Cd of the step under the configured law
@@ -327,6 +397,28 @@ class SurfaceSolver {
   Field2<real_t> Sxp_, Sxm_, Syp_, Sym_, Sct_, Srhs_;
   Field2<real_t> etaBcValue_;
   Field2<real_t> isEtaBc_;      ///< 1.0 on eta-condition cells (halo-exchanged once)
+  /// \name Stage-3 T2: the external inflow closure (plan §6/§13.A)
+  /// Allocated/registered unconditionally (the halo set is fixed at
+  /// construction); the kernels read them only when hasExternal_, so runs
+  /// without an external closure take the v2.0 code paths bitwise.
+  ///@{
+  bool hasExternal_ = false;    ///< any eta BC declares closure external
+  /// 1.0 on stage cells whose BC is external (static, corner-exchanged).
+  Field2<real_t> isExternalStage_;
+  /// 1.0 on reservoir x+/y+ faces: both cells external-stage, or one
+  /// external-stage and the other outside the global domain (static,
+  /// corner-exchanged; the momentum stencils read them, W2.3).
+  Field2<real_t> resFaceX_, resFaceY_;
+  /// The external reservoir's velocity at the reservoir faces, refreshed
+  /// per step from each BC's inflow series (corner-exchanged).
+  Field2<real_t> uResX_, vResY_;
+  /// Entrance-head diagnostics (W2.6): cumulative stage-face KE influx [J]
+  /// and the paid-head ratio accumulators (rank-local; the run record
+  /// reduces them).
+  real_t stageKeInflux_ = 0.0;
+  real_t stageHeadRatioNum_ = 0.0;
+  real_t stageHeadRatioDen_ = 0.0;
+  ///@}
   Field2<real_t> rainMask_;     ///< 1.0 where rain applies (exclusion region = 0)
   Field2<real_t> evapMask_;     ///< 1.0 where evaporation applies (v2 Q4 mask)
   Field2<real_t> frictionCoef_; ///< Manning n or Chezy C per cell

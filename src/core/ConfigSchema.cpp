@@ -177,15 +177,38 @@ Spec seriesOrConstant(bool required = false) {
 
 /// Allowed output variables per group (plan §7).
 const std::vector<std::string>& surfaceVariables() {
-  static const std::vector<std::string> v = {"eta", "depth", "uu", "vv", "seepage"};
+  static const std::vector<std::string> v = {"eta",     "depth",       "uu", "vv",
+                                             "seepage", "seepage_rate"};
   return v;
 }
 const std::vector<std::string>& groundwaterVariables() {
-  static const std::vector<std::string> v = {"hydraulic_head", "water_content", "qx", "qy", "qz"};
+  static const std::vector<std::string> v = {"hydraulic_head", "water_content",
+                                             "qx", "qy", "qz",
+                                             // Stage-3 T1 per-cell cumulative
+                                             // post-allocation diagnostics
+                                             // (plan W1.3) [m^3]
+                                             "realloc_created", "realloc_dropped",
+                                             "vloss",
+                                             // Stage-3 T6: interval-mean
+                                             // root-uptake sink [1/s].
+                                             "root_uptake"};
   return v;
 }
 const std::vector<std::string>& transportVariables() {
-  static const std::vector<std::string> v = {"concentration", "concentration_surface"};
+  static const std::vector<std::string> v = {"concentration", "concentration_surface",
+                                             // Stage-3 T5 (O4): the per-cell
+                                             // surface salt store [psu m^3].
+                                             "salt_store"};
+  return v;
+}
+// Stage-3 T5/T6 (plan §13.C): the /atmosphere 2-D group — interval-mean
+// ET rates (the T4 IntervalRates mechanism) and the cumulative clocks.
+const std::vector<std::string>& atmosphereVariables() {
+  static const std::vector<std::string> v = {
+      "evaporation_rate", "soil_evaporation_rate",
+      "soil_evaporation_unrealised_rate", "wet_time", "soil_evaporation_time",
+      // Stage-3 T6: the transpiration channel.
+      "transpiration_rate", "transpiration_unrealised_rate"};
   return v;
 }
 const std::vector<std::string>& temperatureVariables() {
@@ -198,6 +221,7 @@ std::vector<std::string> allVariables() {
   v.insert(v.end(), groundwaterVariables().begin(), groundwaterVariables().end());
   v.insert(v.end(), transportVariables().begin(), transportVariables().end());
   v.insert(v.end(), temperatureVariables().begin(), temperatureVariables().end());
+  v.insert(v.end(), atmosphereVariables().begin(), atmosphereVariables().end());
   return v;
 }
 
@@ -211,7 +235,9 @@ Spec buildRootSchema() {
                        {"theta_r", real(true, 0.0, 1.0)},
                        {"vg_alpha", realPositive(true)},
                        {"vg_n", real(true, 1.0, std::numeric_limits<double>::infinity(), true)},
-                       {"aev", real(false, -std::numeric_limits<double>::infinity(), 0.0)}});
+                       {"aev", real(false, -std::numeric_limits<double>::infinity(), 0.0)},
+                       {"theta_fc", real(false, 0.0, 1.0)},
+                       {"albedo", real(false, 0.0, 1.0)}});
 
   Spec bcEntry = map(
       {{"name", text(true)},
@@ -231,7 +257,15 @@ Spec buildRootSchema() {
                         {"series", map({{"file", path(true)}})},
                         {"gravity", boolean(false)},
                         {"hydrostatic", map({{"eta", real(true)}})}},
-                       false)}});
+                       false)},
+       // Stage-3 T2 (plan §13.A): the inflow closure of a prescribed-stage
+       // condition — the momentum state of the water beyond the boundary.
+       // kind eta only; velocity only with closure external (cross-field
+       // checks).
+       {"inflow",
+        map({{"closure", enumeration(true, {"zero_gradient", "external"})},
+             {"velocity", map({{"u", seriesOrConstant(false)},
+                               {"v", seriesOrConstant(false)}})}})}});
 
   Spec monitorEntry = map({{"name", text(true)},
                            {"type", enumeration(false, {"point"})},
@@ -251,6 +285,12 @@ Spec buildRootSchema() {
                       {"bottom_elevation", fileOrConstant(true)},
                       {"follow_terrain", boolean(false)},
                       {"terrain_layers", enumeration(false, {"scaled", "uniform"})},
+                      // Stage-3 T3 (plan §13.B): periodic lateral topology
+                      // per axis — a DOMAIN property (every module wraps);
+                      // nx/ny >= 3 and the edge-BC rules are cross-field
+                      // checks, the BC face-attachment rule is a setup
+                      // fatal (BoundarySet).
+                      {"periodic", map({{"x", boolean(false)}, {"y", boolean(false)}})},
                       {"decomposition", map({{"mpi_nx", intOrAuto()}, {"mpi_ny", intOrAuto()}})}},
                      true)},
       {"time", map({{"dt", realPositive(true)},
@@ -316,7 +356,58 @@ Spec buildRootSchema() {
             {"wind_speed", seriesOrConstant(true)},
             {"shortwave", seriesOrConstant(false)},
             {"longwave_in", seriesOrConstant(false)},
-            {"wind_speed_floor", realNonNegative(false)}})},
+            // Stage-3 T7 (plan §11 W7.1): INCIDENT R_s for the PM
+            // potential (distinct from the Q5 absorbed `shortwave`).
+            {"shortwave_incoming", seriesOrConstant(false)},
+            {"wind_speed_floor", realNonNegative(false)},
+            // Stage-3 T5 (plan §13.C): the ET consumers' r_a law.
+            {"aerodynamic_resistance",
+             map({{"law", enumeration(false, {"liu2006", "fao56", "log_profile"})},
+                  {"reference_height", realPositive(false)},
+                  {"z0m", realPositive(false)},
+                  {"z0h", realPositive(false)},
+                  {"displacement", realNonNegative(false)}})}})},
+      // Stage-3 T5 (plan §9/§13.C): the ET block — replaces BOTH legacy
+      // evaporation keys (cross-field rule). The soil sub-block's
+      // presence enables the soil channel; its region defaults to all.
+      // Stage-3 T7 (plan §11): penman_monteith validates (energy keys).
+      {"evapotranspiration",
+       map({{"potential", enumeration(true, {"bulk", "penman_monteith", "prescribed"})},
+            {"prescribed", seriesOrConstant(false)},
+            {"open_water", boolean(false)},
+            {"soil",
+             map({{"region", map({{"polygon", sequence(point2(), true, 3)}})},
+                  {"limiter",
+                   enumeration(false, {"alpha_barton", "beta_lee_pielke", "none"})}})},
+            // T7 (plan §11 W7.1): the PM energy budget. Per-channel
+            // albedo comes from here (water) / the soil type / the
+            // vegetation type; G = fraction * R_n per channel.
+            {"energy",
+             map({{"albedo_water", real(false, 0.0, 1.0)},
+                  {"ground_heat_fraction",
+                   map({{"water", real(false, 0.0, 1.0)},
+                        {"soil", real(false, 0.0, 1.0)},
+                        {"canopy", real(false, 0.0, 1.0)}})}})}})},
+      // Stage-3 T6 (plan §10/§13.C): static vegetation. Map ids: 0 = bare,
+      // k >= 1 = types[k-1]; feddes h1/h2 optional (wetland species).
+      {"vegetation",
+       map({{"types",
+             sequence(map({{"name", text(true)},
+                           {"lai", realNonNegative(true)},
+                           {"extinction", realPositive(true)},
+                           {"leaf_resistance", realNonNegative(true)},
+                           {"root_depth", realPositive(true)},
+                           {"root_profile", enumeration(false, {"uniform", "linear"})},
+                           {"feddes",
+                            map({{"h1", real(false)},
+                                 {"h2", real(false)},
+                                 {"h3", real(true)},
+                                 {"h4", real(true)}},
+                                true)},
+                           {"albedo", real(false, 0.0, 1.0)}}),
+                      true, 1)},
+            {"map", oneOf({{"constant", text(false)}, {"file", path(false)}}, true)},
+            {"lai", map({{"file", text(true)}})}})},
       {"groundwater",
        map({{"scheme", enumeration(false, {"pca"})},
             {"use_full3d", boolean(false)},
@@ -328,6 +419,15 @@ Spec buildRootSchema() {
                               {"courant_max", realPositive(false)}},
                              true)},
             {"specific_storage", realNonNegative(true)},
+            // Stage-3 T1 (owner decision O9): run the post-allocation
+            // step (legacy, the v2.0 default) or skip it entirely
+            // (disabled: flux-conservative theta, retention-curve heads,
+            // exact-zero realloc audit). The T8 default-flip evaluation may
+            // change the default (plan §2.7). The token is "disabled", not
+            // "off": YAML 1.1 parsers (PyYAML — the gate harness, the
+            // run-record checker, user postprocessing) read off as the
+            // boolean false, which corrupts every round trip (S3-A3).
+            {"reallocation", enumeration(false, {"legacy", "disabled"})},
             {"reallocation_surplus", enumeration(false, {"drop", "redistribute"})},
             {"density_coupling",
              // Coefficients configurable since v2 Q5 (defaults = the
@@ -369,7 +469,9 @@ Spec buildRootSchema() {
             {"bounds", map({{"min", real(false)}, {"max", real(false)}})},
             {"legacy_evap_allowance", boolean(false)},
             {"surface_update", enumeration(false, {"legacy", "consistent"})},
-            {"subsurface_update", enumeration(false, {"legacy", "consistent"})}})},
+            {"subsurface_update", enumeration(false, {"legacy", "consistent"})},
+            // Stage-3 T5 (O4): drying-cell scalar fate; the T8 DF constant.
+            {"surface_dryout", enumeration(false, {"discard", "store"})}})},
       {"temperature",
        // The second registered scalar (v2 Q5, plan §4.1/V2-A17). The
        // thermal parameters' module dependencies are cross-field checks.
@@ -394,8 +496,11 @@ Spec buildRootSchema() {
                    sequence(enumeration(false, groundwaterVariables()), false, 1)},
                   {"transport", sequence(enumeration(false, transportVariables()), false, 1)},
                   {"temperature",
-                   sequence(enumeration(false, temperatureVariables()), false, 1)}})},
+                   sequence(enumeration(false, temperatureVariables()), false, 1)},
+                  {"atmosphere",
+                   sequence(enumeration(false, atmosphereVariables()), false, 1)}})},
             {"monitors", sequence(monitorEntry)},
+            {"monitor_interval", integerSeconds(false, 0.0)},
             {"checkpoint", map({{"interval", integerSeconds(false, 0.0)}})}},
            true)},
       {"restart", map({{"enabled", boolean(false)}, {"file", text(false)}, {"time", real(false)}})},
@@ -427,9 +532,17 @@ Spec buildRootSchema() {
 struct Context {
   std::string configDir;
   std::vector<std::string>* errors = nullptr;
+  std::vector<std::string>* warnings = nullptr;
 
   void addError(const std::string& where, const std::string& what) {
     errors->push_back((where.empty() ? "(document)" : where) + ": " + what);
+  }
+
+  /// Non-fatal advisory (Stage-3 W0.9): a legal-but-inert key or similar.
+  /// Printed by --validate as WARNING, logged at run start, and written to
+  /// the run record's `warnings:` list. Never invalidates.
+  void addWarning(const std::string& where, const std::string& what) {
+    warnings->push_back((where.empty() ? "(document)" : where) + ": " + what);
   }
 };
 
@@ -908,7 +1021,197 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
         // coupled combination — §8.3 forbids shipping it unexercised.
         ctx.addError("groundwater.evaporation",
                      "bulk soil evaporation applies to uncoupled groundwater runs "
-                     "only (the coupler owns the top exchange)");
+                     "only (the coupler owns the top exchange) — coupled soil "
+                     "evaporation is configured through the evapotranspiration "
+                     "block");
+      }
+    }
+  }
+
+  // Stage-3 T5 (plan §13.C): the evapotranspiration block's rules.
+  {
+    const YAML::Node et = root["evapotranspiration"];
+    if (et.IsDefined() && et.IsMap()) {
+      const std::string mode =
+          et["potential"].IsDefined() ? et["potential"].as<std::string>("") : "bulk";
+      const bool atmPresent = root["atmosphere"].IsDefined();
+      const YAML::Node atm = root["atmosphere"];
+      if (sub(root, "surface_water", "evaporation").IsDefined() ||
+          sub(root, "groundwater", "evaporation").IsDefined()) {
+        ctx.addError("evapotranspiration",
+                     "replaces surface_water.evaporation and "
+                     "groundwater.evaporation; give one form");
+      }
+      if ((mode == "bulk" || mode == "penman_monteith") && !atmPresent) {
+        ctx.addError("evapotranspiration.potential",
+                     mode + ": requires the atmosphere block");
+      }
+      // Stage-3 T7 (plan §13.C): PM needs the incident radiation pair;
+      // the albedo of each configured channel must be declared (water in
+      // the energy block's default; soil / canopy on their types).
+      if (mode == "penman_monteith" && atmPresent && atm.IsMap()) {
+        for (const char* key : {"shortwave_incoming", "longwave_in"}) {
+          if (!atm[key].IsDefined()) {
+            ctx.addError("evapotranspiration.potential",
+                         std::string("penman_monteith: requires atmosphere.") + key);
+          }
+        }
+      }
+      if (mode == "penman_monteith") {
+        if (et["soil"].IsDefined()) {
+          const YAML::Node soilTypes = sub(root, "soil", "types");
+          if (soilTypes.IsDefined() && soilTypes.IsSequence()) {
+            for (std::size_t i = 0; i < soilTypes.size(); ++i) {
+              if (!soilTypes[i]["albedo"].IsDefined()) {
+                ctx.addError("soil.types[" + std::to_string(i) + "]",
+                             "penman_monteith with the soil channel needs every "
+                             "soil type's albedo");
+              }
+            }
+          }
+        }
+        const YAML::Node vegTypes = sub(root, "vegetation", "types");
+        if (vegTypes.IsDefined() && vegTypes.IsSequence()) {
+          for (std::size_t i = 0; i < vegTypes.size(); ++i) {
+            if (!vegTypes[i]["albedo"].IsDefined()) {
+              ctx.addError("vegetation.types[" + std::to_string(i) + "]",
+                           "penman_monteith with vegetation needs every "
+                           "vegetation type's albedo");
+            }
+          }
+        }
+      }
+      if (mode == "bulk" && atmPresent && atm.IsMap() &&
+          !atm["surface_temperature"].IsDefined()) {
+        ctx.addError("evapotranspiration.potential",
+                     "bulk: requires atmosphere.surface_temperature");
+      }
+      if (mode == "prescribed" && !et["prescribed"].IsDefined()) {
+        ctx.addError("evapotranspiration.potential",
+                     "prescribed: requires evapotranspiration.prescribed");
+      }
+      const YAML::Node soilBlock = et["soil"];
+      if (soilBlock.IsDefined()) {
+        if (!gw) {
+          ctx.addError("evapotranspiration.soil", "needs modules.groundwater");
+        }
+        const std::string limiter = soilBlock.IsMap() && soilBlock["limiter"].IsDefined()
+                                        ? soilBlock["limiter"].as<std::string>("")
+                                        : "alpha_barton";
+        if (limiter == "alpha_barton" && mode != "bulk") {
+          ctx.addError("evapotranspiration.soil.limiter",
+                       "alpha_barton acts inside the bulk humidity difference; "
+                       "use beta_lee_pielke or none with potential " + mode);
+        }
+      }
+      const bool openWater = !et["open_water"].IsDefined() ||
+                             et["open_water"].as<bool>(true);
+      if (openWater && !sw) {
+        ctx.addError("evapotranspiration.open_water",
+                     "needs modules.surface_water");
+      }
+      if (mode == "penman_monteith" && root["modules"].IsDefined() &&
+          root["modules"]["temperature"].IsDefined() &&
+          root["modules"]["temperature"].as<bool>(false)) {
+        ctx.addError("evapotranspiration",
+                     "penman_monteith with modules.temperature is not available "
+                     "(the heat module's latent flux uses the bulk rate at the "
+                     "simulated temperature; the combination is ungated)");
+      }
+      const YAML::Node aero = sub(root, "atmosphere", "aerodynamic_resistance");
+      const std::string raLaw = aero.IsDefined() && aero.IsMap() && aero["law"].IsDefined()
+                                    ? aero["law"].as<std::string>("")
+                                    : "liu2006";
+      if (mode == "bulk" && raLaw != "liu2006" && root["modules"].IsDefined() &&
+          root["modules"]["temperature"].IsDefined() &&
+          root["modules"]["temperature"].as<bool>(false)) {
+        ctx.addError("atmosphere.aerodynamic_resistance",
+                     "with modules.temperature the evaporated volume and the heat "
+                     "module's latent flux must share the liu2006 resistance");
+      }
+      // ET + salinity: the exact salt bookkeeping needs the consistent
+      // updates of the modules present, and (with a surface) the store.
+      if (tr) {
+        const YAML::Node trans = root["transport"];
+        const auto updateIs = [&trans](const char* key, const char* want) {
+          return trans.IsDefined() && trans.IsMap() && trans[key].IsDefined() &&
+                 trans[key].as<std::string>("") == std::string(want);
+        };
+        if ((sw && !updateIs("surface_update", "consistent")) ||
+            (gw && !updateIs("subsurface_update", "consistent"))) {
+          ctx.addError("evapotranspiration",
+                       "with salinity transport requires transport.surface_update: "
+                       "consistent (with modules.surface_water) and "
+                       "transport.subsurface_update: consistent (with "
+                       "modules.groundwater)");
+        }
+        // Stage-3 T8 (W8.2/W8.3): `store` is the shipped default now, so
+        // only an EXPLICIT `discard` violates the rule (an absent key
+        // resolves to store).
+        if (sw && trans.IsDefined() && trans.IsMap() &&
+            trans["surface_dryout"].IsDefined() &&
+            trans["surface_dryout"].as<std::string>("") == "discard") {
+          ctx.addError("evapotranspiration",
+                       "with salinity transport requires transport.surface_dryout: "
+                       "store (salt left by evaporating water must be kept)");
+        }
+      }
+    }
+  }
+
+  // Stage-3 T3 (plan §13.B): periodic-axis cross-field rules. A periodic
+  // axis needs >= 3 cells (the 5/7-point stencils would otherwise read the
+  // same cell on both sides), and an open surface condition (eta /
+  // discharge / outflow) listed on a periodic axis's edge has no boundary
+  // to act on — the polygon test here is conservative (bounding-box
+  // against the edge strips); the exact member-face rule is the BoundarySet
+  // setup fatal.
+  {
+    const YAML::Node per = sub(root, "domain", "periodic");
+    if (per.IsDefined() && per.IsMap()) {
+      const bool perX = per["x"].IsDefined() && per["x"].as<bool>(false);
+      const bool perY = per["y"].IsDefined() && per["y"].as<bool>(false);
+      const YAML::Node dom = root["domain"];
+      if (perX && dom["nx"].IsDefined() && dom["nx"].as<int>(0) < 3) {
+        ctx.addError("domain.periodic.x",
+                     "needs nx >= 3 (got " + std::to_string(dom["nx"].as<int>(0)) + ")");
+      }
+      if (perY && dom["ny"].IsDefined() && dom["ny"].as<int>(0) < 3) {
+        ctx.addError("domain.periodic.y",
+                     "needs ny >= 3 (got " + std::to_string(dom["ny"].as<int>(0)) + ")");
+      }
+    }
+  }
+
+  // Stage-3 T1 (W1.1): with reallocation: disabled the surplus and gradient
+  // knobs steer a step that never runs. WARNINGS, not errors, for two
+  // load-bearing reasons: the resolved configuration materializes both keys
+  // unconditionally (an error would fail every off run's r1 round-trip),
+  // and existing case files carrying them must stay valid if the T8
+  // default-flip evaluation makes disabled the default (plan §2.7).
+  {
+    const YAML::Node re = sub(root, "groundwater", "reallocation");
+    if (re.IsDefined() && re.IsScalar() && re.as<std::string>() == "disabled") {
+      if (sub(root, "groundwater", "reallocation_surplus").IsDefined()) {
+        ctx.addWarning("groundwater.reallocation_surplus",
+                       "has no effect with reallocation: disabled (nothing "
+                       "is transferred)");
+      }
+      if (sub(root, "groundwater", "density_coupling").IsDefined() &&
+          root["groundwater"]["density_coupling"]["reallocation_gradient"].IsDefined()) {
+        ctx.addWarning("groundwater.density_coupling.reallocation_gradient",
+                       "has no effect with reallocation: disabled");
+      }
+      const YAML::Node vars = sub(root, "output", "variables");
+      if (vars.IsDefined() && vars.IsMap() && vars["groundwater"].IsDefined() &&
+          vars["groundwater"].IsSequence()) {
+        for (std::size_t n = 0; n < vars["groundwater"].size(); ++n) {
+          const std::string var = vars["groundwater"][n].as<std::string>("");
+          if (var == "realloc_created" || var == "realloc_dropped") {
+            ctx.addWarning("output.variables.groundwater",
+                           var + " is identically zero with reallocation: disabled");
+          }
+        }
       }
     }
   }
@@ -1044,6 +1347,80 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
     }
   }
 
+  // Stage-3 T6 (plan §13.C): vegetation cross-field rules — the
+  // transpiration sink lives in the root zone (groundwater) and its
+  // potential comes from the ET block; with salinity the exact sink
+  // factor needs the consistent subsurface update; feddes head ordering
+  // h1 >= h2 >= h3 >= h4 with h1/h2 together or not at all.
+  {
+    const YAML::Node veg = root["vegetation"];
+    if (veg.IsDefined() && veg.IsMap()) {
+      if (!gw) {
+        ctx.addError("vegetation", "needs modules.groundwater (the root zone)");
+      }
+      if (!root["evapotranspiration"].IsDefined()) {
+        ctx.addError("vegetation",
+                     "needs the evapotranspiration block (it supplies the "
+                     "potential T_pot = (1 - tau) E_x(r_c))");
+      }
+      if (tr && gw) {
+        const YAML::Node trans = root["transport"];
+        const bool consistentSub =
+            trans.IsDefined() && trans.IsMap() &&
+            trans["subsurface_update"].IsDefined() &&
+            trans["subsurface_update"].as<std::string>("") == "consistent";
+        if (!consistentSub) {
+          ctx.addError("vegetation",
+                       "with salinity transport requires "
+                       "transport.subsurface_update: consistent (the root "
+                       "sink's exact salt factor rides the window volumes)");
+        }
+      }
+      std::set<std::string> vnames;
+      const YAML::Node types = veg["types"];
+      if (types.IsDefined() && types.IsSequence()) {
+        for (std::size_t n = 0; n < types.size(); ++n) {
+          const std::string where = "vegetation.types[" + std::to_string(n) + "]";
+          const YAML::Node name = sub(types[n], "name");
+          if (name.IsDefined() && name.IsScalar() &&
+              !vnames.insert(name.as<std::string>()).second) {
+            ctx.addError(where + ".name", "duplicate vegetation type name '" +
+                                              name.as<std::string>() + "'");
+          }
+          const YAML::Node fed = sub(types[n], "feddes");
+          if (fed.IsDefined() && fed.IsMap()) {
+            const bool has1 = fed["h1"].IsDefined();
+            const bool has2 = fed["h2"].IsDefined();
+            if (has1 != has2) {
+              ctx.addError(where + ".feddes",
+                           "h1 and h2 come together or not at all");
+            }
+            if (fed["h3"].IsDefined() && fed["h4"].IsDefined()) {
+              const double h3 = fed["h3"].as<double>(0.0);
+              const double h4 = fed["h4"].as<double>(0.0);
+              double h2v = h3, h1v = h3;
+              if (has1 && has2) {
+                h1v = fed["h1"].as<double>(0.0);
+                h2v = fed["h2"].as<double>(0.0);
+              }
+              if (!(h1v >= h2v && h2v >= h3 && h3 > h4)) {
+                ctx.addError(where + ".feddes",
+                             "needs h1 >= h2 >= h3 > h4 (heads in m)");
+              }
+            }
+          }
+        }
+      }
+      const YAML::Node mapConst = sub(veg, "map", "constant");
+      if (mapConst.IsDefined() && mapConst.IsScalar() &&
+          vnames.find(mapConst.as<std::string>()) == vnames.end()) {
+        ctx.addError("vegetation.map.constant",
+                     "vegetation type '" + mapConst.as<std::string>() +
+                         "' is not defined in vegetation.types");
+      }
+    }
+  }
+
   // Boundary conditions: uniqueness, kind/target/value compatibility, deps.
   {
     const YAML::Node bcs = root["boundary_conditions"];
@@ -1147,6 +1524,24 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
                                 "only (the coupler owns the top scalar exchange)");
           }
         }
+        // Stage-3 T2 (plan §13.A): inflow-closure cross-field rules.
+        {
+          const YAML::Node inflow = bc["inflow"];
+          if (inflow.IsDefined()) {
+            if (kind != "eta") {
+              ctx.addError(where + ".inflow",
+                           "applies to kind eta only (it sets the momentum of "
+                           "the external reservoir behind a prescribed stage)");
+            }
+            if (inflow.IsMap() && inflow["velocity"].IsDefined() &&
+                inflow["closure"].IsDefined() && inflow["closure"].IsScalar() &&
+                inflow["closure"].as<std::string>() != "external") {
+              ctx.addError(where + ".inflow.velocity",
+                           "only valid with closure external (zero_gradient "
+                           "takes the inflow momentum from the interior)");
+            }
+          }
+        }
         const YAML::Node value = bc["value"];
         if (kind == "outflow" && value.IsDefined()) {
           ctx.addError(where + ".value",
@@ -1206,13 +1601,18 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
       if (vars["transport"].IsDefined() && !tr) {
         ctx.addError("output.variables.transport", "requires modules.transport: true");
       }
-      // seepage is a surface variable produced by the coupling.
+      // seepage and seepage_rate are surface variables produced by the
+      // coupling (seepage_rate: Stage-3 T4 W4.2).
       const YAML::Node surfaceVars = vars["surface"];
       if (surfaceVars.IsDefined() && surfaceVars.IsSequence() && !gw) {
         for (std::size_t n = 0; n < surfaceVars.size(); ++n) {
-          if (surfaceVars[n].IsScalar() && surfaceVars[n].as<std::string>() == "seepage") {
+          if (!surfaceVars[n].IsScalar()) {
+            continue;
+          }
+          const std::string name = surfaceVars[n].as<std::string>();
+          if (name == "seepage" || name == "seepage_rate") {
             ctx.addError("output.variables.surface",
-                         "variable 'seepage' requires modules.groundwater: true");
+                         "variable '" + name + "' requires modules.groundwater: true");
           }
         }
       }
@@ -1308,10 +1708,12 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
 }  // namespace
 
 void validateRoot(const YAML::Node& root, const std::string& configDir,
-                  std::vector<std::string>& errors) {
+                  std::vector<std::string>& errors,
+                  std::vector<std::string>& warnings) {
   Context ctx;
   ctx.configDir = configDir;
   ctx.errors = &errors;
+  ctx.warnings = &warnings;
 
   if (!root.IsMap()) {
     ctx.addError("(document)", "top level must be a mapping");

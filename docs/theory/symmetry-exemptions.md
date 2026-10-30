@@ -74,3 +74,12 @@ The g9 wind battery's exact symmetry (≤ 1.1e-15 m against a 1e-7 bound)
 is the constructive proof that the v2-physics "no exemptions" rule is
 attainable: forcing terms written once against face geometry, without
 per-side branches, are symmetric to round-off.
+
+## Periodic axes (Stage-3 T3)
+
+A periodic axis has no minus/plus edge class: the preserved legacy
+edge asymmetries (the west/south explicit-flux rules, the plus/minus
+ghost-head scaling split) are all boundary semantics and never engage on a
+periodic axis. The pd8 battery runs the dihedral transforms with the
+periodic flags swapped under the 90-degree class (W3.7), which is what
+proves the implementation axis-generic rather than x-special.

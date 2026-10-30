@@ -72,6 +72,11 @@ struct DomainConfig {
   bool followTerrain = false;      ///< terrain-following subsurface mesh
   TerrainLayers terrainLayers = TerrainLayers::Scaled;  ///< vertical extent rule
   DecompositionConfig decomposition;  ///< MPI block layout request
+  /// Stage-3 T3 (plan §13.B): periodic lateral topology per axis — a
+  /// domain property for EVERY module (the surface momentum/continuity,
+  /// the groundwater matrix and fluxes, transport, baroclinic faces).
+  bool periodicX = false;  ///< x axis wraps (seam is an interior face)
+  bool periodicY = false;  ///< y axis wraps (seam is an interior face)
 };
 
 /// time: stepping and output cadence.
@@ -150,7 +155,59 @@ struct AtmosphereConfig {
   /// functions (applied at MetForcing::sample for every bulk consumer).
   SeriesOrConstant shortwave;           ///< absorbed SW [W/m^2] (default 0)
   SeriesOrConstant longwaveIn;          ///< incident LW [W/m^2] (default 0)
+  /// Stage-3 T7 (plan §11 W7.1): INCIDENT shortwave R_s [W/m^2] for the
+  /// Penman-Monteith potential, whose channels apply their own albedo.
+  /// Distinct from the Q5 `shortwave`, which stays the ABSORBED SW of
+  /// the bulk surface heat exchange (its meaning is unchanged).
+  SeriesOrConstant shortwaveIncoming;   ///< incident SW [W/m^2] (default 0)
   real_t windSpeedFloor = 0.5;          ///< [m/s] still-air lower bound
+  /// Stage-3 T5 (plan §9 W5.1): the aerodynamic-resistance law of the ET
+  /// consumers. The Q4/Q5 bulk consumers (surface bulk evaporation, the
+  /// heat module's latent/sensible terms, groundwater.evaporation) stay
+  /// pinned to liu2006 regardless (their goldens).
+  enum class AeroResistance { Liu2006, Fao56, LogProfile };
+  AeroResistance aeroResistance = AeroResistance::Liu2006;  ///< selected r_a law
+  real_t aeroRefHeight = 2.0;     ///< measurement height z_ref [m]
+  real_t aeroZ0m = 0.01;          ///< momentum roughness z0m [m] (log_profile)
+  real_t aeroZ0h = 0.001;         ///< scalar roughness z0h [m] (log_profile)
+  real_t aeroDisplacement = 0.0;  ///< displacement height d [m] (log_profile)
+};
+
+/// evapotranspiration.energy (Stage-3 T7, plan §11): the Penman-Monteith
+/// energy-budget settings. The available energy is
+///   A = R_n - G,  R_n = (1 - albedo) R_s + eps (LW_in - sigma T_K^4),
+///   G = fraction * R_n,
+/// with eps = kWaterEmissivity and T_K = T_air + 273.15. The albedo and
+/// ground-heat fraction are per channel: water uses albedo_water and the
+/// water fraction; the soil and canopy channels take their albedo from
+/// the soil / vegetation type and their fraction from here.
+struct EnergyConfig {
+  real_t albedoWater = 0.06;     ///< open-water albedo [-]
+  real_t gFractionWater = 0.0;   ///< ground-heat fraction, water channel
+  real_t gFractionSoil = 0.1;    ///< ground-heat fraction, soil channel
+  real_t gFractionCanopy = 0.1;  ///< ground-heat fraction, canopy channel
+};
+
+/// evapotranspiration: the T5 ET block (plan §9) — replaces BOTH legacy
+/// evaporation keys (surface_water.evaporation / groundwater.evaporation;
+/// the schema rejects mixing the forms). Open-water and soil channels
+/// share one potential mode; complementarity holds on a time basis by
+/// construction (theory/evapotranspiration.md).
+struct EvapotranspirationConfig {
+  bool enabled = false;           ///< true when the block is configured
+  /// The shared potential mode of both channels (PM parses in T7).
+  enum class Potential { Bulk, PenmanMonteith, Prescribed };
+  Potential potential = Potential::Bulk;  ///< selected mode
+  SeriesOrConstant prescribed;    ///< E_pot [m/s] (potential prescribed)
+  bool openWater = true;          ///< the surface channel
+  bool soil = false;              ///< the soil channel (block present)
+  /// Soil-channel region (empty = every column).
+  std::vector<std::array<real_t, 2>> soilPolygon;
+  /// Soil-rate limiter (alpha_barton acts inside the bulk humidity
+  /// difference; beta_lee_pielke multiplies; none passes the potential).
+  enum class Limiter { AlphaBarton, BetaLeePielke, None };
+  Limiter limiter = Limiter::AlphaBarton;  ///< selected limiter
+  EnergyConfig energy;            ///< PM energy budget (T7)
 };
 
 /// surface_water: SWE module parameters.
@@ -234,12 +291,24 @@ struct GroundwaterConfig {
   /// fractions into the column's pore room instead (mass-conserving; the
   /// b3 physics gate requires it). Plan amendment A7.
   enum class ReallocationSurplus { Drop, Redistribute };
+  /// groundwater.reallocation (Stage-3 T1, owner decision O9; S3-A4).
+  /// Legacy: the full v2.0 post-allocation sweep (sends, theta := theta(h)
+  /// restores, drops). Off (YAML token "disabled"): the same sweep minus
+  /// every non-conservative action — no sends, no drops, no theta :=
+  /// theta(h) creation; the conservative isolated-cell h := h(theta)
+  /// restore is kept, and the realloc audit columns are exactly zero.
+  enum class Reallocation { Legacy, Off };
   std::string scheme = "pca";     ///< sole allowed value; documents the design
   bool useFull3d = true;          ///< false: zero lateral K in unsaturated cells
   GroundwaterTimestepConfig timestep;  ///< adaptive dtg controller
   real_t specificStorage = 0.0;   ///< Ss [1/m]
   /// Surplus handling in the post-allocation step (legacy default: drop).
   ReallocationSurplus reallocationSurplus = ReallocationSurplus::Drop;
+  /// THE STAGE-3 T8 DEFAULT-FLIP CONSTANT (plan §2.7): the T8 evaluation
+  /// changes exactly this initializer to Reallocation::Off and re-runs
+  /// every test with unchanged tolerances; it stays flipped only if all
+  /// pass. Do not flip it anywhere else.
+  Reallocation reallocation = Reallocation::Legacy;
   DensityCouplingConfig densityCoupling;  ///< baroclinic feedback switch
   GwEvaporationConfig evaporation;        ///< bulk soil evaporation (v2 Q4)
 };
@@ -303,6 +372,56 @@ struct SoilType {
   real_t vgAlpha = 0.0;  ///< van Genuchten alpha [1/m]
   real_t vgN = 0.0;      ///< van Genuchten n
   real_t aev = 0.0;      ///< saturation-cutoff (air-entry) head [m], <= 0
+  /// Stage-3 T5: field capacity for the beta_lee_pielke ET limiter.
+  /// Absent -> theta(h = -3.3 m) from the van Genuchten curve.
+  bool hasThetaFc = false;  ///< theta_fc was configured
+  real_t thetaFc = 0.0;     ///< configured field capacity [-]
+  /// Stage-3 T7: surface albedo for the Penman-Monteith soil channel
+  /// (the schema requires it on every type exactly when PM runs the
+  /// soil channel).
+  bool hasAlbedo = false;  ///< albedo was configured
+  real_t albedo = 0.0;     ///< soil surface albedo [-]
+};
+
+/// vegetation.types[] (Stage-3 T6, plan §10 W6.1): one static canopy /
+/// root description. Beer–Lambert transmission tau = exp(-k LAI) scales
+/// the ground (open-water and soil) ET rates; the canopy transpires
+/// T_pot = (1 - tau) E_x(r_s = r_c) with r_c = r_l / (0.5 LAI), taken
+/// from the root zone as a Feddes-weighted volumetric sink (O7: it runs
+/// regardless of inundation).
+struct VegetationType {
+  std::string name;            ///< unique type name
+  real_t lai = 0.0;            ///< leaf area index [-]
+  real_t extinction = 0.5;     ///< Beer–Lambert k [-]
+  real_t leafResistance = 0.0; ///< r_l [s/m]
+  real_t rootDepth = 0.0;      ///< L [m] below the column's top surface
+  /// Root-density shape: uniform 1/L, or linear 2(L-d)/L^2 (triangular).
+  enum class RootProfile { Uniform, Linear };
+  RootProfile profile = RootProfile::Uniform;  ///< root-density shape
+  /// Feddes stress heads [m], h1 >= h2 >= h3 >= h4. h1/h2 (the anaerobic
+  /// cutoff) are optional: wetland species omit them (alpha = 1 for
+  /// h >= h3 — O7's transpiration-while-inundated).
+  bool hasH12 = false;         ///< h1/h2 configured
+  real_t h1 = 0.0;             ///< alpha = 0 at/above h1 [m]
+  real_t h2 = 0.0;             ///< alpha = 1 at h2 [m]
+  real_t h3 = 0.0;             ///< alpha = 1 down to h3 [m]
+  real_t h4 = 0.0;             ///< alpha = 0 at/below h4 [m]
+  /// Canopy albedo (penman_monteith, T7; the schema requires it on every
+  /// type exactly when PM runs with vegetation).
+  bool hasAlbedo = false;      ///< albedo was configured
+  real_t albedo = 0.0;         ///< canopy albedo [-]
+};
+
+/// vegetation: the static per-cell map (ids: 0 = bare, k >= 1 =
+/// types[k-1]) with an optional per-cell LAI override raster.
+struct VegetationConfig {
+  bool enabled = false;               ///< block configured
+  std::vector<VegetationType> types;  ///< type table
+  bool mapFromFile = false;           ///< map is an id raster
+  std::string mapFile;                ///< id raster (j*nx + i)
+  std::string mapConstantName;        ///< uniform type name
+  bool hasLaiFile = false;            ///< per-cell LAI override given
+  std::string laiFile;                ///< LAI raster (j*nx + i)
 };
 
 /// soil.map: soil-type assignment, by uniform type name or id raster.
@@ -390,6 +509,21 @@ struct BcValueConfig {
 /// selector is only valid on kind scalar_value (schema cross-check).
 enum class BcScalar { Salinity, Temperature };
 
+/// boundary_conditions[].inflow.closure (Stage-3 T2, owner decision O1/O2):
+/// the momentum state of the water BEYOND a prescribed-stage (kind eta)
+/// boundary, read by the advection stencils at the reservoir faces.
+/// ZeroGradient (default) is the v2.0 behavior, bitwise: the inflow
+/// imports the interior momentum through the mass-consistent boundary
+/// reconstruction — valid where the boundary cuts a uniform flow, a free
+/// energy source where the outer water is still (the 2026-10 campaign
+/// gyre, report_V1). External treats the stage cells as an external
+/// reservoir moving at inflow.velocity (default still): self-advection
+/// across a reservoir face takes the conservative d(u^2/2) form, so a
+/// steady entrance costs exactly (u^2 - u_ext^2)/2g of head, and coupled
+/// deposits on the stage cells leave through the reservoir (booked as
+/// stage_deposit) instead of kicking the velocity update.
+enum class BcInflowClosure { ZeroGradient, External };
+
 /// boundary_conditions[]: one polygon-region boundary condition.
 struct BoundaryConditionConfig {
   std::string name;   ///< unique condition name
@@ -398,6 +532,13 @@ struct BoundaryConditionConfig {
   BcKind kind = BcKind::Eta;            ///< what quantity is prescribed
   BcScalar scalarField = BcScalar::Salinity;  ///< scalar_value selector (Q5)
   BcValueConfig value;                  ///< the prescribed value
+  /// Stage-3 T2 (kind eta only): the inflow closure and, under External,
+  /// the external reservoir's velocity components (constant or series;
+  /// both default to a still reservoir).
+  BcInflowClosure inflowClosure = BcInflowClosure::ZeroGradient;
+  bool hasInflowBlock = false;          ///< the inflow key was given
+  BcValueConfig inflowU;                ///< u_ext [m/s] along +x (External)
+  BcValueConfig inflowV;                ///< v_ext [m/s] along +y (External)
 };
 
 /// transport: scalar transport parameters.
@@ -416,6 +557,13 @@ struct TransportConfig {
   /// instead of the exact in-step concentration factor. Off by default;
   /// exists so a b6-class golden can be pinned to the legacy behavior.
   bool legacyEvapAllowance = false;
+  /// Stage-3 T5 (O4): what happens to a drying surface cell's remaining
+  /// scalar mass. Delete (v2.0, golden-pinned) books it into surf_adjust
+  /// and discards it; Store moves it into the per-cell salt store,
+  /// released at the first wet step (the T8 DF evaluation may flip the
+  /// default). Salinity only — temperature keeps the legacy rule.
+  enum class SurfaceDryout { Delete, Store };
+  SurfaceDryout surfaceDryout = SurfaceDryout::Store;  ///< selected mode (token: discard/store)
   /// transport.surface_update: consistent (v2.0 post-release opt-in): the
   /// surface concentration divides the transported mass by the volume of
   /// the *current* step's flow rates (the rates that moved the mass), and
@@ -452,7 +600,13 @@ struct OutputConfig {
   std::vector<std::string> groundwaterVariables;  ///< /groundwater/* selection
   std::vector<std::string> transportVariables;    ///< /transport/* selection
   std::vector<std::string> temperatureVariables;  ///< /temperature/* selection
+  std::vector<std::string> atmosphereVariables;   ///< /atmosphere/* (T5 ET rates)
   std::vector<MonitorConfig> monitors;            ///< point probes
+  /// Stage-3 T4 (plan §8 W4.3): monitor/audit ROW-WRITE decimation in
+  /// whole seconds. 0 (the default) writes a row every step (the v2.0
+  /// behavior, bitwise). Accumulation is always per step; rows are also
+  /// forced at checkpoint instants and at t_end.
+  real_t monitorInterval = 0.0;
   real_t checkpointInterval = 0.0;  ///< 0 = off (none written); > 0 also writes one at t_end
 };
 
@@ -515,6 +669,8 @@ struct FrehgConfig {
   CouplingConfig coupling;        ///< coupling mode
   InitialConditionsConfig initialConditions;  ///< initial state
   std::vector<BoundaryConditionConfig> boundaryConditions;  ///< BC list
+  EvapotranspirationConfig evapotranspiration;  ///< ET block (Stage-3 T5)
+  VegetationConfig vegetation;    ///< vegetation block (Stage-3 T6)
   TransportConfig transport;      ///< scalar-transport parameters
   TemperatureConfig temperature;  ///< temperature-transport parameters (Q5)
   OutputConfig output;            ///< output selection
@@ -524,6 +680,11 @@ struct FrehgConfig {
 
   std::string configDir;  ///< directory of the YAML file (for relative paths)
   std::string rawText;    ///< full configuration text (embedded in HDF5 output)
+  /// Non-fatal validation findings (Stage-3 W0.9 channel): keys that are
+  /// legal but inert under the current mode, and similar advisories. Logged
+  /// at run start and written to the run record's `warnings:` list; a
+  /// configuration with warnings and no errors is VALID.
+  std::vector<std::string> validationWarnings;
 
   /// Resolve a config-relative path against configDir.
   std::string resolvePath(const std::string& relative) const;
@@ -532,7 +693,10 @@ struct FrehgConfig {
 /// Outcome of configuration validation.
 struct ValidationResult {
   std::vector<std::string> errors;  ///< empty when the configuration is valid
-  /// \return true when no errors were recorded.
+  /// Non-fatal advisories (Stage-3 W0.9): printed as WARNING by --validate
+  /// and carried into FrehgConfig::validationWarnings; never invalidate.
+  std::vector<std::string> warnings;
+  /// \return true when no errors were recorded (warnings do not invalidate).
   bool ok() const { return errors.empty(); }
 };
 
@@ -565,7 +729,8 @@ namespace detail {
 /// ConfigSchema.cpp and Config.cpp share it without a public yaml-cpp
 /// dependency.
 void validateRoot(const YAML::Node& root, const std::string& configDir,
-                  std::vector<std::string>& errors);
+                  std::vector<std::string>& errors,
+                  std::vector<std::string>& warnings);
 }  // namespace detail
 
 }  // namespace frehg

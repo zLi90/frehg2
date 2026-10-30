@@ -68,6 +68,12 @@ fi
 # would also select regression_nightly by substring).
 ctest --test-dir "$BUILD" -L '^regression$' --output-on-failure
 
+# 2b. The Stage-3 gate tier (plan §12 W8.9, S3-A11): every rl/ob/pd/dg/et
+# gate plus the default-bitwise and s3-restart lanes. Added at T8 — a
+# release pipeline that skips them would ship the Stage-3 features
+# release-unexercised (the v1-wind lesson §8.3 exists to prevent).
+ctest --test-dir "$BUILD" -L '^(stage3|stage3_local)$' --output-on-failure
+
 # 3. The adjudicated b5 record (rain/sync, 24 h horizon, 4 ranks).
 python3 "$ROOT/tests/regression/run_regression.py" b5 \
   --scenario rain --coupling sync --t-end 86400 --ranks 4 \
@@ -93,6 +99,9 @@ python3 "$ROOT/tests/regression/run_regression.py" b5 \
 # block and the amendment.
 ctest --test-dir "$BUILD" -L regression_nightly \
   -E '^regression\.b5\.(rain|norain)\.' --output-on-failure
+# The Stage-3 nightly lanes ride along (S3-A11): the s3.p1 backend lanes
+# (W8.4) and the ob8 b6 external-closure pair.
+ctest --test-dir "$BUILD" -L stage3_nightly --output-on-failure
 echo "note: the four full-horizon b5 envelope runs are excluded here by"
 echo "      design (never-adjudicated bounds; see V2-A20 and the comment"
 echo "      above). The adjudicated b5 record is step 3; the full-horizon"

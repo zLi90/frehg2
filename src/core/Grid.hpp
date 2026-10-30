@@ -85,6 +85,46 @@ class Grid {
   int rankNorth() const { return rankNorth_; }  ///< toward larger j
   ///@}
 
+  /// \name Periodic topology (Stage-3 T3, plan §7)
+  /// domain.periodic wraps the neighbor ranks (so halos, gid exchanges and
+  /// matrix legs follow automatically) and removes the axis's boundary:
+  /// the EdgeTopology predicates below replace every raw global-index edge
+  /// test in the kernels (the check_forbidden.sh rule enforces this).
+  ///@{
+  bool periodicX() const { return periodicX_; }  ///< x axis wraps (no x boundary)
+  bool periodicY() const { return periodicY_; }  ///< y axis wraps (no y boundary)
+  ///@}
+
+  /// Device-callable edge predicates (Stage-3 T3): on a periodic axis no
+  /// global index is a boundary. Capture by value into kernels via
+  /// Grid::edgeTopology().
+  struct EdgeTopology {
+    int nx = 0;           ///< global cell count along x
+    int ny = 0;           ///< global cell count along y
+    bool perX = false;    ///< x axis is periodic
+    bool perY = false;    ///< y axis is periodic
+    /// \return true when global column \p gi is the west boundary column.
+    KOKKOS_INLINE_FUNCTION bool west(int gi) const { return !perX && gi == 0; }
+    /// \return true when global column \p gi is the east boundary column.
+    KOKKOS_INLINE_FUNCTION bool east(int gi) const { return !perX && gi == nx - 1; }
+    /// \return true when global row \p gj is the south boundary row.
+    KOKKOS_INLINE_FUNCTION bool south(int gj) const { return !perY && gj == 0; }
+    /// \return true when global row \p gj is the north boundary row.
+    KOKKOS_INLINE_FUNCTION bool north(int gj) const { return !perY && gj == ny - 1; }
+    /// \return true when \p gi lies outside the domain along a
+    /// NON-periodic x axis (a periodic axis has no outside).
+    KOKKOS_INLINE_FUNCTION bool outsideX(int gi) const {
+      return !perX && (gi < 0 || gi >= nx);
+    }
+    /// \return true when \p gj lies outside the domain along a
+    /// NON-periodic y axis (a periodic axis has no outside).
+    KOKKOS_INLINE_FUNCTION bool outsideY(int gj) const {
+      return !perY && (gj < 0 || gj >= ny);
+    }
+  };
+  /// The grid's edge predicates, by value for kernel capture.
+  EdgeTopology edgeTopology() const { return {nx_, ny_, periodicX_, periodicY_}; }
+
   /// Block size of dimension-\p N split over \p P parts at part \p p:
   /// N/P + (p < N%P). Exposed for unit testing (plan §8.1 test_grid).
   static int blockSize(int N, int P, int p);
@@ -145,6 +185,7 @@ class Grid {
   int nxLocal_ = 0, nyLocal_ = 0, i0_ = 0, j0_ = 0;
   int rankWest_ = MPI_PROC_NULL, rankEast_ = MPI_PROC_NULL;
   int rankSouth_ = MPI_PROC_NULL, rankNorth_ = MPI_PROC_NULL;
+  bool periodicX_ = false, periodicY_ = false;  ///< Stage-3 T3 topology
 
   HostField2<int> ktopHost_;
   HostField2<PetscInt> gid2Host_;

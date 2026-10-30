@@ -339,7 +339,12 @@ void TerrainMetric::buildMetrics(const Grid& grid, HaloExchanger& halo) {
     for (int j = 0; j <= nyl + 1; ++j) {
       for (int i = 0; i <= nxl; ++i) {
         const int gi = grid.i0() + i - 1;
-        if (gi < 0 || gi >= grid.nx() - 1) {
+        // Stage-3 T3: a periodic seam face has a slope like any interior
+        // face, computed from the halo-exchanged wrapped neighbor; only a
+        // true boundary keeps the legacy sin = 0, cos = 1 default (face gi
+        // sits between columns gi and gi+1, hence the east(+1) probe).
+        const Grid::EdgeTopology topo = grid.edgeTopology();
+        if (topo.outsideX(gi) || topo.east(gi)) {
           continue;
         }
         const std::size_t jj = static_cast<std::size_t>(j);
@@ -357,7 +362,8 @@ void TerrainMetric::buildMetrics(const Grid& grid, HaloExchanger& halo) {
     }
     for (int j = 0; j <= nyl; ++j) {
       const int gj = grid.j0() + j - 1;
-      if (gj < 0 || gj >= grid.ny() - 1) {
+      const Grid::EdgeTopology topo = grid.edgeTopology();
+      if (topo.outsideY(gj) || topo.north(gj)) {
         continue;
       }
       for (int i = 0; i <= nxl + 1; ++i) {

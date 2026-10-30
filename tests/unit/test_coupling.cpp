@@ -131,7 +131,7 @@ struct MiniCoupled {
     const real_t lhs = (surfaceVolume() - vSurfBefore) + (gwVolume() - vGwBefore) +
                        (c.accumVolume - accumBefore);
     const real_t rhs = (s.rainVolume - s.evapVolume - s.boundaryOutflow + s.bcInflow +
-                        s.clampVolume) +
+                        s.clampVolume - s.stageDeposit) +
                        (c.gw.boundaryIn + c.gw.cplExchanged + c.gw.cplVent) + c.gw.cplBounce -
                        c.gw.cplEvap + c.discarded - c.gw.ssStorage + c.gw.reallocAdjust -
                        c.gw.vloss;
@@ -334,6 +334,9 @@ TEST(CoupledModule, SeepageHeldOnDrySurfaceUntilMinDepth) {
   // shallowwater.c:668-675) until the accumulated depth exceeds it.
   MiniCoupled sim;
   sim.cfg = coupledBaseConfig(1, 5, 0.05, 0.5);
+  // This test asserts the LEGACY reallocation-fed seepage accumulator —
+  // pinned explicitly (plan §2.7-4 / W1.6; escaped T1, found by W8.1).
+  sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
   sim.cfg.surfaceWater.minDepth = 2.0e-4;
   sim.cfg.initialConditions.groundwater.value.constant = 0.459;
   frehg::BoundaryConditionConfig head;
@@ -406,6 +409,9 @@ TEST(CoupledModule, ReallocationVentDepositsOnWetSurface) {
   // surface (allocate_send, groundwater.c:1185-1196).
   MiniCoupled sim;
   sim.cfg = coupledBaseConfig(1, 5, 0.05, 0.5);
+  // The vent IS the legacy post-allocation walk — pinned explicitly
+  // (plan §2.7-4 / W1.6; escaped T1, found by W8.1).
+  sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
   sim.cfg.soil.types = {testSoil(1.0e-7)};
   sim.cfg.groundwater.specificStorage = 1.0e-4;
   sim.cfg.initialConditions.surface.eta.constant = 0.01;  // wet surface
@@ -457,6 +463,87 @@ TEST(CoupledModule, EvaporationCorrectionKeepsSubsurfaceLossOffTheSurface) {
     accum = c.accumVolume;
   }
   EXPECT_LT(sim.gwVolume(), vg + 1.0e-15);
+}
+
+TEST(CoupledModule, ExternalStageAbsorbsAndBooksCoupledDeposits) {
+  // Stage-3 T2 gate ob4: an exfiltrating column under a prescribed stage
+  // with closure external. The stage cell is an external reservoir: after
+  // routeStageDeposits the stage holds exactly at every coupled step, the
+  // removed volume is booked (stage_deposit), and the coupled closure —
+  // which subtracts the booked term — stays at rounding.
+  MiniCoupled sim;
+  sim.cfg = coupledBaseConfig(2, 6, 0.1, 0.5);
+  // Saturated start well above the bed: the column exfiltrates onto the
+  // surface every step.
+  sim.cfg.initialConditions.groundwater.form =
+      frehg::GroundwaterInitialConfig::Form::Head;
+  sim.cfg.initialConditions.groundwater.value.constant = 0.3;
+  sim.cfg.initialConditions.surface.eta.constant = 0.05;
+  frehg::BoundaryConditionConfig stage;
+  stage.name = "stage";
+  stage.polygon = {{-0.1, -0.1}, {1.0, -0.1}, {1.0, 1.1}, {-0.1, 1.1}};
+  stage.target = frehg::BcTarget::Surface;
+  stage.kind = frehg::BcKind::Eta;
+  stage.value.form = frehg::BcValueConfig::Form::Constant;
+  stage.value.constant = 0.05;
+  stage.inflowClosure = frehg::BcInflowClosure::External;
+  sim.cfg.boundaryConditions = {stage};
+  sim.build();
+  const real_t vTotal = sim.surfaceVolume() + sim.gwVolume();
+  real_t vs = sim.surfaceVolume();
+  real_t vg = sim.gwVolume();
+  real_t accum = 0.0;
+  real_t booked = 0.0;
+  for (int n = 0; n < 20; ++n) {
+    sim.step();
+    const frehg::coupling::CouplingAudit& c = sim.coupler->audit();
+    const frehg::swe::SurfaceStepAudit& s = sim.surface->audit();
+    // The reservoir absorbed this step's deposit before the velocity
+    // update: the stage cell sits exactly on the prescribed value.
+    EXPECT_EQ(interior2(sim.surface->eta(), 1, 1), 0.05) << "step " << n;
+    EXPECT_LE(std::fabs(sim.closureResidual(vs, vg, accum)), 1.0e-10 * vTotal)
+        << "step " << n;
+    booked += s.stageDeposit;
+    vs = sim.surfaceVolume();
+    vg = sim.gwVolume();
+    accum = c.accumVolume;
+  }
+  EXPECT_GT(booked, 0.0);  // anti-vacuity: the case really deposits
+}
+
+TEST(CoupledModule, ZeroGradientStageBooksDepositsWithoutMovingThem) {
+  // Stage-3 T2 gate ob4(b): under the default closure the dynamics are
+  // bitwise v2.0 — the deposit stays on the stage cell until the next
+  // stage enforcement — but it is now BOOKED (the b6 regime's unclosed
+  // audit term, dod-Q7). The telescoped two-step identity closes: over the
+  // run, cumulative stage_deposit equals everything the enforcement
+  // deleted, up to the final step's holdover still sitting in eta.
+  MiniCoupled sim;
+  sim.cfg = coupledBaseConfig(2, 6, 0.1, 0.5);
+  sim.cfg.initialConditions.groundwater.form =
+      frehg::GroundwaterInitialConfig::Form::Head;
+  sim.cfg.initialConditions.groundwater.value.constant = 0.3;
+  sim.cfg.initialConditions.surface.eta.constant = 0.05;
+  frehg::BoundaryConditionConfig stage;
+  stage.name = "stage";
+  stage.polygon = {{-0.1, -0.1}, {1.0, -0.1}, {1.0, 1.1}, {-0.1, 1.1}};
+  stage.target = frehg::BcTarget::Surface;
+  stage.kind = frehg::BcKind::Eta;
+  stage.value.form = frehg::BcValueConfig::Form::Constant;
+  stage.value.constant = 0.05;
+  sim.cfg.boundaryConditions = {stage};
+  sim.build();
+  real_t booked = 0.0;
+  real_t holdover = 0.0;
+  for (int n = 0; n < 20; ++n) {
+    sim.step();
+    const frehg::swe::SurfaceStepAudit& s = sim.surface->audit();
+    booked += s.stageDeposit;
+    holdover = interior2(sim.surface->eta(), 1, 1) - 0.05;
+    // The deposit is NOT moved: the stage cell carries this step's gain.
+    EXPECT_GT(holdover, 0.0) << "step " << n;
+  }
+  EXPECT_GT(booked, 20.0 * holdover * 0.5);  // every step booked, same order
 }
 
 TEST(CoupledModule, SyncModeMarchesOnTheCommonAdaptiveStep) {

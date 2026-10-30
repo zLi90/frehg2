@@ -1,0 +1,74 @@
+# et1b — the D1 guard-mismatch lane (Stage-3 plan §9, amended S3-A8).
+# The v2.0 moisture-guard pair lives ONLY in the coupled mode-0 branches
+# (Predictor.cpp guard on wcn vs theta_s/theta_r; Corrector.cpp guard on
+# wc > theta_r), so the D1 red evidence needs a COUPLED dry-surface
+# column: 1 x 1 x 30 sand, SATURATED start (water table at the bed), dry
+# surface, sync dt = 60 s, prescribed potential E = 1.0e-6 m/s so the
+# old/new comparison is formula-free. The harness also generates the
+# old-path variant (groundwater_top kind flux, constant 1.0e-6 — the
+# v2.0 configuration): its predictor skips the sink while saturated
+# (wcn < theta_s fails) while its corrector applies it — the predicted
+# head never feels the demand. The new path applies qVap on both sides.
+simulation:
+  id: et1b-coupled
+  title: Stage-3 et1b coupled D1 guard-mismatch lane
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 30
+  dx: 1.0
+  dy: 1.0
+  dz: 0.02
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 60.0
+  t_end: 7200.0
+  output_interval: 600.0
+
+modules:
+  surface_water: true
+  groundwater: true
+
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-03
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 60.0, dt_min: 60.0, dt_max: 60.0}
+  specific_storage: 1.0e-5
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: sand, ksx: 1.0e-4, ksy: 1.0e-4, ksz: 1.0e-4,
+       theta_s: 0.41, theta_r: 0.05, vg_alpha: 4.0, vg_n: 2.5}
+  map: {constant: sand}
+
+coupling: {mode: sync}
+
+evapotranspiration:
+  potential: prescribed
+  prescribed: {constant: 1.0e-6}
+  open_water: true
+  soil:
+    limiter: none
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+  groundwater:
+    water_table: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+    groundwater: [hydraulic_head, water_content]

@@ -48,7 +48,8 @@ Variables and units:
 | `surface/eta` | absolute free-surface elevation | m |
 | `surface/depth` | water depth = eta − bottom (0 when dry) | m |
 | `surface/uu`, `vv` | x / y velocity | m/s |
-| `surface/seepage` | surface-applied exchange rate, **positive upward** (coupled runs only) | m/s |
+| `surface/seepage` | PER-STEP sample of the applied exchange rate, **positive upward** (coupled runs only) — do NOT integrate it; use `seepage_rate` for any exchange metric | m/s |
+| `surface/seepage_rate` | interval-MEAN coupled surface gain (applied seepage + bounce-back + vent), positive upward; `sum(rate · area · Δt_out)` equals the audit `seepage` increment exactly | m/s |
 | `groundwater/hydraulic_head` | pressure head | m |
 | `groundwater/water_content` | volumetric moisture θ | – |
 | `groundwater/qx,qy,qz` | Darcy fluxes | m/s |

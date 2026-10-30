@@ -57,6 +57,35 @@
 /// Everything each cell publishes in the parallel phase touches only that
 /// cell; the column sweep touches only its own column — race-free and
 /// decomposition-invariant by construction.
+///
+/// Stage-3 T1 (owner decision O9; amendment S3-A4): under groundwater.
+/// reallocation: disabled this sweep runs with every NON-CONSERVATIVE
+/// action removed — same classification, but the over-saturation excess is
+/// neither sent nor dropped (the finalize clamp takes it, audited as
+/// vloss), the saturated-contact theta := theta(h) restore (the water
+/// creation of report_V2) is skipped, and the send walks never run. The
+/// conservative isolated-cell h := h(theta) restore (:995-999) is kept
+/// verbatim. The realloc audit terms are exactly zero under disabled
+/// (gates rl1/rl2/rl3). With the diagnostics requested (plan W1.3), both
+/// modes book every created and discarded volume into per-cell cumulative
+/// fields whose sums reproduce the audit columns exactly (gate rl2).
+///
+/// DOMAIN OF APPLICABILITY (S3-A4, measured): disabled is for
+/// vadose-dominated problems. Near saturation the PCA corrector relies on
+/// the legacy restore for h <-> theta consistency; without it the clamp
+/// mints water at draining cells and deletes it at filling ones (measured
+/// +-0.33 m^3 per 0.0625 m^3 cell on the saturated gw-orient block) and
+/// the dynamics amplify rounding chaotically (O(1) orientation
+/// divergence, deterministic per run). Three alternative restores were
+/// measured and rejected in S3-A4: h(theta) on every unsaturated cell
+/// (orientation branch flips at the hard 0.9999 theta_s mark, 7e-4 m
+/// deltas, 2x substeps); a blend of that restore into the predicted head
+/// (pins the fringe to the unsaturated branch and destabilizes the water
+/// table — 17 m deltas, 2.6x substeps); and a continuous extension through
+/// saturation via the Ss line h = (theta - theta_s)/Ss (the 1/Ss noise
+/// amplification blows up, 1e19 deltas). A conserving redesign of the
+/// saturated-contact restore is an owner decision (plan contingency
+/// C-RL).
 
 #include "gw/RichardsSolver.hpp"
 #include "gw/VanGenuchten.hpp"
@@ -98,6 +127,9 @@ void RichardsSolver::reallocateWaterContent() {
   Field3<real_t> vga = vga_, vgn = vgn_, wcs = wcs_, wcr = wcr_, aev = aev_;
   Field3<real_t> dz3d = mesh_.dz3d();
   Field3<real_t> room = room_, sendUp = sendUp_, sendDown = sendDown_;
+  const bool diag = reallocDiag_;
+  const bool off = reallocOff_;
+  Field3<real_t> createdCell = reallocCreated_, droppedCell = reallocDroppedCell_;
   Field3<PetscInt> gid = grid_.gid3();
   Field2<int> topCode = topCode_;
   Field2<real_t> topValue = topValue_;
@@ -210,6 +242,12 @@ void RichardsSolver::reallocateWaterContent() {
         };
 
         if (before >= soil.thetaS) {
+          if (off) {
+            // disabled: leave the excess for finalizeWaterContent's clamp
+            // (audited as vloss); nothing is sent or dropped here.
+            room(j, i, k) = 0.0;
+            return;
+          }
           // Over-saturated: split the excess along the head gradient
           // (check_head_gradient, :1074-1150) and clamp to θs.
           const real_t excess = (before - soil.thetaS) * volume;
@@ -220,6 +258,9 @@ void RichardsSolver::reallocateWaterContent() {
           // are dropped and audited; see the file comment.
           sum -= excess - sendUp(j, i, k) - sendDown(j, i, k);
           drop += excess - sendUp(j, i, k) - sendDown(j, i, k);
+          if (diag) {
+            droppedCell(j, i, k) += excess - sendUp(j, i, k) - sendDown(j, i, k);
+          }
           wc(j, i, k) = soil.thetaS;
           room(j, i, k) = 0.0;
           return;
@@ -264,10 +305,16 @@ void RichardsSolver::reallocateWaterContent() {
 
         if (!adjSat) {
           // Isolated unsaturated cell: restore h from the conserved θ
-          // (:995-999).
+          // (:995-999) — conservative, kept verbatim in both modes.
           if (before < 0.9999 * soil.thetaS) {
             h(j, i, k) = headFromWaterContent(soil, before);
           }
+        } else if (off) {
+          // disabled: the saturated-contact restore θ := θ(h) is the water
+          // creation of report_V2 — skipped; the cell keeps the predicted
+          // head and the flux-conservative θ (the header's domain-of-
+          // applicability note).
+          return;
         } else {
           // Saturated contact: θ follows the predicted head (:1034). When
           // the conserved θ exceeds θ(h), the surplus is sent down the head
@@ -290,10 +337,20 @@ void RichardsSolver::reallocateWaterContent() {
             // branch.
             sum -= surplus - sendUp(j, i, k) - sendDown(j, i, k);
             drop += surplus - sendUp(j, i, k) - sendDown(j, i, k);
+            if (diag) {
+              droppedCell(j, i, k) += surplus - sendUp(j, i, k) - sendDown(j, i, k);
+            }
           } else {
             sum += (after - before) * volume;
             if (after < before) {
               drop += (before - after) * volume;  // drop-mode surplus
+              if (diag) {
+                droppedCell(j, i, k) += (before - after) * volume;
+              }
+            } else if (diag) {
+              // The theta := theta(h) restore CREATES this volume (report_V2):
+              // booked per cell so the rl2 sums reproduce the audit exactly.
+              createdCell(j, i, k) += (after - before) * volume;
             }
           }
         }
@@ -304,7 +361,15 @@ void RichardsSolver::reallocateWaterContent() {
   // :1158-1291), k ascending exactly as the legacy flat sweep visited
   // cells. Deposits and vents are mirrored into the z-flux field the same
   // way legacy maintains qz, so the audit and adaptive controller see the
-  // moved volume.
+  // moved volume. Under disabled nothing was staged (sendUp/sendDown are
+  // zero everywhere), so the walks are skipped and the audit terms keep
+  // their exact zeros.
+  if (off) {
+    audit_.reallocAdjust = 0.0;
+    audit_.reallocDropped = 0.0;
+    audit_.cplVent = 0.0;
+    return;
+  }
   real_t dropped = 0.0;
   real_t vented = 0.0;
   Kokkos::parallel_reduce(
@@ -379,6 +444,9 @@ void RichardsSolver::reallocateWaterContent() {
                   vent += dV;
                 } else {
                   lost -= dV;
+                  if (diag) {
+                    droppedCell(j, i, k) += dV;  // sub-min_depth vent discarded
+                  }
                 }
                 dV = 0.0;
               } else if (topIsHead) {
@@ -400,6 +468,9 @@ void RichardsSolver::reallocateWaterContent() {
                   }
                 }
                 lost -= dV;  // remainder dropped (legacy :1243-1248)
+                if (diag) {
+                  droppedCell(j, i, k) += dV;
+                }
                 dV = 0.0;
               }
             }
@@ -420,6 +491,9 @@ void RichardsSolver::reallocateWaterContent() {
               }
             }
             lost -= dV;  // remainder at the bottom dropped (:1279-1291)
+            if (diag) {
+              droppedCell(j, i, k) += dV;
+            }
           }
         }
       },

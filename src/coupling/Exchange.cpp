@@ -7,6 +7,17 @@
 
 namespace frehg::coupling {
 
+void Coupler::enableHeldSeepageSalt() {
+  if (heldSalt_) {
+    return;
+  }
+  heldSalt_ = true;
+  heldPrev_ = Field2<real_t>("cpl_held_prev", qss_.extent(0), qss_.extent(1));
+  exfNew_ = Field2<real_t>("cpl_exf_new", qss_.extent(0), qss_.extent(1));
+  Kokkos::deep_copy(heldPrev_, 0.0);
+  Kokkos::deep_copy(exfNew_, 0.0);
+}
+
 void Coupler::beginWindow() {
   // Seed the window's infiltration budget from the post-solve depth
   // (amendment A9: the limit debits this budget across subcycles; every
@@ -15,6 +26,18 @@ void Coupler::beginWindow() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   Field2<real_t> avail = avail_, gain = gain_, dept = surface_.depth();
+  if (heldSalt_) {
+    // W5.9: snapshot the held (positive) exfiltration backlog — this
+    // step's NEW exfiltration is whatever applySeepage finds beyond it.
+    Field2<real_t> heldPrev = heldPrev_, accum = seepAccum_;
+    Kokkos::parallel_for(
+        "cpl_held_snapshot",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {1, 1}, {nyl + 1, nxl + 1}),
+        KOKKOS_LAMBDA(const int j, const int i) {
+          heldPrev(j, i) = Kokkos::fmax(0.0, accum(j, i));
+        });
+  }
   Kokkos::parallel_for(
       "cpl_begin_window",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
@@ -37,6 +60,9 @@ void Coupler::applySeepage(real_t dt) {
   const real_t minDepth = minDepth_;
   Field2<real_t> seepAccum = seepAccum_, gain = gain_, qss = qss_;
   Field2<real_t> eta = surface_.eta(), dept = surface_.depth(), bottom = surface_.bottom();
+  const bool heldSalt = heldSalt_;
+  Field2<real_t> heldPrev = heldSalt ? heldPrev_ : Field2<real_t>();
+  Field2<real_t> exfNew = heldSalt ? exfNew_ : Field2<real_t>();
 
   real_t applied = 0.0;
   real_t discarded = 0.0;
@@ -47,6 +73,11 @@ void Coupler::applySeepage(real_t dt) {
       KOKKOS_LAMBDA(const int j, const int i, real_t& sumA, real_t& sumD) {
         const real_t a = seepAccum(j, i);
         qss(j, i) = a / dt;
+        if (heldSalt) {
+          // W5.9: the window's fresh exfiltration (the substeps' additions
+          // beyond the carried backlog), whether it applies below or not.
+          exfNew(j, i) = Kokkos::fmax(0.0, a - heldPrev(j, i));
+        }
         if (a < 0.0) {
           const real_t before = eta(j, i);
           eta(j, i) += a;

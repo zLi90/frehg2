@@ -80,6 +80,33 @@ The grid is a regular Cartesian mesh; cell `(i, j)` has its center at
 south→north. `output_interval` and `t_end`/`t_start` are in whole seconds
 because output times are keyed by integer seconds in the HDF5 file.
 
+### Periodic lateral topology (Stage-3)
+
+`domain.periodic: {x: true}` (or `y`, or both) makes the faces between the
+axis's first and last columns **interior faces for every module**: surface
+momentum and continuity, the groundwater matrix and fluxes, transport and
+the baroclinic terms all wrap. It is a domain property, not a boundary
+condition — there is no `kind: periodic`. Rules:
+
+- the axis needs ≥ 3 cells;
+- a boundary condition whose polygon selects only faces on a periodic
+  axis (an `x` wall under `periodic.x`, a `groundwater_side` condition on
+  those edges) is a setup error — remove it;
+- an `eta` or `discharge` condition on a periodic axis's former edge
+  remains legal: those act on **cells**, which still exist (an interior
+  stage line is already allowed);
+- inputs should be periodic continuations across the seam: the model
+  compares the seam jump of the bed elevation against the largest interior
+  jump at startup and warns (log + run-record `warnings`) when the seam is
+  a discontinuity. For random fields, generate them periodically (e.g.
+  spectral synthesis on the torus) rather than wrapping a non-periodic
+  realization.
+
+The canonical use is an along-shore-uniform coast under along-shore wind:
+with walls, continuity forces a recirculation and an artificial pressure
+gradient; with `periodic.x` the current relaxes to the pure wind–friction
+balance (gate pd1, `benchmarks/pd-periodic/`).
+
 ## `modules`
 
 ```yaml
@@ -247,6 +274,37 @@ applies to uncoupled groundwater runs only, its region must not overlap
 a `groundwater_top` condition, and it adds an `evaporation` column to the
 groundwater mass audit. For salinization, pair it with a `scalar_cauchy`
 condition on the same region (below): water leaves and salt stays.
+
+## `evapotranspiration` (Stage-3 T5)
+
+One block, two channels, one potential mode — replaces BOTH legacy
+evaporation keys (the schema rejects mixing the forms):
+
+```yaml
+atmosphere:
+  # ... the met block (bulk needs surface_temperature) ...
+  aerodynamic_resistance:
+    law: liu2006            # liu2006 (default) | fao56 | log_profile
+
+evapotranspiration:
+  potential: bulk           # bulk | penman_monteith (T7) | prescribed
+  open_water: true          # wet surface cells lose min(E_w dt, depth)
+  soil:                     # presence enables the soil channel
+    limiter: alpha_barton   # alpha_barton (bulk only) | beta_lee_pielke | none
+
+transport:
+  surface_update: consistent      # required with salinity
+  subsurface_update: consistent   # required with salinity (GW module)
+  surface_dryout: store           # the default since T8 (O4); explicit discard is rejected with ET + salinity
+```
+
+Open water and soil never double count: the surface channel covers each
+cell's wet fraction of every step and the soil channel the complement,
+per groundwater substep (`theory/evapotranspiration.md`). The soil flux
+is supply-capped (`unrealised` is booked, never lost), and with salinity
+the water leaves its salt behind exactly: the top soil cell concentrates,
+a drying pond's salt enters the per-cell salt store and returns at the
+first wet step, and held seepage carries its salt into the store too.
 
 ## `coupling` (coupled runs)
 

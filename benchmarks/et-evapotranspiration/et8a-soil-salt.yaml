@@ -1,0 +1,83 @@
+# et8a — soil evaporation concentrates, never creates or destroys salt
+# (Stage-3 plan §9, T5): a closed 1 x 1 x 10 column at salinity 10,
+# density coupling off, ET soil channel, K tiny (1e-12 m/s) so vertical
+# redistribution is negligible and the per-cell identity c theta V =
+# c0 theta0 V is readable cell by cell to the TINY-K redistribution
+# class (K = 1e-12 measures 6.7e-7 relative over 2 h; K = 0 exactly is
+# outside the vG solver's domain — 1e29 blowup; S3-A8: the per-cell
+# bound is 1e-5, 15x over the measured class, while the TOTAL mass and
+# the adjust/anchor columns hold 1e-12). The consistent update books
+# the exact factor through the vapour window (W5.8); subs_adjust and
+# subs_anchor stay at rounding. Ss = 0 (S3-A8): with Ss > 0 the
+# Ss-released storage water leaves without a theta change and carries
+# no modeled salt — an intrinsic approximation of the theta-basis
+# transport (measured: the anchor compounds it to O(1) per-cell error
+# over a full dry-down) — so the exactness lane pins the incompressible
+# limit; the 2 h horizon keeps the top cell far from the vG dry
+# singularity (theta 0.42 -> ~0.24).
+simulation:
+  id: et8a-soil-salt
+  title: Stage-3 et8a soil-evaporation salt concentration
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 10
+  dx: 1.0
+  dy: 1.0
+  dz: 0.05
+  bottom_elevation: {constant: 0.5}
+
+time:
+  dt: 600.0
+  t_end: 7200.0
+  output_interval: 600.0
+
+modules:
+  groundwater: true
+  transport: true
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 600.0, dt_min: 600.0, dt_max: 600.0}
+  specific_storage: 0.0
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: slowmud, ksx: 1.0e-12, ksy: 1.0e-12, ksz: 1.0e-12,
+       theta_s: 0.45, theta_r: 0.067, vg_alpha: 1.6, vg_n: 1.37}
+  map: {constant: slowmud}
+
+atmosphere:
+  air_temperature: {constant: 25.0}
+  surface_temperature: {constant: 30.0}
+  pressure: {constant: 101.3}
+  relative_humidity: {constant: 0.3}
+  wind_speed: {constant: 8.0}
+  wind_speed_floor: 0.5
+
+evapotranspiration:
+  potential: bulk
+  open_water: false
+  soil:
+    limiter: alpha_barton
+
+transport:
+  scheme: {advection: superbee}
+  dispersion: {longitudinal: 0.0, transverse: 0.0, molecular: 0.0}
+  subsurface_update: consistent
+
+initial_conditions:
+  groundwater:
+    head: {constant: -0.3}
+  transport:
+    groundwater: {constant: 10.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content]
+    transport: [concentration]
+    atmosphere: [soil_evaporation_rate]

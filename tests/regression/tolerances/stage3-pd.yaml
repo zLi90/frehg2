@@ -1,0 +1,93 @@
+# stage3-pd.yaml — tolerances for the Stage-3 periodic-topology (T3) gates.
+# Every bound carries the gate and its authoring rationale (Stage-3 plan
+# §2.3); changes only by amendment (S3-A*). Authoring battery values
+# (scripts/test_pd_gates.py, 2026-10-28): discrete balance 0.07446 m/s at
+# dt = 2 s (continuum 0.07455; the fixed point closes to 1e-12).
+pd1:
+  # Strict-lane eta spread over the grid at the final output.
+  eta_flat_abs: 1.0e-12
+  # Strict-lane u spread (uniformity) and value vs the discrete balance.
+  u_flat_abs: 1.0e-12
+  balance_rel: 1.0e-10
+  # Trailing-window span of the monitor u over the last 5 t_r (~540 s).
+  steady_abs: 1.0e-13
+  # Default-solver lane: recorded, bounded loosely at 100x the measured
+  # T10c solver-asymmetry class (1e-6) so a real seam bug still fails it.
+  default_eta_flat_abs: 1.0e-4
+pd2:
+  # The translation identity, strict solver, split per field class (S3-A6).
+  # gw lane: branch-free Richards column — the identity holds to rounding
+  # (measured 1e-13 at both rolls); the authored 1e-11 stands.
+  roll_abs: 1.0e-11
+  # Surface lane flow fields (eta/uu/vv/depth): rolling the unknown
+  # ordering changes solver summation order by 1 ulp, and the surface
+  # scheme's branches (superbee, wet/dry, relative-wind drag) amplify it
+  # exponentially (measured uu delta 3.2e-10 @ 60 s -> 7.3e-8 @ 600 s,
+  # spread over ALL columns, not seam-localized; max uu 7.3e-8,
+  # eta 1.9e-10). Bound 1e-6: 14x headroom, 4 orders below a
+  # defect-class O(1e-2) seam error on these fields.
+  roll_surface_abs: 1.0e-6
+  # Surface tracer (superbee-limited, scale ~7.5): measured 7.3e-6.
+  # Bound 1e-4: 14x headroom, 2+ orders below a defect-class error.
+  roll_tracer_abs: 1.0e-4
+  # Anti-vacuity floor on the tracer peak in the wrap column.
+  seam_floor: 1.0
+  # Coupled-lane anti-vacuity: the tidal seepage exchange moves surface
+  # salt into the soil (measured max |dc_gw| = 0.284 psu over 7200 s; the
+  # coupled lane's roll deltas measured uu 1.5e-7, head 2.1e-11,
+  # c_gw 2.0e-10, c_surface 9.0e-8 — all within the field classes above).
+  coupled_exchange_floor: 0.05
+pd3:
+  # Strict rank invariance. gw lane (V2-A9 class): 1e-12 local (measured
+  # 5e-13 at n=2/4 — the wrapped halo/matrix exchange is rank-invariant;
+  # the CI relaxation to 1e-9 applies through the same env knob the
+  # existing lanes use).
+  rank_abs: 1.0e-12
+  # Surface lane (S3-A6): the strict jacobi+Krylov solve still reduces dot
+  # products across ranks, so changing n changes summation order by 1 ulp
+  # and the surface branches amplify it — the WALLED CONTROL of the same
+  # case measures ~10x LARGER rank deviations than the periodic lane on
+  # every field (uu 6.6e-7 vs 7.0e-8; tracer 1.4e-5 vs 3.7e-6; eta 1.7e-9
+  # vs 1.6e-10), so the wrap introduces nothing. Bounds carry the pd2
+  # field classes (battery-covered there).
+  rank_surface_abs: 1.0e-6
+  rank_tracer_abs: 1.0e-4
+pd4:
+  # Surface ledger with only the stage exchange booked (the ob3 bound).
+  ledger_rel: 1.0e-11
+pd5:
+  # Head linearity/uniformity and the zero-x-flux bound vs the qy scale.
+  # First execution: x spread and curvature ~3e-15 (clean); |qx| 4.5e-19 /
+  # 9.7e-19 over qy 2.0e-7 — a DENORMAL-class rounding product of the
+  # wrapped legs, 2.2e-12/4e-12 relative. qx_rel 1e-10 keeps ~25-45x
+  # headroom while failing the battery's 1e-12 m/s synthetic leak by 2
+  # orders (its qy scale is 1e-7: 1e-12/1e-7 = 1e-5 >> 1e-10).
+  head_abs: 1.0e-10
+  qx_rel: 1.0e-10
+pd8:
+  # Surface dihedral battery (pd-periodic/orient-base.yaml). `transpose`
+  # preserves edge classes but changes the solver unknown ordering, which
+  # seeds the same branch amplification the pd2 roll measures — the S3-A6
+  # pd2 field classes apply (flow 1e-6, tracer 1e-4). The six mixed
+  # transforms additionally swap the y walls' minus/plus legacy edge
+  # arithmetic: the x-orient swe class (1e-2) applies to every field.
+  # The gw lane (rl5 vadose base) uses the x-orient gw classes (1e-12).
+  surface_transpose_abs: 1.0e-6
+  tracer_transpose_abs: 1.0e-4
+  surface_mixed_abs: 1.0e-2
+pd-restart:
+  # S3-A6: the restart identity is held to the project's restart standard
+  # (the wind_restart class), not bitwise — the walled CONTROL of the same
+  # case (periodic removed, x walls added, same binary) measures restart
+  # deviations STRICTLY LARGER than the periodic lane on every field
+  # (flow abs 1.3e-13 vs 1.9e-15; tracer rel 6.6e-6 vs 4.0e-6), so the
+  # deviation is the pre-existing scheme's branch amplification of solver
+  # rounding, not a seam/halo restart defect.
+  # Flow fields (eta/uu/vv/depth, SI scales): measured periodic max
+  # 1.9e-15 abs; 1e-12 keeps >500x headroom and even the control's own
+  # class passes, while a seam defect (O(1e-4..1e-2) field scale) fails
+  # by >= 8 orders.
+  flow_abs: 1.0e-12
+  # Tracer (superbee, scale ~7.5): measured 4.0e-6 rel (control 6.6e-6).
+  # No gate in the project holds a limited tracer bitwise across restart.
+  tracer_rel: 1.0e-4

@@ -154,6 +154,36 @@ TEST(GridSerial, GidCompressionWithMaskedColumns) {
   EXPECT_EQ(gid3(0, 1, 0), -1);
 }
 
+TEST(GridSerial, PeriodicWrapAndEdgeTopology) {
+  // Stage-3 T3 (plan §7 W3.2): a periodic axis wraps the neighbor ranks —
+  // at one rank, to itself (the self-message halo path) — and the
+  // EdgeTopology predicates report no boundary on that axis while the
+  // other axis keeps its edges.
+  DomainConfig dom = smallDomain();
+  dom.periodicX = true;
+  const Grid grid(MPI_COMM_SELF, dom);
+  EXPECT_TRUE(grid.periodicX());
+  EXPECT_FALSE(grid.periodicY());
+  EXPECT_EQ(grid.rankWest(), 0);   // wrapped to self (not MPI_PROC_NULL)
+  EXPECT_EQ(grid.rankEast(), 0);
+  EXPECT_EQ(grid.rankSouth(), MPI_PROC_NULL);
+  EXPECT_EQ(grid.rankNorth(), MPI_PROC_NULL);
+  const Grid::EdgeTopology topo = grid.edgeTopology();
+  EXPECT_FALSE(topo.west(0));
+  EXPECT_FALSE(topo.east(dom.nx - 1));
+  EXPECT_FALSE(topo.outsideX(-1));
+  EXPECT_FALSE(topo.outsideX(dom.nx));
+  EXPECT_TRUE(topo.south(0));
+  EXPECT_TRUE(topo.north(dom.ny - 1));
+  EXPECT_TRUE(topo.outsideY(-1));
+  // The non-periodic default keeps every edge.
+  const Grid plain(MPI_COMM_SELF, smallDomain());
+  const Grid::EdgeTopology ptopo = plain.edgeTopology();
+  EXPECT_TRUE(ptopo.west(0));
+  EXPECT_TRUE(ptopo.east(smallDomain().nx - 1));
+  EXPECT_TRUE(ptopo.outsideX(-1));
+}
+
 TEST(GridSerial, KtopValidation) {
   Grid grid(MPI_COMM_SELF, smallDomain());
   frehg::HostField2<int> wrongShape("ktop", 3, 5);

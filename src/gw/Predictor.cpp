@@ -84,10 +84,9 @@ void RichardsSolver::computeFaceConductivity() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const int nz = grid_.nz();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   const bool full3d = useFull3d_;
 
   Field3<real_t> h = h_, wc = wc_, kx = kx_, ky = ky_, kzF = kzF_;
@@ -187,16 +186,19 @@ void RichardsSolver::computeFaceConductivity() {
                                                     h(j, i, k), ksat(j, i, k));
           }
         };
-        if (gi == 0) {
+        // Stage-3 T3: no side codes exist on a periodic axis (BoundarySet
+        // attaches no faces there); the wrapped neighbor's K arrives
+        // through the soil halos and the interior face formula applies.
+        if (topo.west(gi)) {
           applyEdge(kx, j, i - 1, sideXm(j, i), ksx);
         }
-        if (gi == nxGlobal - 1) {
+        if (topo.east(gi)) {
           applyEdge(kx, j, i, sideXp(j, i), ksx);
         }
-        if (gj == 0) {
+        if (topo.south(gj)) {
           applyEdge(ky, j - 1, i, sideYm(j, i), ksy);
         }
-        if (gj == nyGlobal - 1) {
+        if (topo.north(gj)) {
           applyEdge(ky, j, i, sideYp(j, i), ksy);
         }
       });
@@ -277,7 +279,7 @@ void RichardsSolver::computeFaceConductivity() {
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         const auto inactive = [&](int ii) {
           const int gi = i0 + ii - 1;
-          return gi >= 0 && gi < nxGlobal && gid(j, ii, k) < 0;
+          return !topo.outsideX(gi) && gid(j, ii, k) < 0;
         };
         if (inactive(i) || inactive(i + 1)) {
           kx(j, i, k) = 0.0;
@@ -290,7 +292,7 @@ void RichardsSolver::computeFaceConductivity() {
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         const auto inactive = [&](int jj) {
           const int gj = j0 + jj - 1;
-          return gj >= 0 && gj < nyGlobal && gid(jj, i, k) < 0;
+          return !topo.outsideY(gj) && gid(jj, i, k) < 0;
         };
         if (inactive(j) || inactive(j + 1)) {
           ky(j, i, k) = 0.0;
@@ -313,10 +315,9 @@ void RichardsSolver::assembleSystem(real_t dtg) {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const int nz = grid_.nz();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   const real_t dx = grid_.dx();
   const real_t dy = grid_.dy();
   const real_t az = mesh_.areaZ();
@@ -346,6 +347,11 @@ void RichardsSolver::assembleSystem(real_t dtg) {
   Field2<real_t> cplDept = coupled ? cpl_.dept : Field2<real_t>();
   Field2<real_t> cplAvail = coupled ? cpl_.avail : Field2<real_t>();
   Field2<int> cplMode = coupled ? cplMode_ : Field2<int>();
+  // Stage-3 T5 (W5.5): ET columns take qVap guard-free on both sides of
+  // the step (the D1 fix); empty views when the channel is off.
+  const bool et = etActive_;
+  Field2<int> etCol = et ? etColumn_ : Field2<int>();
+  Field2<real_t> etQ = et ? qVap_ : Field2<real_t>();
 
   // Specific capacity from the step-start head (legacy computes ch before
   // the predictor, groundwater.c:74).
@@ -387,16 +393,16 @@ void RichardsSolver::assembleSystem(real_t dtg) {
           return code == static_cast<int>(GwBcCode::Head) ||
                  code == static_cast<int>(GwBcCode::HeadHydrostatic);
         };
-        if (gi == nxGlobal - 1 && isHead(sideXp(j, i))) {
+        if (topo.east(gi) && isHead(sideXp(j, i))) {
           gxp *= 2.0;
         }
-        if (gi == 0 && isHead(sideXm(j, i))) {
+        if (topo.west(gi) && isHead(sideXm(j, i))) {
           gxm *= 2.0;
         }
-        if (gj == nyGlobal - 1 && isHead(sideYp(j, i))) {
+        if (topo.north(gj) && isHead(sideYp(j, i))) {
           gyp *= 2.0;
         }
-        if (gj == 0 && isHead(sideYm(j, i))) {
+        if (topo.south(gj) && isHead(sideYm(j, i))) {
           gym *= 2.0;
         }
 
@@ -412,16 +418,16 @@ void RichardsSolver::assembleSystem(real_t dtg) {
         // Diagonal (groundwater_mat_coeff:534-559).
         const real_t storage = (ch(j, i, k) + ss * wcn(j, i, k) / wcs(j, i, k)) * rRho(j, i, k);
         real_t gct = storage * volume - (gxp + gxm + gyp + gym);
-        if (gi == nxGlobal - 1 && sideXp(j, i) == static_cast<int>(GwBcCode::Flux)) {
+        if (topo.east(gi) && sideXp(j, i) == static_cast<int>(GwBcCode::Flux)) {
           gct += gxp;
         }
-        if (gi == 0 && sideXm(j, i) == static_cast<int>(GwBcCode::Flux)) {
+        if (topo.west(gi) && sideXm(j, i) == static_cast<int>(GwBcCode::Flux)) {
           gct += gxm;
         }
-        if (gj == nyGlobal - 1 && sideYp(j, i) == static_cast<int>(GwBcCode::Flux)) {
+        if (topo.north(gj) && sideYp(j, i) == static_cast<int>(GwBcCode::Flux)) {
           gct += gyp;
         }
-        if (gj == 0 && sideYm(j, i) == static_cast<int>(GwBcCode::Flux)) {
+        if (topo.south(gj) && sideYm(j, i) == static_cast<int>(GwBcCode::Flux)) {
           gct += gym;
         }
         if (!(k == nz - 1 && botCode(j, i) != static_cast<int>(GwBcCode::Head))) {
@@ -461,28 +467,28 @@ void RichardsSolver::assembleSystem(real_t dtg) {
         // folds the ghost head (zero-gradient copies for open/no-flux edges,
         // boundary values for head edges) — groundwater_rhs:601-626. The
         // side-flux sign convention is "positive into the domain".
-        if (gi == nxGlobal - 1) {
+        if (topo.east(gi)) {
           if (sideXp(j, i) == static_cast<int>(GwBcCode::Flux)) {
             b += rXp(j, i, k) * ax(j, i, k) * sideVXp(j, i) * dtg;
           } else {
             b -= gxp * hn(j, i + 1, k);
           }
         }
-        if (gi == 0) {
+        if (topo.west(gi)) {
           if (sideXm(j, i) == static_cast<int>(GwBcCode::Flux)) {
             b += rXp(j, i - 1, k) * ax(j, i - 1, k) * sideVXm(j, i) * dtg;
           } else {
             b -= gxm * hn(j, i - 1, k);
           }
         }
-        if (gj == nyGlobal - 1) {
+        if (topo.north(gj)) {
           if (sideYp(j, i) == static_cast<int>(GwBcCode::Flux)) {
             b += rYp(j, i, k) * ay(j, i, k) * sideVYp(j, i) * dtg;
           } else {
             b -= gyp * hn(j + 1, i, k);
           }
         }
-        if (gj == 0) {
+        if (topo.south(gj)) {
           if (sideYm(j, i) == static_cast<int>(GwBcCode::Flux)) {
             b += rYp(j - 1, i, k) * ay(j - 1, i, k) * sideVYm(j, i) * dtg;
           } else {
@@ -529,7 +535,12 @@ void RichardsSolver::assembleSystem(real_t dtg) {
                    (qSupply + kzF(j, i, k) * rZp(j, i, k) * vZp(j, i, k)) / dz3d(j, i, k);
             } else {
               real_t qtop = 0.0;
-              if (topCode(j, i) == static_cast<int>(GwBcCode::Flux)) {
+              if (et && etCol(j, i) != 0) {
+                // W5.5: the supply-capped channel flux, NO moisture guard
+                // (the cap already bounded it; the guard pair was the D1
+                // predictor/corrector mismatch).
+                qtop = etQ(j, i);
+              } else if (topCode(j, i) == static_cast<int>(GwBcCode::Flux)) {
                 const real_t v = topValue(j, i);
                 if ((v > 0.0 && wcn(j, i, k) < wcs(j, i, k)) ||
                     (v < 0.0 && wcn(j, i, k) > wcr(j, i, k))) {
@@ -539,6 +550,11 @@ void RichardsSolver::assembleSystem(real_t dtg) {
               b += -dtg * rZp(j, i, k) * volume *
                    (qtop + kzF(j, i, k) * rZp(j, i, k) * vZp(j, i, k)) / dz3d(j, i, k);
             }
+          } else if (et && etCol(j, i) != 0) {
+            // W5.5 uncoupled: the channel flux in the legacy flux form.
+            b += -dtg * rZp(j, i, k) * volume *
+                 (etQ(j, i) + kzF(j, i, k) * rZp(j, i, k) * vZp(j, i, k)) /
+                 dz3d(j, i, k);
           } else if (topCode(j, i) == static_cast<int>(GwBcCode::Head)) {
             b -= gzm * topValue(j, i);
           } else if (topCode(j, i) == static_cast<int>(GwBcCode::Flux)) {
@@ -558,6 +574,34 @@ void RichardsSolver::assembleSystem(real_t dtg) {
         values(base + 6) = gzp;
         rhs(static_cast<std::size_t>(row - offset)) = b;
       });
+
+  if (vegActive_) {
+    // Stage-3 T6 (W6.4, S3-A9 form): the root-uptake sink joins the RHS
+    // in a SEPARATE kernel — the assembly kernel above stays
+    // byte-identical (an in-kernel branch perturbed fma contraction and
+    // broke default_bitwise, measured on b2). Same sign as the corrector
+    // numerator: a saturated confined cell answers dh = -S dtg/Ss with
+    // theta pinned at theta_s (the W6.4 unit gate).
+    Field3<real_t> trSink = sink_;
+    Field3<real_t> rRho2 = rRho_;
+    Field3<real_t> dz3d2 = mesh_.dz3d();
+    Field3<PetscInt> gid2 = grid_.gid3();
+    Kokkos::View<real_t*, MemSpace> rhs2 = rhsVec_;
+    const real_t az2 = mesh_.areaZ();
+    const PetscInt offset2 = grid_.offset3();
+    Kokkos::parallel_for(
+        "gw_rhs_sink",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
+            {1, 1, 0}, {nyl + 1, nxl + 1, nz}),
+        KOKKOS_LAMBDA(const int j, const int i, const int k) {
+          if (gid2(j, i, k) < 0 || trSink(j, i, k) == 0.0) {
+            return;
+          }
+          const real_t volume = az2 * dz3d2(j, i, k);
+          rhs2(static_cast<std::size_t>(gid2(j, i, k) - offset2)) -=
+              dtg * rRho2(j, i, k) * trSink(j, i, k) * volume;
+        });
+  }
 }
 
 void RichardsSolver::fillAndSolve() {

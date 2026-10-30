@@ -52,10 +52,9 @@ void RichardsSolver::updateBaroclinicFaces() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const int nz = grid_.nz();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   const bool coupled = cpl_.active;
 
   Field3<real_t> s = sSubs_;
@@ -96,7 +95,7 @@ void RichardsSolver::updateBaroclinicFaces() {
         const int giMinus = i0 + i - 1;
         real_t rr = 1.0;
         real_t rv = 1.0;
-        if (giMinus < 0) {
+        if (topo.outsideX(giMinus)) {
           // West domain edge (legacy iMou rule; head override mirrors y-).
           if (gid(j, 1, k) >= 0) {
             if (isHeadCode(sideXm(j, 1))) {
@@ -107,7 +106,7 @@ void RichardsSolver::updateBaroclinicFaces() {
               rv = 0.5 * (rVisc(j, 1, k) + rVisc(j, 0, k));
             }
           }
-        } else if (giMinus == nxGlobal - 1) {
+        } else if (topo.east(giMinus)) {
           // East domain edge (legacy y+ rule): ghost value under a head
           // condition, otherwise 1 (the actv pair guard fails there).
           if (gid(j, i, k) >= 0 && isHeadCode(sideXp(j, i))) {
@@ -131,7 +130,7 @@ void RichardsSolver::updateBaroclinicFaces() {
         const int gjMinus = j0 + j - 1;
         real_t rr = 1.0;
         real_t rv = 1.0;
-        if (gjMinus < 0) {
+        if (topo.outsideY(gjMinus)) {
           if (gid(1, i, k) >= 0) {
             if (isHeadCode(sideYm(1, i))) {
               rr = rRho(0, i, k);
@@ -141,7 +140,7 @@ void RichardsSolver::updateBaroclinicFaces() {
               rv = 0.5 * (rVisc(1, i, k) + rVisc(0, i, k));
             }
           }
-        } else if (gjMinus == nyGlobal - 1) {
+        } else if (topo.north(gjMinus)) {
           if (gid(j, i, k) >= 0 && isHeadCode(sideYp(j, i))) {
             rr = rRho(j + 1, i, k);
             rv = rVisc(j + 1, i, k);

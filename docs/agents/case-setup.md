@@ -231,6 +231,67 @@ Generate these files with small Python snippets in the case directory
     configuration and reproduces the uninterrupted run (bitwise; the
     temperature restart gate checks a relative 1e-12).
 
+## 6b. Choosing the inflow closure of a tidal / stage boundary (Stage-3)
+
+Every `kind: eta` condition carries an `inflow.closure` (default
+`zero_gradient`, the pre-Stage-3 behavior). Pick it from what the water
+BEYOND the boundary physically is:
+
+- **A still sea, lake, or reservoir** (tidal flats, basins, most coastal
+  idealizations): `inflow: {closure: external}`. The inflow then enters at
+  rest and pays the Bernoulli entrance head; without it, a recirculation
+  touching the stage row gains kinetic energy for free and can self-sustain
+  (the measured 2026-10 campaign gyre).
+- **An outer sea with a longshore current or an imposed through-flow**:
+  `closure: external` with `velocity: {u: ..., v: ...}` (constant or
+  series) — the inflow carries exactly that momentum.
+- **A boundary cutting a uniform flow** (a channel or river reach continuing
+  beyond the domain): keep `zero_gradient`.
+
+Check the run record after the first run: `closure.stage_ke_influx_J`
+should be small against the run's dissipation, and
+`stage_entrance_head_ratio` near 1 under `external`. A `zero_gradient` run
+whose inflow imports energy without paying the head warns at run end —
+that warning means the closure choice contradicts the physics.
+
+## 6c. An evaporating tidal flat (Stage-3 T5)
+
+Copy `benchmarks/et-evapotranspiration/et9-tidal-flat.yaml`. The
+ingredients and their coupling rules:
+
+- the single `atmosphere` met block plus the `evapotranspiration` block
+  (NEVER the legacy `surface_water.evaporation` / `groundwater.evaporation`
+  keys with it — the schema rejects mixing);
+- `open_water: true` covers the wet cells, the `soil:` sub-block the
+  exposed ones; they split each cell's time exactly, so intertidal cells
+  switch channels through the tide with no double counting (check
+  `wet_time + soil_evaporation_time <= t` in the `/atmosphere` outputs);
+- with salinity: `surface_update: consistent` and `subsurface_update:
+  consistent` are REQUIRED (the schema says so), and `surface_dryout`
+  must stay `store` (the shipped default since T8; an explicit `discard`
+  is rejected) — evaporation then removes water only, drying cells bank
+  their salt in `salt_store` and release it on rewet;
+- analysis: use the interval-mean `/atmosphere` rates and `seepage_rate`
+  (never the per-step `seepage` snapshot); the budgets live in
+  `gw_mass_audit` (`soil_evaporation`, `soil_evaporation_unrealised`) and
+  the run record's `evapotranspiration:` closure block.
+
+## 6d. A transpiring marsh (Stage-3 T6)
+
+Add to the §6c tidal flat a `vegetation` block with a marsh type and an
+id-raster band (`0` = bare, `1` = the type). The rules worth knowing:
+
+- **omit `feddes.h1`/`h2` for wetland species** — α stays 1 at any wet
+  head, so the marsh keeps transpiring while inundated (O7); give
+  h1/h2 only for species with an anaerobic cutoff;
+- the canopy shades the ground: open-water and soil evaporation under
+  the band are scaled by τ = exp(−k·LAI), and the canopy itself
+  transpires (1 − τ)·E_x(r_c) from the root zone;
+- budgets: `gw_mass_audit` columns `transpiration` /
+  `transpiration_unrealised`, the `/atmosphere` `transpiration_rate`,
+  and the 3-D `groundwater: root_uptake` (interval-mean sink, 1/s) show
+  where the water leaves.
+
 ## 7. Minimal skeleton (surface-water rain-runoff)
 
 For orientation only — copy a real example instead (§3):

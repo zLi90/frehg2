@@ -1336,6 +1336,10 @@ frehg::FrehgConfig infiltratingColumnConfig(int mode, bool density, bool fixed) 
   cfg.domain.bottomElevation.constant = 0.0;
   cfg.domain.followTerrain = true;
   cfg.domain.terrainLayers = frehg::DomainConfig::TerrainLayers::Uniform;
+  // Both consumers assert legacy-reallocation-fed behavior (the gradient
+  // swap and the restore-fed ledger) — pinned explicitly (plan §2.7-4 /
+  // W1.6; escaped T1, found by W8.1).
+  cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
   cfg.time.dt = 4.0;
   cfg.time.tEnd = 1.0e5;
   cfg.time.outputInterval = 1.0e5;

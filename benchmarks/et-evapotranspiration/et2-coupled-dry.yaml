@@ -1,0 +1,78 @@
+# et2 — coupled-dry equals uncoupled (Stage-3 plan §9, T5). The et1a
+# column as the subsurface of a coupled 1 x 1 run whose bed sits 0.5 m
+# above the water table's IC frame: the surface stays dry at every step
+# (anti-vacuity asserts depth == 0 and f_dry == 1 throughout), so the
+# coupled mode-0 ET branch must reproduce the uncoupled et1a trajectory
+# to solver class (1e-10). Same column, soil, met and clock as et1a.
+simulation:
+  id: et2-coupled-dry
+  title: Stage-3 et2 coupled dry column equals uncoupled
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 30
+  dx: 1.0
+  dy: 1.0
+  dz: 0.02
+  bottom_elevation: {constant: 0.6}
+
+time:
+  dt: 60.0
+  t_end: 86400.0
+  output_interval: 3600.0
+
+modules:
+  surface_water: true
+  groundwater: true
+
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-03
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 60.0, dt_min: 60.0, dt_max: 60.0}
+  specific_storage: 1.0e-5
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: sand, ksx: 1.0e-4, ksy: 1.0e-4, ksz: 1.0e-4,
+       theta_s: 0.41, theta_r: 0.05, vg_alpha: 4.0, vg_n: 2.5}
+  map: {constant: sand}
+
+coupling: {mode: sync}
+
+atmosphere:
+  air_temperature: {constant: 20.0}
+  surface_temperature: {constant: 20.0}
+  pressure: {constant: 101.3}
+  relative_humidity: {constant: 0.6}
+  wind_speed: {constant: 2.0}
+  wind_speed_floor: 0.5
+
+evapotranspiration:
+  potential: bulk
+  open_water: true
+  soil:
+    limiter: alpha_barton
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.6}
+  groundwater:
+    head: {constant: -0.2}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+    groundwater: [hydraulic_head, water_content]
+  monitors:
+    - {name: p_cell, i: 0, j: 0, variables: [depth]}

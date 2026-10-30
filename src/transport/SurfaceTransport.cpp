@@ -58,9 +58,8 @@ void ScalarSolver::stageSurfaceFarNeighbors() {
 void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   const int nz = grid_.nz();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
   const real_t dx = grid_.dx();
@@ -113,6 +112,15 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   Field2<real_t> Asx = surf_.asx, Asy = surf_.asy, rainMask = surf_.rainMask;
   Field2<real_t> qss = coupled ? cpl_.qss : Field2<real_t>();
   Field2<real_t> vent = consistentExchange ? cpl_.ventVolume : Field2<real_t>();
+  // Stage-3 T5: the salt store (W5.7), the ET per-cell dilution volumes
+  // (D8), and the held-seepage salt split (W5.9).
+  const bool store = store_;
+  Field2<real_t> sStore = store ? sStore_ : Field2<real_t>();
+  const bool etSurf = surf_.etActive && !spec_.isTemperature;
+  Field2<real_t> etRain = etSurf ? surf_.rainAdded : Field2<real_t>();
+  Field2<real_t> etEvap = etSurf ? surf_.evapRemoved : Field2<real_t>();
+  const bool held = coupled && consistentExchange && store && cpl_.heldSeepage;
+  Field2<real_t> exfNew = held ? cpl_.exfNew : Field2<real_t>();
   Field3<real_t> ksz = coupled ? subs_.ksz : Field3<real_t>();
   Field3<real_t> dz3d = coupled ? subs_.dz3d : Field3<real_t>();
   Field3<PetscInt> gid = grid_.gid3();
@@ -130,10 +138,13 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
       KOKKOS_LAMBDA(const int j, const int i, real_t& sumExchange, real_t& sumBoundary) {
         const int gi = i0 + i - 1;
         const int gj = j0 + j - 1;
-        const bool westCell = (gi == 0);
-        const bool eastCell = (gi == nxGlobal - 1);
-        const bool southCell = (gj == 0);
-        const bool northCell = (gj == nyGlobal - 1);
+        // Stage-3 T3: all false on a periodic axis (no edge: the superbee
+        // far neighbors are real, no boundary mass is booked, W2.5's edge
+        // diffusion has no face).
+        const bool westCell = topo.west(gi);
+        const bool eastCell = topo.east(gi);
+        const bool southCell = topo.south(gj);
+        const bool northCell = topo.north(gj);
         // Far neighbors (in-field where the halo covers them, staged copies
         // at the interface slots).
         const real_t sIp2 = (i + 2 <= nxl + 1) ? s(j, i + 2) : fxp(j, i + 1);
@@ -217,6 +228,24 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
                       (difux * Asx(j, i - 1) / dx) * (s(j, i) - s(j, i - 1)) +
                       (difuy * Asy(j, i) / dy) * (s(j + 1, i) - s(j, i)) -
                       (difuy * Asy(j - 1, i) / dy) * (s(j, i) - s(j - 1, i)));
+        // Stage-3 T2 (W2.5, the 2026-10-26 Fix-B finding): diffusive mass
+        // through the global-edge faces, booked with the advective edge
+        // mass. The edge ghosts are zero-gradient copies taken before the
+        // Dirichlet (tide) reset, so a reset stage cell diffuses against
+        // its own pre-reset value; that exchange used to fall into the
+        // surface ledger residual. Audit only: the update is unchanged.
+        if (westCell) {
+          sumBoundary -= dt * (difux * Asx(j, i - 1) / dx) * (s(j, i) - s(j, i - 1));
+        }
+        if (eastCell) {
+          sumBoundary += dt * (difux * Asx(j, i) / dx) * (s(j, i + 1) - s(j, i));
+        }
+        if (southCell) {
+          sumBoundary -= dt * (difuy * Asy(j - 1, i) / dy) * (s(j, i) - s(j - 1, i));
+        }
+        if (northCell) {
+          sumBoundary += dt * (difuy * Asy(j, i) / dy) * (s(j + 1, i) - s(j, i));
+        }
 
         // Subsurface exchange (scalar.c:121-152): the seepage carries the
         // upwind concentration plus a two-point diffusive term against the
@@ -234,7 +263,25 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
           if (kTop >= 0) {
             topKsz = ksz(j, i, kTop);
             const real_t diffusive = 2.0 * dzzTop(j, i) / dz3d(j, i, kTop);
-            if (consistentExchange) {
+            if (held) {
+              // W5.9 (D9): the exfiltrated water's salt moves AS THE WATER
+              // LEAVES the subsurface — this step's fresh exfiltration
+              // (exfNew) carries sKp whether the exchange applied or is
+              // held; a held cell's share goes to the salt store (below,
+              // via the dry branch: sm carries it and the cell is dry).
+              // The APPLIED volume's held backlog carries no exchange salt
+              // (its salt already sits in the store, which the wet branch
+              // releases this very step).
+              if (exfNew(j, i) > 0.0) {
+                rate = exfNew(j, i) / dt * sKp(j, i);
+              } else if (qss(j, i) < 0.0) {
+                rate = qss(j, i) * s(j, i);
+              }
+              if (dept(j, i) > 0.0) {
+                rate += diffusive * (sKp(j, i) - s(j, i));
+              }
+              rate += vent(j, i) / (cellArea * dt) * sKp(j, i);
+            } else if (consistentExchange) {
               // The interface diffusion acts on every wet step, not only on
               // steps whose seepage rate is nonzero (subcycled windows
               // without a substep have qss = 0), and the post-allocation's
@@ -369,12 +416,14 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   real_t adjustMass = 0.0;
   real_t anchorMass = 0.0;
   real_t atmosMass = 0.0;
+  real_t storeInMass = 0.0;
+  real_t storeOutMass = 0.0;
   Kokkos::parallel_reduce(
       "transport_surface_update",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
           {1, 1}, {nyl + 1, nxl + 1}),
       KOKKOS_LAMBDA(const int j, const int i, real_t& sumAdjust, real_t& sumAnchor,
-                    real_t& sumAtmos) {
+                    real_t& sumAtmos, real_t& sumStoreIn, real_t& sumStoreOut) {
         const bool wet = (vflux(j, i) > 0.0 && dept(j, i) > 0.0);
         real_t value = wet ? sm(j, i) / vflux(j, i) : 0.0;
         const real_t raw = value;
@@ -411,6 +460,18 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
             value = limLo;
           }
           sumAdjust += (value - raw) * vflux(j, i);
+        } else if (store) {
+          // W5.7(a)/O4: a drying (or still-dry) cell's remaining scalar
+          // mass moves into the per-cell store instead of being deleted
+          // (D6); the W5.9 held-seepage salt arrives here too — the
+          // exchange credited sm on the dry cell. Only POSITIVE mass is
+          // storable: a negative dry-cell residual (an advective artifact
+          // of the slosh against the dry front) stays in surf_adjust as
+          // in the legacy path — a store must never hold negative salt.
+          const real_t keep = Kokkos::fmax(sm(j, i), 0.0);
+          sStore(j, i) += keep;
+          sumStoreIn += keep;
+          sumAdjust -= sm(j, i) - keep;
         } else {
           sumAdjust -= sm(j, i);
         }
@@ -418,15 +479,26 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
         // temperature is invariant under volume exchange at the cell's own
         // temperature, V2-A17).
         real_t vre = 0.0;
-        if (dilution && vflux(j, i) > 0.0) {
+        const bool rewetBasis =
+            store && dept(j, i) > 0.0 && sStore(j, i) > 0.0;
+        if (dilution && (vflux(j, i) > 0.0 || rewetBasis)) {
           const real_t area = (dept(j, i) > 0.0) ? cellArea : 0.0;
-          const real_t cellRain = rainRate * rainMask(j, i);
-          if (dept(j, i) > minDepth && cellRain > 0.0) {
-            vre += cellRain * area * dt;
+          if (etSurf) {
+            // W5.7(c)/D8: the actual per-cell volumes — rain AND
+            // evaporation together, masks already honoured by the fields
+            // (legacy: either/or on a global threshold test).
+            vre = (etRain(j, i) - etEvap(j, i)) * area;
           } else {
-            vre -= evapRate * area * dt;
+            const real_t cellRain = rainRate * rainMask(j, i);
+            if (dept(j, i) > minDepth && cellRain > 0.0) {
+              vre += cellRain * area * dt;
+            } else {
+              vre -= evapRate * area * dt;
+            }
           }
-          value = value * vflux(j, i) / (vflux(j, i) + vre);
+          if (vflux(j, i) > 0.0) {
+            value = value * vflux(j, i) / (vflux(j, i) + vre);
+          }
         }
         // Surface heat exchange (v2 Q5, plan §4.1): an explicit source on
         // the final volume basis, after the limiter — an atmospheric flux
@@ -445,17 +517,32 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
           value += dTv / vBasis;
           sumAtmos += dTv;
         }
+        // W5.7(b): the first wet step releases the store into the water
+        // (after the limiter, bounds and dilution — the released salt must
+        // not be clipped to the advective extrema; the anchor then closes
+        // the ledger on the final value). A cell rewetted from dry by rain
+        // alone has vflux = 0 (not `wet`) but a live vre volume — the
+        // release keys on the PRESENT water (dept) and the actual basis.
+        const bool rewet = store && dept(j, i) > 0.0 && sStore(j, i) > 0.0 &&
+                           vBasis > 0.0;
+        if (rewet) {
+          value += sStore(j, i) / vBasis;
+          sumStoreOut += sStore(j, i);
+          sStore(j, i) = 0.0;
+        }
         s(j, i) = value;
         // Ledger re-anchor: the mass now lives on the actual volume, not
         // the (lagged) flux volume the update divided by.
-        if (wet) {
+        if (wet || rewet) {
           sumAnchor += value * (dept(j, i) * cellArea - vBasis);
         }
       },
-      adjustMass, anchorMass, atmosMass);
+      adjustMass, anchorMass, atmosMass, storeInMass, storeOutMass);
   audit_.surfAdjust = adjustMass;
   audit_.surfAnchor = anchorMass;
   audit_.surfAtmos = atmosMass;
+  audit_.storeIn = storeInMass;
+  audit_.storeOut = storeOutMass;
 
   // Ghost, tide, and dry rules in the legacy order (scalar.c:263-288):
   // zero-gradient edge ghosts, then the Dirichlet stage salinity, then the

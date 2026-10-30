@@ -67,6 +67,18 @@ def canonical_cells() -> set[tuple[str, str, str]]:
         cells.add(("flux-gravity", "groundwater_bottom", coupled))
         cells.add(("scalar_value-temperature", "groundwater_bottom", coupled))
         cells.add(("scalar_cauchy", "groundwater_top", coupled))
+    # Stage-3 T2: the eta inflow-closure axis (plan §13.A). zero_gradient is
+    # the bitwise default (one `any` row suffices: the per-side eta rows
+    # above already cover eta x side x coupling); external is gated per
+    # coupling regime.
+    cells.add(("eta-inflow-zero_gradient", "surface", "any"))
+    for coupled in COUPLINGS:
+        cells.add(("eta-inflow-external", "surface", coupled))
+    # Stage-3 T8 (plan §12 W8.7): a BC whose polygon selects only faces on
+    # a periodic axis is a setup error (T3, BoundarySet.cpp) — one
+    # rejection cell per axis (regression.s3.pd6 probes both).
+    cells.add(("edge-bc", "periodic-x-axis", "any"))
+    cells.add(("edge-bc", "periodic-y-axis", "any"))
     # Whole-family schema rejections ride an `any` coupling axis.
     for kind, target in (
             ("scalar_value-salinity", "groundwater_top"),

@@ -16,7 +16,55 @@
 
 namespace frehg::swe {
 
+/// Stage-3 T2 (plan §6 W2.3): the advection stencils with the external
+/// reservoir state. Ext is a compile-time switch so the Ext = false
+/// instantiation folds every selector away and keeps the v2.0 expression
+/// trees verbatim (the default-bitwise gate verifies the result
+/// empirically). Under Ext = true:
+///  - a stencil value read ACROSS a reservoir face is the reservoir's
+///    velocity (uRes/vRes at that face);
+///  - SELF-advection across a reservoir face takes the conservative
+///    d(u^2/2) form, so a steady entrance from a reservoir at u_ext costs
+///    exactly (u^2 - u_ext^2)/2g of head (the 2026-10 diagnosis's 0.5
+///    weight, generalized to a moving reservoir);
+///  - outflow and every non-reservoir face keep the legacy upwind form.
+template <bool Ext>
+struct ExtStencil {
+  Field2<real_t> uu;    ///< face-centered x velocity
+  Field2<real_t> vv;    ///< face-centered y velocity
+  Field2<real_t> uRes;  ///< reservoir u at x reservoir faces
+  Field2<real_t> vRes;  ///< reservoir v at y reservoir faces
+  Field2<real_t> resX;  ///< x reservoir-face mask (nonzero = reservoir)
+  Field2<real_t> resY;  ///< y reservoir-face mask (nonzero = reservoir)
+
+  /// The x-velocity the advection stencil reads at face (j, i).
+  KOKKOS_INLINE_FUNCTION real_t uA(int j, int i) const {
+    if constexpr (Ext) {
+      return resX(j, i) != 0.0 ? uRes(j, i) : uu(j, i);
+    } else {
+      return uu(j, i);
+    }
+  }
+  /// The y-velocity the advection stencil reads at face (j, i).
+  KOKKOS_INLINE_FUNCTION real_t vA(int j, int i) const {
+    if constexpr (Ext) {
+      return resY(j, i) != 0.0 ? vRes(j, i) : vv(j, i);
+    } else {
+      return vv(j, i);
+    }
+  }
+};
+
 void SurfaceSolver::momentumSource() {
+  if (hasExternal_) {
+    momentumSourceImpl<true>();
+  } else {
+    momentumSourceImpl<false>();
+  }
+}
+
+template <bool Ext>
+void SurfaceSolver::momentumSourceImpl() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const real_t dx = grid_.dx();
@@ -25,6 +73,8 @@ void SurfaceSolver::momentumSource() {
   const real_t viscx = viscX_;
   const real_t viscy = viscY_;
   Field2<real_t> uu = uu_, vv = vv_, uy = uy_, vx = vx_;
+  const ExtStencil<Ext> st{uu_, vv_, uResX_, vResY_, resFaceX_, resFaceY_};
+  Field2<real_t> uRes = uResX_, vRes = vResY_, resX = resFaceX_, resY = resFaceY_;
   Field2<real_t> cflx = cflx_, cfly = cfly_;
   Field2<real_t> Vsx = Vsx_, Vsy = Vsy_, Asx = Asx_, Asy = Asy_, Aszx = Aszx_, Aszy = Aszy_;
   Field2<real_t> CDx = CDx_, CDy = CDy_;
@@ -52,17 +102,48 @@ void SurfaceSolver::momentumSource() {
         const real_t vxc = vx(j, i);
         const real_t uyc = uy(j, i);
 
-        // Upwind advection (shallowwater.c:158-165).
+        // Upwind advection (shallowwater.c:158-165). Under Ext the
+        // self-advection across a reservoir face takes the conservative
+        // d(u^2/2) form and the cross/neighbor reads take the reservoir
+        // state (the ExtStencil header comment); Ext = false folds to the
+        // legacy expressions verbatim.
+        real_t advSelfX;
+        real_t advSelfY;
+        if constexpr (Ext) {
+          if (u > 0.0 && resX(j, i - 1) != 0.0) {
+            const real_t uE = uRes(j, i - 1);
+            advSelfX = (u * u - uE * uE) / (2.0 * dx);
+          } else if (u < 0.0 && resX(j, i + 1) != 0.0) {
+            const real_t uE = uRes(j, i + 1);
+            advSelfX = (uE * uE - u * u) / (2.0 * dx);
+          } else {
+            advSelfX = (0.5 / dx) * ((u + Kokkos::fabs(u)) * (u - st.uA(j, i - 1)) +
+                                     (u - Kokkos::fabs(u)) * (st.uA(j, i + 1) - u));
+          }
+          if (v > 0.0 && resY(j - 1, i) != 0.0) {
+            const real_t vE = vRes(j - 1, i);
+            advSelfY = (v * v - vE * vE) / (2.0 * dy);
+          } else if (v < 0.0 && resY(j + 1, i) != 0.0) {
+            const real_t vE = vRes(j + 1, i);
+            advSelfY = (vE * vE - v * v) / (2.0 * dy);
+          } else {
+            advSelfY = (0.5 / dy) * ((v + Kokkos::fabs(v)) * (v - st.vA(j - 1, i)) +
+                                     (v - Kokkos::fabs(v)) * (st.vA(j + 1, i) - v));
+          }
+        } else {
+          advSelfX = (0.5 / dx) * ((u + Kokkos::fabs(u)) * (u - uu(j, i - 1)) +
+                                   (u - Kokkos::fabs(u)) * (uu(j, i + 1) - u));
+          advSelfY = (0.5 / dy) * ((v + Kokkos::fabs(v)) * (v - vv(j - 1, i)) +
+                                   (v - Kokkos::fabs(v)) * (vv(j + 1, i) - v));
+        }
         real_t advX =
-            (0.5 / dx) * ((u + Kokkos::fabs(u)) * (u - uu(j, i - 1)) +
-                          (u - Kokkos::fabs(u)) * (uu(j, i + 1) - u)) +
-            (0.5 / dy) * ((vxc + Kokkos::fabs(vxc)) * (u - uu(j - 1, i)) +
-                          (vxc - Kokkos::fabs(vxc)) * (uu(j + 1, i) - u));
+            advSelfX +
+            (0.5 / dy) * ((vxc + Kokkos::fabs(vxc)) * (u - st.uA(j - 1, i)) +
+                          (vxc - Kokkos::fabs(vxc)) * (st.uA(j + 1, i) - u));
         real_t advY =
-            (0.5 / dx) * ((uyc + Kokkos::fabs(uyc)) * (v - vv(j, i - 1)) +
-                          (uyc - Kokkos::fabs(uyc)) * (vv(j, i + 1) - v)) +
-            (0.5 / dy) * ((v + Kokkos::fabs(v)) * (v - vv(j - 1, i)) +
-                          (v - Kokkos::fabs(v)) * (vv(j + 1, i) - v));
+            (0.5 / dx) * ((uyc + Kokkos::fabs(uyc)) * (v - st.vA(j, i - 1)) +
+                          (uyc - Kokkos::fabs(uyc)) * (st.vA(j, i + 1) - v)) +
+            advSelfY;
         advX = cflDampedAdvection(advX, u, cflx(j, i));
         advY = cflDampedAdvection(advY, v, cfly(j, i));
 
@@ -176,17 +257,31 @@ void SurfaceSolver::updateVelocityField() {
 }
 
 void SurfaceSolver::interpolateVelocity() {
+  if (hasExternal_) {
+    interpolateVelocityImpl<true>();
+  } else {
+    interpolateVelocityImpl<false>();
+  }
+}
+
+template <bool Ext>
+void SurfaceSolver::interpolateVelocityImpl() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   Field2<real_t> uu = uu_, vv = vv_, uy = uy_, vx = vx_;
+  const ExtStencil<Ext> st{uu_, vv_, uResX_, vResY_, resFaceX_, resFaceY_};
 
+  // uy/vx feed only momentumSource; under Ext the reservoir faces enter
+  // the four-point interpolation at the reservoir state.
   Kokkos::parallel_for(
       "swe_interp_velocity",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
           {1, 1}, {nyl + 1, nxl + 1}),
       KOKKOS_LAMBDA(const int j, const int i) {
-        uy(j, i) = 0.25 * (uu(j, i) + uu(j, i - 1) + uu(j + 1, i) + uu(j + 1, i - 1));
-        vx(j, i) = 0.25 * (vv(j, i) + vv(j - 1, i) + vv(j, i + 1) + vv(j - 1, i + 1));
+        uy(j, i) = 0.25 * (st.uA(j, i) + st.uA(j, i - 1) + st.uA(j + 1, i) +
+                           st.uA(j + 1, i - 1));
+        vx(j, i) = 0.25 * (st.vA(j, i) + st.vA(j - 1, i) + st.vA(j, i + 1) +
+                           st.vA(j - 1, i + 1));
       });
 }
 

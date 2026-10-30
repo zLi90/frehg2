@@ -64,10 +64,23 @@ Grid::Grid(MPI_Comm comm, const DomainConfig& domain)
                           << nxLocal_ << " x " << nyLocal_ << " cells); use fewer ranks");
   }
 
-  rankWest_ = (pi_ > 0) ? rank_ - 1 : MPI_PROC_NULL;
-  rankEast_ = (pi_ + 1 < px_) ? rank_ + 1 : MPI_PROC_NULL;
-  rankSouth_ = (pj_ > 0) ? rank_ - px_ : MPI_PROC_NULL;
-  rankNorth_ = (pj_ + 1 < py_) ? rank_ + px_ : MPI_PROC_NULL;
+  // Stage-3 T3 (plan §7 W3.2): a periodic axis wraps the neighbor ranks —
+  // halo exchanges, the gid halo exchange (and with it the matrix legs),
+  // and every rank-based ghost fill then follow automatically. With
+  // px == 1 the wrap is a self-message (legal through Sendrecv/Isend);
+  // with px == 2 both neighbors are the same rank and the paired tags
+  // (100/101 here, 200+dir vs 200+(dir^1) in HaloExchanger) keep the two
+  // messages apart. Verified by mpi.halo's periodic case at n = 1, 2, 4.
+  periodicX_ = domain.periodicX;
+  periodicY_ = domain.periodicY;
+  rankWest_ = (pi_ > 0) ? rank_ - 1
+                        : (periodicX_ ? rank_ + (px_ - 1) : MPI_PROC_NULL);
+  rankEast_ = (pi_ + 1 < px_) ? rank_ + 1
+                              : (periodicX_ ? rank_ - (px_ - 1) : MPI_PROC_NULL);
+  rankSouth_ = (pj_ > 0) ? rank_ - px_
+                         : (periodicY_ ? rank_ + px_ * (py_ - 1) : MPI_PROC_NULL);
+  rankNorth_ = (pj_ + 1 < py_) ? rank_ + px_
+                               : (periodicY_ ? rank_ - px_ * (py_ - 1) : MPI_PROC_NULL);
 
   // Default mask: everything active.
   HostField2<int> allActive("ktop_default", static_cast<std::size_t>(nyLocal_),

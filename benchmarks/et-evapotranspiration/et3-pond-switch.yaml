@@ -1,0 +1,83 @@
+# et3 — the pond-to-soil switch with time-basis complementarity (Stage-3
+# plan §9, T5): a saturated 1 x 1 x 20 sand column with the water table
+# at the surface, a 0.4 mm pond, the full et-met demand, SUBCYCLED
+# dt = 1 s with dtg FIXED at 7 s so the dry-out lands inside a window
+# (outputs every 70 s = 10 dtg align with substep ends). The pond phase
+# is pure open water (E_w t to 1e-12), the switch frame has
+# 0 < wet fraction < 1, and after dry-out the soil channel continues at
+# the same rate while alpha_1 = 1 (theta_s = 0.41 >= 0.375). The gate's
+# real negative is the harness-generated v2.0 lane (surface bulk evap +
+# groundwater_top flux): its window-lag double count violates the
+# combined-rate identity by > 1e-3. Harness lanes: bulk (this file),
+# prescribed (E = 1.3e-6), v20-negative.
+simulation:
+  id: et3-pond-switch
+  title: Stage-3 et3 open-water to soil evaporation switch
+
+domain:
+  nx: 1
+  ny: 1
+  nz: 20
+  dx: 1.0
+  dy: 1.0
+  dz: 0.05
+  bottom_elevation: {constant: 0.0}
+
+time:
+  dt: 1.0
+  t_end: 910.0
+  output_interval: 70.0
+
+modules:
+  surface_water: true
+  groundwater: true
+
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-03
+
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep: {dt_init: 7.0, dt_min: 7.0, dt_max: 7.0}
+  specific_storage: 1.0e-5
+  reallocation: disabled
+
+soil:
+  types:
+    - {name: sand, ksx: 1.0e-4, ksy: 1.0e-4, ksz: 1.0e-4,
+       theta_s: 0.41, theta_r: 0.05, vg_alpha: 4.0, vg_n: 2.5}
+  map: {constant: sand}
+
+coupling: {mode: subcycled}
+
+atmosphere:
+  air_temperature: {constant: 25.0}
+  surface_temperature: {constant: 30.0}
+  pressure: {constant: 101.3}
+  relative_humidity: {constant: 0.3}
+  wind_speed: {constant: 8.0}
+  wind_speed_floor: 0.5
+
+evapotranspiration:
+  potential: bulk
+  open_water: true
+  soil:
+    limiter: alpha_barton
+
+initial_conditions:
+  surface:
+    eta: {constant: 4.0e-4}
+  groundwater:
+    water_table: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+    groundwater: [hydraulic_head, water_content]
+    atmosphere: [evaporation_rate, soil_evaporation_rate, wet_time, soil_evaporation_time]

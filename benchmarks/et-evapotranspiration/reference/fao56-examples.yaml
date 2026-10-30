@@ -1,0 +1,122 @@
+# fao56-examples.yaml — transcription of the FAO-56 Chapter 4 worked
+# examples (Stage-3 plan §11, et0 part 4). Source: Allen, Pereira, Raes,
+# Smith (1998), FAO Irrigation and Drainage Paper 56 (document X0490E);
+# the owner-provided PDF `references/FAO 56.pdf` (print pages given; PDF
+# sheet = print page + 26). Transcribed 2026-10-29 from print pages
+# 72-73 (Example 18) and 74-76 (Example 19); the recalled values in the
+# plan (0.63 mm/h, 3.9 mm/d) were treated as untrusted and re-read.
+# Every value is checked by scripts/test_et_gates.py (fao56 lanes) to
+# the published precision (last printed digit +- 1).
+
+daily:                       # EXAMPLE 18, Uccle (Brussels), 6 July
+  page: "72-73"
+  inputs:
+    t_max_c: 21.5
+    t_min_c: 12.3
+    rh_max_pct: 84.0
+    rh_min_pct: 63.0
+    wind_10m_kmh: 10.0
+    sunshine_hours: 9.25
+    altitude_m: 100.0
+    latitude: "50d48m N"
+    julian_day: 187
+  intermediates:             # value, as printed
+    u2_ms: 2.078             # Eq. 47: 0.748 * 2.78
+    pressure_kpa: 100.1      # Eq. 7
+    t_mean_c: 16.9
+    delta_kpa_per_c: 0.122   # Eq. 13 at T_mean
+    gamma_kpa_per_c: 0.0666  # Eq. 8
+    one_plus_034u2: 1.71
+    delta_term: 0.518        # D/[D + g(1+0.34u2)]
+    gamma_term: 0.282        # g/[D + g(1+0.34u2)]
+    wind_factor: 6.450       # 900/(T+273) u2
+    e0_tmax_kpa: 2.564       # Eq. 11
+    e0_tmin_kpa: 1.431
+    es_kpa: 1.997
+    ea_kpa: 1.409            # Eq. 17
+    deficit_kpa: 0.589
+    ra_mj: 41.09             # Eq. 21
+    daylight_hours: 16.1     # Eq. 34
+    n_over_bign: 0.57
+    rs_mj: 22.07             # Eq. 35 (Angstrom 0.25/0.50)
+    rso_mj: 30.90            # Eq. 37
+    rs_over_rso: 0.71
+    rns_mj: 17.00            # Eq. 38 (albedo 0.23)
+    sigma_tmax4_mj: 36.96
+    sigma_tmin4_mj: 32.56
+    sigma_t4_mean_mj: 34.76
+    emissivity_term: 0.17    # 0.34 - 0.14 sqrt(ea)
+    cloud_term: 0.61         # 1.35 Rs/Rso - 0.35
+    rnl_mj: 3.71             # Eq. 39
+    rn_mj: 13.28             # Eq. 40
+    g_mj: 0.0                # Eq. 42 (daily: G = 0)
+    radiation_mm: 5.42       # 0.408 (Rn - G)
+    radiation_term_mm: 2.81
+    wind_term_mm: 1.07
+  result:
+    et0_mm_per_day: 3.88     # printed "2.81 + 1.07 = 3.88 ~ 3.9"
+    et0_rounded: 3.9
+
+hourly:                      # EXAMPLE 19, N'Diaye (Senegal), 1 October
+  page: "74-76"
+  # 16d13'N, 16d15'W, 8 m a.s.l.; sigma_hourly = 2.043e-10 MJ m-2 K-4 h-1
+  # (print p. 74); Lz = 15 deg, Lm = 16.25 deg; Eq. 53 wind constant 37.
+  inputs:
+    altitude_m: 8.0
+    julian_day: 274
+    lane_1400_1500:
+      t_hr_c: 38.0
+      rh_pct: 52.0
+      u2_ms: 3.3
+      rs_mj_per_h: 2.450
+      rs_over_rso_assumed: null   # computed (0.922)
+    lane_0200_0300:
+      t_hr_c: 28.0
+      rh_pct: 90.0
+      u2_ms: 1.9
+      rs_mj_per_h: 0.0
+      rs_over_rso_assumed: 0.8    # printed "(assumed)"
+  intermediates:
+    lane_1400_1500:
+      delta_kpa_per_c: 0.358     # Eq. 13
+      gamma_kpa_per_c: 0.0673    # Eq. 8 (P at 8 m)
+      e0_kpa: 6.625              # Eq. 11
+      ea_kpa: 3.445              # Eq. 54
+      deficit_kpa: 3.180
+      t_mid_h: 14.5
+      omega_rad: 0.682           # Eq. 31
+      omega1_rad: 0.5512         # Eq. 29
+      omega2_rad: 0.8130         # Eq. 30
+      ra_mj_per_h: 3.543         # Eq. 28
+      rso_mj_per_h: 2.658        # Eq. 37
+      rns_mj_per_h: 1.887        # Eq. 38
+      sigma_tk4_mj_per_h: 1.915
+      emissivity_term: 0.080
+      rs_over_rso: 0.922
+      cloud_term: 0.894
+      rnl_mj_per_h: 0.137        # Eq. 39
+      rn_mj_per_h: 1.749         # Eq. 40
+      g_mj_per_h: 0.175          # Eq. 46: G = 0.1 Rn (daylight)
+      rn_minus_g_mj: 1.574
+      radiation_mm: 0.642        # 0.408 (Rn - G)
+      radiation_term_mm: 0.46
+      wind_term_mm: 0.17
+    lane_0200_0300:
+      delta_kpa_per_c: 0.220
+      gamma_kpa_per_c: 0.0673
+      e0_kpa: 3.780
+      ea_kpa: 3.402
+      deficit_kpa: 0.378
+      ra_mj_per_h: 0.0
+      sigma_tk4_mj_per_h: 1.681
+      emissivity_term: 0.082
+      cloud_term: 0.730
+      rnl_mj_per_h: 0.100
+      rn_mj_per_h: -0.100
+      g_mj_per_h: -0.050         # Eq. 45: G = 0.5 Rn (night)
+      radiation_mm: -0.020
+      radiation_term_mm: -0.01
+      wind_term_mm: 0.01
+  result:
+    et0_1400_1500_mm_per_h: 0.63
+    et0_0200_0300_mm_per_h: 0.00

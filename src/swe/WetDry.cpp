@@ -364,10 +364,12 @@ void SurfaceSolver::enforceVeloBc(VeloBcApply apply) {
   if (!etaBcs_.empty()) {
     const bool edgeOnly = (apply == VeloBcApply::Refresh);
     const real_t dt = dt_;
-    const int nxGlobal = grid_.nx();
-    const int nyGlobal = grid_.ny();
     const int i0 = grid_.i0();
     const int j0 = grid_.j0();
+    // Stage-3 T3: a periodic axis has no boundary face to reconstruct —
+    // the EdgeTopology predicates are all false there (the stage cell's
+    // wrapped faces are interior and keep their computed velocities).
+    const Grid::EdgeTopology topo = grid_.edgeTopology();
     Field2<real_t> eta = eta_, etan = etan_, Asz = Asz_, Asx = Asx_, Asy = Asy_;
     Field2<real_t> Fu = Fu_, Fv = Fv_;
     for (const DeviceBcList& list : etaBcs_) {
@@ -382,25 +384,60 @@ void SurfaceSolver::enforceVeloBc(VeloBcApply apply) {
             const int gi = i0 + i - 1;
             const int gj = j0 + j - 1;
             const real_t Fw = (eta(j, i) - etan(j, i)) * Asz(j, i) / dt;
-            if (gi == 0) {
+            if (topo.west(gi)) {
               const real_t Ftot = -Fu(j, i) - Fv(j, i) + Fv(j - 1, i) - Fw;
               uu(j, 0) = (Asx(j, i) > 0.0) ? -Ftot / Asx(j, i) : 0.0;
             }
-            if (gi == nxGlobal - 1 && !edgeOnly) {
+            if (topo.east(gi) && !edgeOnly) {
               const real_t Ftot = Fu(j, i - 1) - Fv(j, i) + Fv(j - 1, i) - Fw;
               uu(j, i) = (Asx(j, i) > 0.0) ? Ftot / Asx(j, i) : 0.0;
             }
-            if (gj == 0) {
+            if (topo.south(gj)) {
               const real_t Ftot = -Fv(j, i) - Fu(j, i) + Fu(j, i - 1) - Fw;
               vv(0, i) = (Asy(j, i) > 0.0) ? -Ftot / Asy(j, i) : 0.0;
             }
-            if (gj == nyGlobal - 1 && !edgeOnly) {
+            if (topo.north(gj) && !edgeOnly) {
               const real_t Ftot = Fv(j - 1, i) - Fu(j, i) + Fu(j, i - 1) - Fw;
               vv(j, i) = (Asy(j, i) > 0.0) ? Ftot / Asy(j, i) : 0.0;
             }
           });
     }
   }
+}
+
+void SurfaceSolver::routeStageDeposits(const Field2<real_t>& deposit) {
+  // Stage-3 T2 (W2.4; owner decision O2). The coupled deposits on
+  // prescribed-stage cells (the coupler's gain field) used to act on the
+  // adjacent faces for one velocity update and then vanish unbooked at the
+  // next stage enforcement — the x-asymmetric pressure kick that seeded
+  // the 2026-10 campaign gyre (report_V1 Fix B) and the b6 regime's
+  // unclosed audit term (dod-Q7). Now: booked on EVERY stage cell, and on
+  // EXTERNAL-closure cells also removed from eta before updateVelocity
+  // reads it (the reservoir absorbs the exchange); zero_gradient cells
+  // keep the v2.0 dynamics bitwise — the deposit is measured, not moved.
+  if (etaBcs_.empty()) {
+    return;
+  }
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const real_t cellArea = grid_.dx() * grid_.dy();
+  Field2<real_t> eta = eta_, marker = isEtaBc_, extMark = isExternalStage_;
+  Field2<real_t> gain = deposit;
+  real_t booked = 0.0;
+  Kokkos::parallel_reduce(
+      "swe_stage_deposit_route",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i, real_t& sum) {
+        if (marker(j, i) != 0.0 && gain(j, i) != 0.0) {
+          if (extMark(j, i) > 0.0) {
+            eta(j, i) -= gain(j, i);
+          }
+          sum += gain(j, i) * cellArea;
+        }
+      },
+      booked);
+  audit_.stageDeposit += booked;
 }
 
 void SurfaceSolver::fillVelocityGhostCorners() {

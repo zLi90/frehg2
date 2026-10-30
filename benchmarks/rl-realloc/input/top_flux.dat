@@ -1,0 +1,23 @@
+# rl2 top-face flux series [m/s], negative = infiltration (the b3 sign
+# convention): -8e-7 for the first 1800 s of every 3600 s, 1 s ramps.
+# The rate sits below the silt Ksat (1e-6 m/s) so the top cells
+# approach saturation without a forced oversaturation the box cannot
+# transmit (first-execution finding: a 2e-5 pulse lost 89 % of T as
+# vloss/realloc_dropped in BOTH modes).
+0 -8.0e-7
+1799 -8.0e-7
+1800 0.0
+3599 0.0
+3600 -8.0e-7
+5399 -8.0e-7
+5400 0.0
+7199 0.0
+7200 -8.0e-7
+8999 -8.0e-7
+9000 0.0
+10799 0.0
+10800 -8.0e-7
+12599 -8.0e-7
+12600 0.0
+14399 0.0
+14400 0.0

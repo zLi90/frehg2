@@ -1,0 +1,60 @@
+# pd4 — "the seam is not a boundary" ledger gate (Stage-3 plan §7, T3).
+# The ob3 tidal basin made periodic in x (no x walls): the surface ledger
+# must close with the boundary audit seeing ONLY the y+ stage exchange —
+# the x seam books exactly nothing (the FreeSurface edge-audit TOPO
+# conversion). The tide stage uses closure external (T2).
+#
+# THE domain.periodic KEY IS THE T3 TARGET SCHEMA (gate-first, plan §2.3).
+simulation:
+  id: pd4-tidal-periodic
+  title: Stage-3 pd4 periodic-x tidal basin ledger
+
+domain:
+  nx: 10
+  ny: 20
+  nz: 1
+  dx: 10.0
+  dy: 10.0
+  dz: 1.0
+  bottom_elevation: {constant: -2.0}
+  periodic: {x: true}
+
+time:
+  dt: 5.0
+  t_end: 7200.0
+  output_interval: 300.0
+
+modules:
+  surface_water: true
+
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient: {constant: 0.02}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+
+initial_conditions:
+  surface:
+    eta: {constant: 0.0}
+
+boundary_conditions:
+  - name: tide-stage
+    region: {polygon: [[-1.0, 190.0], [101.0, 190.0], [101.0, 201.0], [-1.0, 201.0]]}
+    target: surface
+    kind: eta
+    value: {series: {file: input/tide.dat}}
+    inflow:
+      closure: external
+  - name: wall-south
+    region: {polygon: [[-1.0, -1.0], [101.0, -1.0], [101.0, 10.0], [-1.0, 10.0]]}
+    target: surface
+    kind: velocity
+    value: {constant: 0.0}
+
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth, uu, vv]

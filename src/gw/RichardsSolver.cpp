@@ -67,6 +67,16 @@ RichardsSolver::RichardsSolver(const Grid& grid, const FrehgConfig& config,
   useFull3d_ = gw.useFull3d;
   surplusRedistribute_ =
       (gw.reallocationSurplus == GroundwaterConfig::ReallocationSurplus::Redistribute);
+  reallocOff_ = (gw.reallocation == GroundwaterConfig::Reallocation::Off);
+  // Per-cell cumulative creation/drop diagnostics (Stage-3 W1.3): allocated
+  // only when an output requests them, so default runs are untouched (a
+  // restarted diagnostic run requests the same outputs, so the checkpoint
+  // fields exist on both sides).
+  for (const std::string& var : config.output.groundwaterVariables) {
+    if (var == "realloc_created" || var == "realloc_dropped") {
+      reallocDiag_ = true;
+    }
+  }
   dtMin_ = gw.timestep.dtMin;
   dtMax_ = gw.timestep.dtMax;
   dqGrow_ = gw.timestep.dqGrow;
@@ -110,6 +120,12 @@ RichardsSolver::RichardsSolver(const Grid& grid, const FrehgConfig& config,
   room_ = alloc("gw_room");
   sendUp_ = alloc("gw_send_up");
   sendDown_ = alloc("gw_send_down");
+  if (reallocDiag_) {
+    reallocCreated_ = alloc("gw_realloc_created");
+    reallocDroppedCell_ = alloc("gw_realloc_dropped");
+    Kokkos::deep_copy(reallocCreated_, 0.0);
+    Kokkos::deep_copy(reallocDroppedCell_, 0.0);
+  }
   qOut_ = alloc("gw_q_out");
 
   // Density/viscosity ratio hooks: present in every formula, held at 1
@@ -153,6 +169,8 @@ RichardsSolver::RichardsSolver(const Grid& grid, const FrehgConfig& config,
   stageSoil(config);
   buildBoundaryLists(boundaries, config);
   setupBulkEvaporation(config);
+  setupEvapotranspiration(config);
+  setupVegetation(config);
   updateBoundaryValues(config.time.tStart);
   applyInitialConditions(config);
 
@@ -257,6 +275,40 @@ void RichardsSolver::stageSoil(const FrehgConfig& config) {
   fill(wcs_, [](const SoilType& t) { return t.thetaS; });
   fill(wcr_, [](const SoilType& t) { return t.thetaR; });
   fill(aev_, [](const SoilType& t) { return t.aev; });
+  // Stage-3 T5 (W5.1): per-cell field capacity for the ET beta limiter —
+  // the configured theta_fc, else theta(h = -3.3 m) from van Genuchten.
+  // Host-only (setupEvapotranspiration reads the column tops). T7 stages
+  // the soil albedo of the PM soil channel alongside (0 when the type
+  // declares none; the schema requires it exactly when PM consumes it).
+  {
+    thetaFcHost_ = HostField3<real_t>("gw_theta_fc_host",
+                                      static_cast<std::size_t>(nyl) + 2,
+                                      static_cast<std::size_t>(nxl) + 2,
+                                      static_cast<std::size_t>(nz));
+    albedoHost_ = HostField3<real_t>("gw_albedo_host",
+                                     static_cast<std::size_t>(nyl) + 2,
+                                     static_cast<std::size_t>(nxl) + 2,
+                                     static_cast<std::size_t>(nz));
+    for (int j = 0; j < nyl; ++j) {
+      for (int i = 0; i < nxl; ++i) {
+        for (int k = 0; k < nz; ++k) {
+          const SoilType& type =
+              soil.types[static_cast<std::size_t>(typeIndex[(static_cast<std::size_t>(j) *
+                                                                 static_cast<std::size_t>(nxl) +
+                                                             static_cast<std::size_t>(i)) *
+                                                                static_cast<std::size_t>(nz) +
+                                                            static_cast<std::size_t>(k)])];
+          thetaFcHost_(static_cast<std::size_t>(j) + 1, static_cast<std::size_t>(i) + 1,
+                       static_cast<std::size_t>(k)) =
+              type.hasThetaFc ? type.thetaFc
+                              : atm::thetaFcFromRetention(type.thetaR, type.thetaS,
+                                                          type.vgAlpha, type.vgN);
+          albedoHost_(static_cast<std::size_t>(j) + 1, static_cast<std::size_t>(i) + 1,
+                      static_cast<std::size_t>(k)) = type.hasAlbedo ? type.albedo : 0.0;
+        }
+      }
+    }
+  }
 
   // Interface halos carry the true neighbor soil; domain-edge ghosts mirror
   // the interior (the soil map is static, so once is enough).
@@ -689,6 +741,11 @@ void RichardsSolver::step(real_t t, real_t dtg) {
   if (cpl_.active) {
     classifyCoupledTop(dtg);
   }
+  // Stage-3 T5 (W5.4): the ET soil channel's per-substep flux — after
+  // the wcn freeze (its cap and limiters read theta^n) and the coupled
+  // top classification (a wet column's channel stands down).
+  updateEvapotranspiration(t, dtg);
+  updateTranspiration(t, dtg);
   computeFaceConductivity();
   assembleSystem(dtg);
   fillAndSolve();
@@ -710,6 +767,10 @@ void RichardsSolver::step(real_t t, real_t dtg) {
   if (transportWindow_) {
     Kokkos::deep_copy(qzPathCorr_, 0.0);
   }
+  // Stage-3 T1 (S3-A4): under groundwater.reallocation: disabled the sweep
+  // runs with its non-conservative actions removed (Reallocate.cpp header,
+  // incl. the vadose domain-of-applicability note); the call order is the
+  // legacy order in both modes, and legacy is byte-identical to v2.0.
   reallocateWaterContent();
   finalizeWaterContent();
   enforceMoistureBc();
@@ -733,6 +794,9 @@ void RichardsSolver::enableTransportWindow() {
   qzPathCorr_ =
       Field3<real_t>("gw_qz_path_corr", qzF_.extent(0), qzF_.extent(1), qzF_.extent(2));
   ventWin_ = Field2<real_t>("gw_vent_window", qzF_.extent(0), qzF_.extent(1));
+  vapWin_ = Field2<real_t>("gw_vap_window", qzF_.extent(0), qzF_.extent(1));
+  sinkWin_ = Field3<real_t>("gw_sink_window", qx_.extent(0), qx_.extent(1),
+                            static_cast<std::size_t>(grid_.nz()));
   resetTransportWindow();
   Kokkos::deep_copy(qzPathCorr_, 0.0);
 }
@@ -745,6 +809,8 @@ void RichardsSolver::resetTransportWindow() {
   Kokkos::deep_copy(qyWin_, 0.0);
   Kokkos::deep_copy(qzWin_, 0.0);
   Kokkos::deep_copy(ventWin_, 0.0);
+  Kokkos::deep_copy(vapWin_, 0.0);
+  Kokkos::deep_copy(sinkWin_, 0.0);
 }
 
 void RichardsSolver::accumulateTransportWindow(real_t dtg) {
@@ -769,6 +835,36 @@ void RichardsSolver::accumulateTransportWindow(real_t dtg) {
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         wz(j, i, k) += (qzF(j, i, k) + corr(j, i, k)) * dtg;
       });
+  if (etActive_) {
+    // Stage-3 T5 (W5.6): the channel's vapor volume this window [m^3],
+    // the exact concentration basis of the W5.8 top-cell factor.
+    const real_t az = mesh_.areaZ();
+    Field2<real_t> vap = vapWin_;
+    Field2<real_t> q = qVap_;
+    Kokkos::parallel_for(
+        "gw_transport_window_vap",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {0, 0}, {static_cast<int>(vap.extent(0)), static_cast<int>(vap.extent(1))}),
+        KOKKOS_LAMBDA(const int j, const int i) {
+          vap(j, i) += q(j, i) * az * dtg;
+        });
+  }
+  if (vegActive_) {
+    // Stage-3 T6 (W6.5): the root-uptake volume per cell this window
+    // [m^3] — the exact concentration basis of the per-cell sink factor.
+    const real_t az = mesh_.areaZ();
+    Field3<real_t> win = sinkWin_;
+    Field3<real_t> sink = sink_;
+    Field3<real_t> dz3d = mesh_.dz3d();
+    Kokkos::parallel_for(
+        "gw_transport_window_sink",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
+            {0, 0, 0}, {static_cast<int>(win.extent(0)), static_cast<int>(win.extent(1)),
+                        static_cast<int>(win.extent(2))}),
+        KOKKOS_LAMBDA(const int j, const int i, const int k) {
+          win(j, i, k) += sink(j, i, k) * az * dz3d(j, i, k) * dtg;
+        });
+  }
 }
 
 void RichardsSolver::refreshDerivedState() {
@@ -856,10 +952,9 @@ void RichardsSolver::accumulateBoundaryFlux(real_t dtg) {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const int nz = grid_.nz();
-  const int nxGlobal = grid_.nx();
-  const int nyGlobal = grid_.ny();
   const int i0 = grid_.i0();
   const int j0 = grid_.j0();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
   Field3<real_t> qx = qx_, qy = qy_, qzF = qzF_;
   Field3<PetscInt> gid = grid_.gid3();
 
@@ -884,16 +979,16 @@ void RichardsSolver::accumulateBoundaryFlux(real_t dtg) {
         if (k == nz - 1) {
           sum += qzF(j, i, k + 1) * dtg;
         }
-        if (gi == 0) {
+        if (topo.west(gi)) {
           sum -= qx(j, i - 1, k) * dtg;
         }
-        if (gi == nxGlobal - 1) {
+        if (topo.east(gi)) {
           sum += qx(j, i, k) * dtg;
         }
-        if (gj == 0) {
+        if (topo.south(gj)) {
           sum -= qy(j - 1, i, k) * dtg;
         }
-        if (gj == nyGlobal - 1) {
+        if (topo.north(gj)) {
           sum += qy(j, i, k) * dtg;
         }
       },

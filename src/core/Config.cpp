@@ -68,6 +68,10 @@ DomainConfig extractDomain(const YAML::Node& node) {
   out.dzStretch = valueOr<real_t>(node["dz_stretch"], 1.0);
   out.bottomElevation = extractFileOrConstant(node["bottom_elevation"]);
   out.followTerrain = valueOr<bool>(node["follow_terrain"], false);
+  if (node["periodic"].IsDefined()) {
+    out.periodicX = valueOr<bool>(node["periodic"]["x"], false);
+    out.periodicY = valueOr<bool>(node["periodic"]["y"], false);
+  }
   out.terrainLayers =
       valueOr<std::string>(node["terrain_layers"], "scaled") == "uniform"
           ? DomainConfig::TerrainLayers::Uniform
@@ -192,7 +196,106 @@ AtmosphereConfig extractAtmosphere(const YAML::Node& node) {
   if (node["longwave_in"].IsDefined()) {
     out.longwaveIn = extractSeriesOrConstant(node["longwave_in"]);
   }
+  if (node["shortwave_incoming"].IsDefined()) {
+    out.shortwaveIncoming = extractSeriesOrConstant(node["shortwave_incoming"]);
+  }
   out.windSpeedFloor = valueOr<real_t>(node["wind_speed_floor"], 0.5);
+  const YAML::Node aero = node["aerodynamic_resistance"];
+  if (aero.IsDefined()) {
+    const std::string law = valueOr<std::string>(aero["law"], "liu2006");
+    out.aeroResistance = law == "fao56" ? AtmosphereConfig::AeroResistance::Fao56
+                         : law == "log_profile"
+                             ? AtmosphereConfig::AeroResistance::LogProfile
+                             : AtmosphereConfig::AeroResistance::Liu2006;
+    out.aeroRefHeight = valueOr<real_t>(aero["reference_height"], 2.0);
+    out.aeroZ0m = valueOr<real_t>(aero["z0m"], 0.01);
+    out.aeroZ0h = valueOr<real_t>(aero["z0h"], 0.001);
+    out.aeroDisplacement = valueOr<real_t>(aero["displacement"], 0.0);
+  }
+  return out;
+}
+
+VegetationConfig extractVegetation(const YAML::Node& node) {
+  VegetationConfig out;
+  out.enabled = true;
+  for (const YAML::Node& typeNode : node["types"]) {
+    VegetationType type;
+    type.name = typeNode["name"].as<std::string>();
+    type.lai = typeNode["lai"].as<real_t>();
+    type.extinction = typeNode["extinction"].as<real_t>();
+    type.leafResistance = typeNode["leaf_resistance"].as<real_t>();
+    type.rootDepth = typeNode["root_depth"].as<real_t>();
+    type.profile = valueOr<std::string>(typeNode["root_profile"], "uniform") == "linear"
+                       ? VegetationType::RootProfile::Linear
+                       : VegetationType::RootProfile::Uniform;
+    const YAML::Node fed = typeNode["feddes"];
+    type.h3 = fed["h3"].as<real_t>();
+    type.h4 = fed["h4"].as<real_t>();
+    if (fed["h1"].IsDefined()) {
+      type.hasH12 = true;
+      type.h1 = fed["h1"].as<real_t>();
+      type.h2 = fed["h2"].as<real_t>();
+    }
+    if (typeNode["albedo"].IsDefined()) {
+      type.hasAlbedo = true;
+      type.albedo = typeNode["albedo"].as<real_t>();
+    }
+    out.types.push_back(std::move(type));
+  }
+  const YAML::Node mapNode = node["map"];
+  if (mapNode["file"].IsDefined()) {
+    out.mapFromFile = true;
+    out.mapFile = mapNode["file"].as<std::string>();
+  } else {
+    out.mapConstantName = mapNode["constant"].as<std::string>();
+  }
+  if (node["lai"].IsDefined()) {
+    out.hasLaiFile = true;
+    out.laiFile = node["lai"]["file"].as<std::string>();
+  }
+  return out;
+}
+
+EvapotranspirationConfig extractEvapotranspiration(const YAML::Node& node) {
+  EvapotranspirationConfig out;
+  out.enabled = true;
+  const std::string mode = node["potential"].as<std::string>();
+  out.potential = mode == "penman_monteith"
+                      ? EvapotranspirationConfig::Potential::PenmanMonteith
+                  : mode == "prescribed"
+                      ? EvapotranspirationConfig::Potential::Prescribed
+                      : EvapotranspirationConfig::Potential::Bulk;
+  if (node["prescribed"].IsDefined()) {
+    out.prescribed = extractSeriesOrConstant(node["prescribed"]);
+  }
+  out.openWater = valueOr<bool>(node["open_water"], true);
+  const YAML::Node soil = node["soil"];
+  if (soil.IsDefined()) {
+    out.soil = true;
+    const YAML::Node region = soil["region"];
+    if (region.IsDefined() && region["polygon"].IsDefined()) {
+      const YAML::Node polygon = region["polygon"];
+      for (std::size_t n = 0; n < polygon.size(); ++n) {
+        out.soilPolygon.push_back(
+            {polygon[n][0].as<real_t>(), polygon[n][1].as<real_t>()});
+      }
+    }
+    const std::string limiter = valueOr<std::string>(soil["limiter"], "alpha_barton");
+    out.limiter = limiter == "beta_lee_pielke"
+                      ? EvapotranspirationConfig::Limiter::BetaLeePielke
+                  : limiter == "none" ? EvapotranspirationConfig::Limiter::None
+                                      : EvapotranspirationConfig::Limiter::AlphaBarton;
+  }
+  const YAML::Node energy = node["energy"];
+  if (energy.IsDefined()) {
+    out.energy.albedoWater = valueOr<real_t>(energy["albedo_water"], 0.06);
+    const YAML::Node g = energy["ground_heat_fraction"];
+    if (g.IsDefined()) {
+      out.energy.gFractionWater = valueOr<real_t>(g["water"], 0.0);
+      out.energy.gFractionSoil = valueOr<real_t>(g["soil"], 0.1);
+      out.energy.gFractionCanopy = valueOr<real_t>(g["canopy"], 0.1);
+    }
+  }
   return out;
 }
 
@@ -208,6 +311,14 @@ GroundwaterConfig extractGroundwater(const YAML::Node& node) {
   out.timestep.dqShrink = valueOr<real_t>(ts["dq_shrink"], 0.02);
   out.timestep.courantMax = valueOr<real_t>(ts["courant_max"], 2.0);
   out.specificStorage = node["specific_storage"].as<real_t>();
+  // Stage-3 T8 (plan §2.7): the struct initializer in Config.hpp is THE
+  // default-flip constant — an absent key keeps it, so the DF evaluation
+  // changes exactly one line.
+  if (node["reallocation"].IsDefined()) {
+    out.reallocation = node["reallocation"].as<std::string>() == "disabled"
+                           ? GroundwaterConfig::Reallocation::Off
+                           : GroundwaterConfig::Reallocation::Legacy;
+  }
   const std::string surplus =
       valueOr<std::string>(node["reallocation_surplus"], "drop");
   out.reallocationSurplus = (surplus == "redistribute")
@@ -249,6 +360,14 @@ SoilConfig extractSoil(const YAML::Node& node) {
     type.vgAlpha = typeNode["vg_alpha"].as<real_t>();
     type.vgN = typeNode["vg_n"].as<real_t>();
     type.aev = valueOr<real_t>(typeNode["aev"], 0.0);
+    if (typeNode["theta_fc"].IsDefined()) {
+      type.hasThetaFc = true;
+      type.thetaFc = typeNode["theta_fc"].as<real_t>();
+    }
+    if (typeNode["albedo"].IsDefined()) {
+      type.hasAlbedo = true;
+      type.albedo = typeNode["albedo"].as<real_t>();
+    }
     out.types.push_back(std::move(type));
   }
   const YAML::Node mapNode = node["map"];
@@ -380,6 +499,32 @@ std::vector<BoundaryConditionConfig> extractBoundaryConditions(const YAML::Node&
       bc.value.form = BcValueConfig::Form::Hydrostatic;
       bc.value.hydrostaticEta = value["hydrostatic"]["eta"].as<real_t>();
     }
+    // Stage-3 T2 (plan §13.A): the inflow closure of a prescribed-stage
+    // condition, with the external reservoir's velocity components.
+    if (bcNode["inflow"].IsDefined()) {
+      bc.hasInflowBlock = true;
+      bc.inflowClosure =
+          bcNode["inflow"]["closure"].as<std::string>() == "external"
+              ? BcInflowClosure::External
+              : BcInflowClosure::ZeroGradient;
+      const auto extractComponent = [&](const char* key, BcValueConfig& outValue) {
+        const YAML::Node comp = bcNode["inflow"]["velocity"][key];
+        if (!comp.IsDefined()) {
+          return;  // still-reservoir default (constant 0)
+        }
+        if (comp["constant"].IsDefined()) {
+          outValue.form = BcValueConfig::Form::Constant;
+          outValue.constant = comp["constant"].as<real_t>();
+        } else {
+          outValue.form = BcValueConfig::Form::Series;
+          outValue.seriesFile = comp["series"]["file"].as<std::string>();
+        }
+      };
+      if (bcNode["inflow"]["velocity"].IsDefined()) {
+        extractComponent("u", bc.inflowU);
+        extractComponent("v", bc.inflowV);
+      }
+    }
     out.push_back(std::move(bc));
   }
   return out;
@@ -409,6 +554,13 @@ TransportConfig extractTransport(const YAML::Node& node) {
     }
   }
   out.legacyEvapAllowance = valueOr<bool>(node["legacy_evap_allowance"], false);
+  // Stage-3 T8 (plan §2.7-5): the struct initializer in Config.hpp is
+  // the salt-store default-flip constant — an absent key keeps it.
+  if (node["surface_dryout"].IsDefined()) {
+    out.surfaceDryout = node["surface_dryout"].as<std::string>() == "store"
+                            ? TransportConfig::SurfaceDryout::Store
+                            : TransportConfig::SurfaceDryout::Delete;
+  }
   out.consistentSurfaceUpdate =
       valueOr<std::string>(node["surface_update"], "legacy") == "consistent";
   out.consistentSubsurfaceUpdate =
@@ -479,6 +631,9 @@ OutputConfig extractOutput(const YAML::Node& node) {
     if (vars["temperature"].IsDefined()) {
       out.temperatureVariables = vars["temperature"].as<std::vector<std::string>>();
     }
+    if (vars["atmosphere"].IsDefined()) {
+      out.atmosphereVariables = vars["atmosphere"].as<std::vector<std::string>>();
+    }
   }
   const YAML::Node monitors = node["monitors"];
   if (monitors.IsDefined()) {
@@ -491,6 +646,7 @@ OutputConfig extractOutput(const YAML::Node& node) {
       out.monitors.push_back(std::move(mon));
     }
   }
+  out.monitorInterval = valueOr<real_t>(node["monitor_interval"], 0.0);
   if (node["checkpoint"].IsDefined()) {
     out.checkpointInterval = valueOr<real_t>(node["checkpoint"]["interval"], 0.0);
   }
@@ -536,7 +692,7 @@ ValidationResult validateConfigFile(const std::string& path) {
     return result;
   }
   const std::string dir = std::filesystem::path(path).parent_path().string();
-  detail::validateRoot(root, dir.empty() ? "." : dir, result.errors);
+  detail::validateRoot(root, dir.empty() ? "." : dir, result.errors, result.warnings);
   return result;
 }
 
@@ -560,6 +716,10 @@ FrehgConfig loadConfig(const std::string& path) {
   const std::string dir = std::filesystem::path(path).parent_path().string();
   cfg.configDir = dir.empty() ? "." : dir;
   cfg.rawText = buffer.str();
+  // Carried, not logged here: --resolve must keep its sentinel-fenced
+  // stdout clean, so the run entry point (Simulation) logs them and the
+  // run record stores them (Stage-3 W0.9).
+  cfg.validationWarnings = validation.warnings;
 
   cfg.simulation = extractSimulation(root["simulation"]);
   cfg.domain = extractDomain(root["domain"]);
@@ -586,6 +746,12 @@ FrehgConfig loadConfig(const std::string& path) {
     cfg.initialConditions = extractInitialConditions(root["initial_conditions"], cfg.modules);
   }
   cfg.boundaryConditions = extractBoundaryConditions(root["boundary_conditions"]);
+  if (root["evapotranspiration"].IsDefined()) {
+    cfg.evapotranspiration = extractEvapotranspiration(root["evapotranspiration"]);
+  }
+  if (root["vegetation"].IsDefined()) {
+    cfg.vegetation = extractVegetation(root["vegetation"]);
+  }
   if (root["transport"].IsDefined()) {
     cfg.transport = extractTransport(root["transport"]);
   }
@@ -662,6 +828,10 @@ std::string describeConfig(const FrehgConfig& cfg) {
         << "/" << cfg.groundwater.timestep.dqShrink << ", Co_max "
         << cfg.groundwater.timestep.courantMax << ")"
         << ", density_coupling = " << (cfg.groundwater.densityCoupling.enabled ? "on" : "off")
+        << ", reallocation = "
+        << (cfg.groundwater.reallocation == GroundwaterConfig::Reallocation::Off
+                ? "disabled"
+                : "legacy")
         << ", reallocation_surplus = "
         << (cfg.groundwater.reallocationSurplus ==
                     GroundwaterConfig::ReallocationSurplus::Redistribute
@@ -675,13 +845,51 @@ std::string describeConfig(const FrehgConfig& cfg) {
     out << "  coupling: mode = "
         << (cfg.coupling.mode == CouplingConfig::Mode::Sync ? "sync" : "subcycled") << "\n";
   }
+  if (cfg.evapotranspiration.enabled) {
+    const EvapotranspirationConfig& et = cfg.evapotranspiration;
+    out << "  evapotranspiration: potential = "
+        << (et.potential == EvapotranspirationConfig::Potential::PenmanMonteith
+                ? "penman_monteith"
+            : et.potential == EvapotranspirationConfig::Potential::Prescribed
+                ? "prescribed"
+                : "bulk")
+        << ", open_water = " << (et.openWater ? "on" : "off") << ", soil = ";
+    if (et.soil) {
+      out << "on (limiter = "
+          << (et.limiter == EvapotranspirationConfig::Limiter::BetaLeePielke
+                  ? "beta_lee_pielke"
+              : et.limiter == EvapotranspirationConfig::Limiter::None ? "none"
+                                                                      : "alpha_barton")
+          << (et.soilPolygon.empty() ? ", region = all" : ", region = polygon") << ")";
+    } else {
+      out << "off";
+    }
+    if (cfg.vegetation.enabled) {
+      out << ", vegetation = " << cfg.vegetation.types.size() << " type(s)";
+    }
+    if (cfg.atmosphere.present) {
+      out << ", r_a = "
+          << (cfg.atmosphere.aeroResistance == AtmosphereConfig::AeroResistance::Fao56
+                  ? "fao56"
+              : cfg.atmosphere.aeroResistance ==
+                      AtmosphereConfig::AeroResistance::LogProfile
+                  ? "log_profile"
+                  : "liu2006");
+    }
+    out << "\n";
+  }
   if (cfg.modules.transport) {
     out << "  transport: advection = "
         << (cfg.transport.scheme.advection == TransportSchemeConfig::Advection::Superbee
                 ? "superbee"
                 : "upwind")
         << ", dispersion l/t/m = " << cfg.transport.dispersionLongitudinal << "/"
-        << cfg.transport.dispersionTransverse << "/" << cfg.transport.dispersionMolecular << "\n";
+        << cfg.transport.dispersionTransverse << "/" << cfg.transport.dispersionMolecular
+        << ", surface_dryout = "
+        << (cfg.transport.surfaceDryout == TransportConfig::SurfaceDryout::Store
+                ? "store"
+                : "discard")
+        << "\n";
   }
   if (cfg.modules.temperature) {
     out << "  temperature: advection = "
@@ -704,7 +912,11 @@ std::string describeConfig(const FrehgConfig& cfg) {
   }
   out << "  boundary_conditions: " << cfg.boundaryConditions.size() << "\n";
   out << "  output: " << cfg.output.filename << ", " << cfg.output.monitors.size()
-      << " monitor(s), checkpoint interval = " << cfg.output.checkpointInterval << " s\n";
+      << " monitor(s), monitor rows every "
+      << (cfg.output.monitorInterval > 0.0
+              ? std::to_string(static_cast<long>(cfg.output.monitorInterval)) + " s"
+              : std::string("step"))
+      << ", checkpoint interval = " << cfg.output.checkpointInterval << " s\n";
   out << "  runtime: gpu_aware_mpi = "
       << (cfg.runtime.gpuAwareMpi == RuntimeConfig::GpuAwareMpi::On    ? "on"
           : cfg.runtime.gpuAwareMpi == RuntimeConfig::GpuAwareMpi::Off ? "off"
@@ -783,6 +995,8 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
   domain["dz_stretch"] = cfg.domain.dzStretch;
   domain["bottom_elevation"] = emitFileOrConstant(cfg.domain.bottomElevation);
   domain["follow_terrain"] = cfg.domain.followTerrain;
+  domain["periodic"]["x"] = cfg.domain.periodicX;
+  domain["periodic"]["y"] = cfg.domain.periodicY;
   if (cfg.domain.followTerrain) {
     domain["terrain_layers"] =
         cfg.domain.terrainLayers == DomainConfig::TerrainLayers::Uniform ? "uniform" : "scaled";
@@ -850,7 +1064,10 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
       rainfall["exclude"]["polygon"] = emitPolygon(sw.rainfallExcludePolygon);
     }
     node["rainfall"] = rainfall;
-    if (sw.evapMode == SurfaceWaterConfig::EvapMode::Bulk) {
+    if (cfg.evapotranspiration.enabled) {
+      // Stage-3 T5: the ET block replaces the legacy key (the schema
+      // makes them exclusive — the r1 round trip must not re-emit it).
+    } else if (sw.evapMode == SurfaceWaterConfig::EvapMode::Bulk) {
       node["evaporation"]["mode"] = "bulk";
     } else {
       YAML::Node evap = emitSeriesOrConstant(sw.evaporation);
@@ -877,8 +1094,90 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     atm["wind_speed"] = emitSeriesOrConstant(cfg.atmosphere.windSpeed);
     atm["shortwave"] = emitSeriesOrConstant(cfg.atmosphere.shortwave);
     atm["longwave_in"] = emitSeriesOrConstant(cfg.atmosphere.longwaveIn);
+    atm["shortwave_incoming"] = emitSeriesOrConstant(cfg.atmosphere.shortwaveIncoming);
     atm["wind_speed_floor"] = cfg.atmosphere.windSpeedFloor;
+    YAML::Node aero;
+    aero["law"] = cfg.atmosphere.aeroResistance == AtmosphereConfig::AeroResistance::Fao56
+                      ? "fao56"
+                  : cfg.atmosphere.aeroResistance ==
+                          AtmosphereConfig::AeroResistance::LogProfile
+                      ? "log_profile"
+                      : "liu2006";
+    aero["reference_height"] = cfg.atmosphere.aeroRefHeight;
+    aero["z0m"] = cfg.atmosphere.aeroZ0m;
+    aero["z0h"] = cfg.atmosphere.aeroZ0h;
+    aero["displacement"] = cfg.atmosphere.aeroDisplacement;
+    atm["aerodynamic_resistance"] = aero;
     root["atmosphere"] = atm;
+  }
+
+  if (cfg.evapotranspiration.enabled) {
+    const EvapotranspirationConfig& et = cfg.evapotranspiration;
+    YAML::Node node;
+    node["potential"] =
+        et.potential == EvapotranspirationConfig::Potential::PenmanMonteith
+            ? "penman_monteith"
+        : et.potential == EvapotranspirationConfig::Potential::Prescribed
+            ? "prescribed"
+            : "bulk";
+    if (et.potential == EvapotranspirationConfig::Potential::Prescribed) {
+      node["prescribed"] = emitSeriesOrConstant(et.prescribed);
+    }
+    node["open_water"] = et.openWater;
+    if (et.soil) {
+      YAML::Node soil;
+      if (!et.soilPolygon.empty()) {
+        soil["region"]["polygon"] = emitPolygon(et.soilPolygon);
+      }
+      soil["limiter"] =
+          et.limiter == EvapotranspirationConfig::Limiter::BetaLeePielke
+              ? "beta_lee_pielke"
+          : et.limiter == EvapotranspirationConfig::Limiter::None ? "none"
+                                                                  : "alpha_barton";
+      node["soil"] = soil;
+    }
+    YAML::Node energy;
+    energy["albedo_water"] = et.energy.albedoWater;
+    energy["ground_heat_fraction"]["water"] = et.energy.gFractionWater;
+    energy["ground_heat_fraction"]["soil"] = et.energy.gFractionSoil;
+    energy["ground_heat_fraction"]["canopy"] = et.energy.gFractionCanopy;
+    node["energy"] = energy;
+    root["evapotranspiration"] = node;
+  }
+
+  if (cfg.vegetation.enabled) {
+    YAML::Node node;
+    for (const VegetationType& type : cfg.vegetation.types) {
+      YAML::Node t;
+      t["name"] = type.name;
+      t["lai"] = type.lai;
+      t["extinction"] = type.extinction;
+      t["leaf_resistance"] = type.leafResistance;
+      t["root_depth"] = type.rootDepth;
+      t["root_profile"] =
+          type.profile == VegetationType::RootProfile::Linear ? "linear" : "uniform";
+      YAML::Node fed;
+      if (type.hasH12) {
+        fed["h1"] = type.h1;
+        fed["h2"] = type.h2;
+      }
+      fed["h3"] = type.h3;
+      fed["h4"] = type.h4;
+      t["feddes"] = fed;
+      if (type.hasAlbedo) {
+        t["albedo"] = type.albedo;
+      }
+      node["types"].push_back(t);
+    }
+    if (cfg.vegetation.mapFromFile) {
+      node["map"]["file"] = cfg.vegetation.mapFile;
+    } else {
+      node["map"]["constant"] = cfg.vegetation.mapConstantName;
+    }
+    if (cfg.vegetation.hasLaiFile) {
+      node["lai"]["file"] = cfg.vegetation.laiFile;
+    }
+    root["vegetation"] = node;
   }
 
   if (cfg.modules.groundwater) {
@@ -893,6 +1192,8 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     node["timestep"]["dq_shrink"] = gw.timestep.dqShrink;
     node["timestep"]["courant_max"] = gw.timestep.courantMax;
     node["specific_storage"] = gw.specificStorage;
+    node["reallocation"] =
+        gw.reallocation == GroundwaterConfig::Reallocation::Off ? "disabled" : "legacy";
     node["reallocation_surplus"] =
         gw.reallocationSurplus == GroundwaterConfig::ReallocationSurplus::Redistribute
             ? "redistribute"
@@ -930,6 +1231,12 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
       t["vg_alpha"] = type.vgAlpha;
       t["vg_n"] = type.vgN;
       t["aev"] = type.aev;
+      if (type.hasThetaFc) {
+        t["theta_fc"] = type.thetaFc;
+      }
+      if (type.hasAlbedo) {
+        t["albedo"] = type.albedo;
+      }
       soil["types"].push_back(t);
     }
     if (cfg.soil.map.fromFile) {
@@ -1029,6 +1336,26 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
             break;
         }
       }
+      // Stage-3 T2: every eta condition resolves its inflow closure (the
+      // default materialized, like every other default — gate r1's
+      // round-trip contract), with the velocity components only under
+      // external and only when non-still (hand-written configs stay fixed
+      // points).
+      if (bc.kind == BcKind::Eta) {
+        b["inflow"]["closure"] =
+            bc.inflowClosure == BcInflowClosure::External ? "external" : "zero_gradient";
+        const auto emitComponent = [&](const char* key, const BcValueConfig& comp) {
+          if (comp.form == BcValueConfig::Form::Series) {
+            b["inflow"]["velocity"][key]["series"]["file"] = comp.seriesFile;
+          } else if (comp.constant != 0.0) {
+            b["inflow"]["velocity"][key]["constant"] = comp.constant;
+          }
+        };
+        if (bc.inflowClosure == BcInflowClosure::External) {
+          emitComponent("u", bc.inflowU);
+          emitComponent("v", bc.inflowV);
+        }
+      }
       bcs.push_back(b);
     }
     root["boundary_conditions"] = bcs;
@@ -1051,6 +1378,8 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     node["legacy_evap_allowance"] = tr.legacyEvapAllowance;
     node["surface_update"] = tr.consistentSurfaceUpdate ? "consistent" : "legacy";
     node["subsurface_update"] = tr.consistentSubsurfaceUpdate ? "consistent" : "legacy";
+    node["surface_dryout"] =
+        tr.surfaceDryout == TransportConfig::SurfaceDryout::Store ? "store" : "discard";
     root["transport"] = node;
   }
 
@@ -1104,6 +1433,9 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
   if (!cfg.output.temperatureVariables.empty()) {
     output["variables"]["temperature"] = cfg.output.temperatureVariables;
   }
+  if (!cfg.output.atmosphereVariables.empty()) {
+    output["variables"]["atmosphere"] = cfg.output.atmosphereVariables;
+  }
   for (const MonitorConfig& mon : cfg.output.monitors) {
     YAML::Node m;
     m["name"] = mon.name;
@@ -1112,6 +1444,7 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     m["variables"] = mon.variables;
     output["monitors"].push_back(m);
   }
+  output["monitor_interval"] = cfg.output.monitorInterval;
   output["checkpoint"]["interval"] = cfg.output.checkpointInterval;
   root["output"] = output;
 

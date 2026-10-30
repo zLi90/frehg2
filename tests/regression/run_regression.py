@@ -63,8 +63,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import shutil
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -101,26 +103,77 @@ SOLVER_OVERRIDE: str | None = None
 # physics. This is the CPU rehearsal of the exact code path a GPU build takes.
 MAT_TYPE_OVERRIDE: str | None = None
 
+# Stage-3 override channel (Stage-3 plan §3.2): FREHG_STAGE3_OVERRIDES is a
+# ';'-separated list of dotted.key=value pairs applied to every staged YAML
+# whose modules make the key meaningful. check_run_record() then passes each
+# as --expect, so an override that never reached a run fails that run's r1
+# hook (anti-vacuity: the V2-A9 lesson).
+STAGE3_OVERRIDES: list[tuple[str, str]] = [
+    (item.partition("=")[0], item.partition("=")[2])
+    for item in os.environ.get("FREHG_STAGE3_OVERRIDES", "").split(";") if item
+]
+
+
+def override_applies(doc: dict, dotted: str) -> bool:
+    """A groundwater.* override needs modules.groundwater; transport.* needs
+    modules.transport; anything else applies unconditionally."""
+    root = dotted.split(".")[0]
+    if root in ("groundwater", "transport"):
+        return bool(doc.get("modules", {}).get(root, False))
+    return True
+
+
+def apply_stage3_overrides(doc: dict) -> list[str]:
+    """Apply the active overrides to one config document; returns the dotted
+    keys actually applied (for the --expect hook)."""
+    applied = []
+    for dotted, value in STAGE3_OVERRIDES:
+        if not override_applies(doc, dotted):
+            continue
+        node = doc
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        parsed: object = value
+        if value in ("true", "false"):
+            parsed = (value == "true")
+        else:
+            try:
+                parsed = int(value)
+            except ValueError:
+                try:
+                    parsed = float(value)
+                except ValueError:
+                    pass
+        node[parts[-1]] = parsed
+        applied.append(f"{dotted}={value}")
+    return applied
+
 
 def apply_solver_override(case_dir: Path) -> None:
-    """Write the SOLVER_OVERRIDE / MAT_TYPE_OVERRIDE into every staged YAML."""
-    if SOLVER_OVERRIDE is None and MAT_TYPE_OVERRIDE is None:
+    """Write the SOLVER_OVERRIDE / MAT_TYPE_OVERRIDE and any Stage-3
+    overrides (FREHG_STAGE3_OVERRIDES) into every staged YAML."""
+    if SOLVER_OVERRIDE is None and MAT_TYPE_OVERRIDE is None and not STAGE3_OVERRIDES:
         return
     for config in sorted(case_dir.glob("*.yaml")):
         with open(config, encoding="utf-8") as handle:
             doc = yaml.safe_load(handle)
-        solver = doc.setdefault("solver", {})
-        for system in ("surface", "groundwater"):
-            entry = solver.setdefault(system, {})
-            if SOLVER_OVERRIDE is not None:
-                entry["preconditioner"] = SOLVER_OVERRIDE
-            if MAT_TYPE_OVERRIDE is not None:
-                entry["mat_type"] = MAT_TYPE_OVERRIDE
+        if SOLVER_OVERRIDE is not None or MAT_TYPE_OVERRIDE is not None:
+            solver = doc.setdefault("solver", {})
+            for system in ("surface", "groundwater"):
+                entry = solver.setdefault(system, {})
+                if SOLVER_OVERRIDE is not None:
+                    entry["preconditioner"] = SOLVER_OVERRIDE
+                if MAT_TYPE_OVERRIDE is not None:
+                    entry["mat_type"] = MAT_TYPE_OVERRIDE
+            print(f"  solver override: {config.name} -> "
+                  f"preconditioner {SOLVER_OVERRIDE or '(default)'}"
+                  f" mat_type {MAT_TYPE_OVERRIDE or '(default)'}")
+        applied = apply_stage3_overrides(doc)
+        for item in applied:
+            print(f"  stage3 override: {config.name} -> {item}")
         with open(config, "w", encoding="utf-8") as handle:
             yaml.safe_dump(doc, handle, sort_keys=False)
-        print(f"  solver override: {config.name} -> "
-              f"preconditioner {SOLVER_OVERRIDE or '(default)'}"
-              f" mat_type {MAT_TYPE_OVERRIDE or '(default)'}")
 
 
 def run_case(frehg: Path, config: Path, workdir: Path, mpiexec: Path, ranks: int,
@@ -152,6 +205,9 @@ def check_run_record(frehg: Path, config: Path, ranks: int) -> None:
     threads = os.environ.get("OMP_NUM_THREADS")
     if threads:
         cmd += ["--threads", threads]
+    for dotted, value in STAGE3_OVERRIDES:
+        if override_applies(doc, dotted):
+            cmd += ["--expect", f"{dotted}={value}"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout, end="")
     if result.returncode != 0:
@@ -610,6 +666,28 @@ def b6_salt_mass(salt_series, moisture_series, bath: np.ndarray) -> float:
     return total / len(salt_series)
 
 
+def apply_ob8_override(case_dir: Path) -> None:
+    """Stage-3 T2 ob8 (nightly record): FREHG_STAGE3_OB8=external sets
+    inflow: {closure: external} on every eta condition of the staged b6
+    configurations. Unlike the generic §3.2 channel this edits a BC list
+    entry, so it has its own hook; the b6 criteria are unchanged (the
+    experiment bounds gate, the legacy-golden residuals are recorded)."""
+    if os.environ.get("FREHG_STAGE3_OB8", "") != "external":
+        return
+    for config in sorted(case_dir.glob("*.yaml")):
+        with open(config, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        touched = False
+        for bc in doc.get("boundary_conditions", []):
+            if bc.get("kind") == "eta":
+                bc["inflow"] = {"closure": "external"}
+                touched = True
+        if touched:
+            with open(config, "w", encoding="utf-8") as handle:
+                yaml.safe_dump(doc, handle, sort_keys=False)
+            print(f"  ob8 override: {config.name} -> inflow closure external")
+
+
 def gate_b6(args: argparse.Namespace) -> int:
     variant = args.variant
     case_dir = args.work / "b6-kuan"
@@ -618,6 +696,7 @@ def gate_b6(args: argparse.Namespace) -> int:
         print(f"b6 gate [{variant}]: reusing {output}")
     else:
         case_dir = stage_case(args.repo, "b6-kuan", args.work)
+        apply_ob8_override(case_dir)
         config = case_dir / f"b6-kuan-{variant}.yaml"
         run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
 
@@ -628,6 +707,26 @@ def gate_b6(args: argparse.Namespace) -> int:
         "Kuan_Exp_NoTide" if variant == "ss" else "Kuan_Exp_Tide")
     bath, dzf, nzf, actv = b6_geometry(args.legacy)
     ok = True
+
+    # Stage-3 T2 ob8 (plan §6): under FREHG_STAGE3_OB8=external the run
+    # deliberately departs from the LEGACY GOLDEN, which embeds the
+    # zero_gradient stage-deposit kick (0.90 m^3 of the 2.31 m^3 b6-td
+    # seepage lands on the stage row — dod-Q7's unclosed term). The ob8
+    # record therefore gates the EXPERIMENT criteria (interface MAE caps,
+    # concentration bounds) and RECORDS every golden-referenced residual.
+    # First execution measured: td golden head 0.08 % outside (one beach
+    # cell, 0.0196 m vs the 0.015 m floor), salt mass 9.88 % (vs 8.79 %
+    # zero_gradient), interface MAE 0.0381 m vs the golden's own 0.0430 m
+    # — agreement with the experiment IMPROVES under external.
+    ob8 = os.environ.get("FREHG_STAGE3_OB8", "") == "external"
+
+    def golden_gate(bad: bool) -> bool:
+        if ob8 and bad:
+            print(f"b6-{variant} ob8: golden residual above the zero_gradient "
+                  "bound — recorded, not gated (the golden embeds the "
+                  "stage-deposit kick)")
+            return False
+        return bad
 
     # --- Golden field comparison at quasi-steady state (t = 36000 s).
     t_final = 36000
@@ -643,7 +742,7 @@ def gate_b6(args: argparse.Namespace) -> int:
     h_bad = float(np.mean(dh > h_allow))
     print(f"b6-{variant} golden head: |dh| max {dh.max():.4f} m, mean {dh.mean():.4f} m, "
           f"{100.0 * h_bad:.2f} % of cells outside (allowed 0 %)")
-    if h_bad > 0.0:
+    if golden_gate(h_bad > 0.0):
         ok = False
     ds = np.abs(salt_m - salt_g)[finite]
     s_allow = np.maximum(g["salt_abs_floor"], g["salt_rel"] * np.abs(salt_g[finite]))
@@ -651,7 +750,7 @@ def gate_b6(args: argparse.Namespace) -> int:
     print(f"b6-{variant} golden salinity: |ds| max {ds.max():.3f} psu, mean {ds.mean():.3f}, "
           f"{100.0 * s_bad:.2f} % of cells outside "
           f"(allowed {100.0 * g['salt_exceed_fraction']:.0f} %)")
-    if s_bad > g["salt_exceed_fraction"]:
+    if golden_gate(s_bad > g["salt_exceed_fraction"]):
         ok = False
 
     # --- Primary gate: the 50 %-isohaline vs the Kuan experiment.
@@ -692,7 +791,7 @@ def gate_b6(args: argparse.Namespace) -> int:
     print(f"b6-{variant} tidally averaged salt mass: model {mass_m:.3f}, golden {mass_g:.3f} "
           f"psu m^3 ({100.0 * rel:.2f} % off; allowed "
           f"{100.0 * spec['salt_mass_rel']:.0f} %)")
-    if rel > spec["salt_mass_rel"]:
+    if golden_gate(rel > spec["salt_mass_rel"]):
         ok = False
 
     # --- Salinity bounded in [0, s_boundary] at every output (plan §10 P4).
@@ -2633,9 +2732,11 @@ def gate_rank_invariance_heat(args: argparse.Namespace) -> int:
 
 
 def read_raster2d_file(path: Path) -> np.ndarray:
-    """Flat-list 2D raster (j*nx + i, '#' comments) -> 1D values."""
-    values = [float(line) for line in path.read_text().splitlines()
-              if line.strip() and not line.lstrip().startswith("#")]
+    """Flat-list 2D raster (j*nx + i, '#' comments, any number of
+    whitespace-separated values per line — input-data.md) -> 1D values."""
+    values = [float(tok) for line in path.read_text().splitlines()
+              if line.strip() and not line.lstrip().startswith("#")
+              for tok in line.split()]
     return np.asarray(values)
 
 
@@ -2664,20 +2765,30 @@ def transform_polygons(doc: dict, coord_op) -> None:
 
 def run_dihedral_battery(args: argparse.Namespace, label: str, base_name: str,
                          fields: dict[str, int], strict: list[str],
-                         raster_keys: list[tuple] = ()) -> int:
+                         raster_keys: list[tuple] = (),
+                         case: str = "x-orient",
+                         tol_key: str | None = None,
+                         tol_override: dict | None = None) -> int:
     """Shared §8.1 driver. `fields` maps HDF5 group paths to their nz;
     `raster_keys` lists (section, key) config paths whose 2D rasters are
     transformed alongside the polygons. Two tolerance classes per battery
-    (tolerances/x-orient.yaml): `transpose` transforms preserve each
-    domain edge's minus/plus class, so they gate scheme/indexing symmetry
-    at machine precision; the six `mixed` transforms swap minus and plus
-    edges, whose preserved legacy arithmetic differs by design — their
-    bound is calibrated above the measured legacy floor and documented in
-    docs/theory/symmetry-exemptions.md."""
-    case_dir = stage_case(args.repo, "x-orient", args.work / label)
+    (tolerances/x-orient.yaml, or `tol_override` for Stage-3 batteries
+    whose classes live in stage3-pd.yaml): `transpose` transforms preserve
+    each domain edge's minus/plus class, so they gate scheme/indexing
+    symmetry at machine precision; the six `mixed` transforms swap minus
+    and plus edges, whose preserved legacy arithmetic differs by design —
+    their bound is calibrated above the measured legacy floor and
+    documented in docs/theory/symmetry-exemptions.md. Constant wind
+    vectors are rotated with the domain (the coord_op's linear part), so
+    a wind-driven base is a true dihedral identity."""
+    case_dir = stage_case(args.repo, case, args.work / label)
     base = case_dir / base_name
-    with open(HERE / "tolerances" / "x-orient.yaml", encoding="utf-8") as handle:
-        tol = yaml.safe_load(handle)["orient"][label.split("-")[0]]
+    if tol_override is not None:
+        tol = tol_override
+    else:
+        with open(HERE / "tolerances" / "x-orient.yaml",
+                  encoding="utf-8") as handle:
+            tol = yaml.safe_load(handle)["orient"][tol_key or label.split("-")[0]]
     with open(base, encoding="utf-8") as handle:
         base_doc = yaml.safe_load(handle)
     nx = int(base_doc["domain"]["nx"])
@@ -2695,6 +2806,27 @@ def run_dihedral_battery(args: argparse.Namespace, label: str, base_name: str,
     for name, (array_op, coord_op) in gate_heat.dihedral_table(length).items():
         doc = yaml.safe_load(yaml.safe_dump(base_doc))
         doc["simulation"]["id"] = f"{label}-{name}"
+        # Stage-3 T3 (W3.7): the axis-swapping transforms map periodic-x
+        # onto periodic-y — the battery is what proves the implementation
+        # axis-generic (plan §7 pd8).
+        if name in ("transpose", "antitranspose", "rot90", "rot270"):
+            per = doc.get("domain", {}).get("periodic")
+            if per:
+                doc["domain"]["periodic"] = {"x": bool(per.get("y", False)),
+                                             "y": bool(per.get("x", False))}
+        # Rotate a constant wind vector with the domain: the dihedral
+        # coord_op is affine with an orthogonal linear part, so the image
+        # of the vector is coord_op(u, v) - coord_op(0, 0).
+        wind = doc.get("surface_water", {}).get("wind", {})
+        if (wind.get("enabled")
+                and isinstance(wind.get("u10"), dict)
+                and "constant" in wind["u10"]):
+            u = float(wind["u10"]["constant"])
+            v = float(wind["v10"]["constant"])
+            ox, oy = coord_op(0.0, 0.0)
+            wx, wy = coord_op(u, v)
+            wind["u10"] = {"constant": wx - ox}
+            wind["v10"] = {"constant": wy - oy}
         for m, (path, field) in enumerate(rasters.items()):
             raster_path = f"input/orient_raster_{m}_{name}.dat"
             write_raster2d_file(case_dir / raster_path, array_op(field))
@@ -2721,14 +2853,22 @@ def run_dihedral_battery(args: argparse.Namespace, label: str, base_name: str,
         for name, (array_op, _) in table.items():
             if name == "id":
                 continue
-            bound = tol["tol_abs_transpose"] if name == "transpose" else \
-                tol["tol_abs_mixed"]
+            recorded = False
+            if name == "transpose":
+                bound = tol.get("per_field_transpose", {}).get(
+                    group, tol["tol_abs_transpose"])
+            else:
+                bound = tol.get("per_field_mixed", {}).get(
+                    group, tol["tol_abs_mixed"])
+                recorded = bool(tol.get("mixed_recorded", False))
             pushed = np.stack([array_op(base_field[:, :, k])
                                for k in range(base_field.shape[2])], axis=2)
             dev = float(np.max(np.abs(pushed - per_orient[name])))
-            good = dev <= bound
+            good = recorded or dev <= bound
             print(f"  {short} orientation {name}: max |delta| = {dev:.3e} "
-                  f"(allowed {bound:.1e}){'' if good else ' FAIL'}")
+                  + (f"(RECORDED; legacy mixed class)" if recorded
+                     else f"(allowed {bound:.1e})")
+                  + ("" if good else " FAIL"))
             ok &= good
     print(f"{label} battery:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
@@ -3494,6 +3634,2694 @@ def gate_heat_subcycled(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------------
+# Stage-3 default-bitwise gate (Stage-3 plan §3.3, label stage3_local): with
+# no Stage-3 key, the listed per-PR cases must reproduce the T0 reference
+# hashes dataset for dataset. BITWISE_PINS holds the v2.0-equivalent values
+# of every flippable default (§2.6), injected so the gate survives a T8
+# default flip; it is extended by the phase that adds each key.
+# ---------------------------------------------------------------------------
+
+BITWISE_CASES = [
+    # (label, benchmark dir, config file)
+    ("b1", "b1-sw", "b1-sw.yaml"),
+    ("b2", "b2-gw", "b2-gw.yaml"),
+    ("g4a", "g4-evap", "g4a-drawdown.yaml"),
+    ("g4b", "g4-evap", "g4b-concentration.yaml"),
+    ("g4d", "g4-evap", "g4d-drain.yaml"),
+    ("g6c-coupled", "g6-heat", "g6c-coupled.yaml"),
+    ("g7b", "g7-heat", "g7b-channel.yaml"),
+    ("g10", "g9-wind", "g10-seiche.yaml"),
+    ("swe-orient", "x-orient", "swe-orient-base.yaml"),
+    ("gw-orient", "x-orient", "gw-orient-base.yaml"),
+    ("transport-orient", "x-orient", "transport-orient-base.yaml"),
+    ("conveyor", "x-orient", "conveyor-base.yaml"),
+    ("coupled-salt", "x-orient", "coupled-salt-base.yaml"),
+]
+# dotted key -> v2.0-equivalent value (module-gated like the §3.2 overrides).
+# Stage-3 T8 (W8.1, S3-A11): the table §2.6 promised was never populated by
+# T1/T5 — the W8.1 evaluation found the gate riding the shipped default
+# (b2/g6c-coupled went non-bitwise under the flipped binary). These pins
+# make the gate test "the v2.0 configuration", not "the current default".
+BITWISE_PINS: dict[str, object] = {
+    "groundwater.reallocation": "legacy",
+    "transport.surface_dryout": "discard",
+}
+
+
+def gate_default_bitwise(args: argparse.Namespace) -> int:
+    sys.path.insert(0, str(HERE.parent.parent / "tools"))
+    import h5_bitwise  # noqa: E402
+
+    reference = HERE / "reference-hashes" / "stage3-T0.json"
+    if not args.record and not reference.exists():
+        print(f"default-bitwise: reference {reference} missing; run with --record")
+        return 1
+    if not args.record:
+        doc = json.loads(reference.read_text())
+        if doc["toolchain"] != h5_bitwise.toolchain_fingerprint():
+            print("default-bitwise: toolchain differs from the recording "
+                  "toolchain; SKIPPED (exit 77)")
+            return 77
+    allow = list(args.allow or [])
+    ok = True
+    for label, case_dir_name, config_name in BITWISE_CASES:
+        case_dir = stage_case(args.repo, case_dir_name, args.work / label)
+        config = case_dir / config_name
+        with open(config, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        pinned = []
+        for dotted, value in BITWISE_PINS.items():
+            if not override_applies(doc, dotted):
+                continue
+            node = doc
+            parts = dotted.split(".")
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = value
+            pinned.append(dotted)
+        with open(config, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(doc, handle, sort_keys=False)
+        if pinned:
+            print(f"  pins [{label}]: {', '.join(pinned)}")
+        run_case(args.frehg, config, case_dir, args.mpiexec, 1)
+        output = case_dir / doc["output"]["filename"]
+        if args.record:
+            argv = ["hash", str(output), "--case", label, "--out", str(reference)]
+            if h5_bitwise.main_from(argv) != 0:
+                return 1
+        else:
+            argv = ["compare", str(output), str(reference), "--case", label]
+            for glob in allow:
+                argv += ["--allow", glob]
+            code = h5_bitwise.main_from(argv)
+            if code == 77:
+                return 77
+            ok = ok and (code == 0)
+    if args.record:
+        print(f"default-bitwise: reference recorded -> {reference}")
+        return 0
+    print("default-bitwise:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T1: the reallocation-mode gates rl2/rl3/rl4 (Stage-3 plan §5).
+# Pure checks live in gate_realloc.py; tolerances in
+# tolerances/stage3-rl.yaml; §6.3 negative battery in
+# scripts/test_rl_gates.py. Each gate runs a `legacy` and an `off` lane by
+# rewriting groundwater.reallocation in the staged configuration.
+# ---------------------------------------------------------------------------
+
+import gate_realloc  # noqa: E402
+
+CAPABILITY_ABSENT_S3RL = ("capability absent: the schema rejects the T1 "
+                          "target keys (groundwater.reallocation / the "
+                          "realloc_* output variables)")
+
+
+def rl_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-rl.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def rl_stage_lane(args: argparse.Namespace, case: str, config_name: str,
+                  lane: str, extra_transform=None) -> Path | None:
+    """Stage `case` into work/<lane>, set groundwater.reallocation = lane,
+    and validate; None means the capability is absent (the red state)."""
+    case_dir = stage_case(args.repo, case, args.work / lane)
+    config = case_dir / config_name
+    def set_lane(doc):
+        doc.setdefault("groundwater", {})["reallocation"] = lane
+        if extra_transform is not None:
+            extra_transform(doc)
+    rewrite_config(config, set_lane)
+    if not validate_config(args.frehg, config):
+        return None
+    return config
+
+
+def rl_field_sum(output: Path, var: str, t: int) -> float:
+    """NaN-aware sum of a 3D groundwater diagnostic at output time t."""
+    with h5py.File(output, "r") as handle:
+        data = handle[f"/groundwater/{var}/{t}"][:]
+    return float(np.nansum(data))
+
+
+def rl_substeps(config: Path) -> int:
+    """Groundwater substep count from the run record's timer tree."""
+    with open(config, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    record_path = (config.parent / Path(doc["output"]["filename"])).parent / "run-record.yaml"
+    with open(record_path, encoding="utf-8") as handle:
+        record = yaml.safe_load(handle)
+    counts = [entry["count"] for path, entry in record["timers"].items()
+              if path.split("/")[-1] == "groundwater"]
+    return int(max(counts))
+
+
+def rl_soil_bounds(config: Path) -> tuple[float, float]:
+    """(min theta_r, max theta_s) over the staged soil table."""
+    with open(config, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    types = doc["soil"]["types"]
+    return (min(float(t["theta_r"]) for t in types),
+            max(float(t["theta_s"]) for t in types))
+
+
+def gate_rl5_orient(args: argparse.Namespace) -> int:
+    # S3-A4: the disabled-mode orientation battery runs on a VADOSE base
+    # (benchmarks/rl-realloc/rl5-orient-base.yaml, no cell near saturation).
+    # The saturated x-orient gw block is outside the mode's domain — there
+    # the missing consistency restore amplifies rounding chaotically and NO
+    # strict battery can pass (measured O(1); Reallocate.cpp header). The
+    # harness sets reallocation: disabled through FREHG_STAGE3_OVERRIDES
+    # (asserted into each run record by the r1 --expect hook).
+    return run_dihedral_battery(
+        args, "rl5-orient", "rl5-orient-base.yaml",
+        {"/groundwater/hydraulic_head": 8, "/groundwater/water_content": 8},
+        STRICT_PETSC_OPTIONS_GW, case="rl-realloc", tol_key="gw")
+
+
+def gate_rl_restart(args: argparse.Namespace) -> int:
+    """Stage-3 restart gate, rl lane (plan §3.4; W1.3): the per-cell
+    cumulative diagnostics (realloc_created / realloc_dropped / vloss_cum)
+    checkpoint and restart BITWISE — every dataset of the restarted rl2
+    disabled run equals the uninterrupted run's. The diagnostics are
+    requested through the case's own output list, so both sides carry the
+    same checkpoint layout."""
+    case_dir = stage_case(args.repo, "rl-realloc", args.work)
+    config = case_dir / "rl2-tidal-box.yaml"
+
+    def full_setup(doc):
+        doc["groundwater"]["reallocation"] = "disabled"
+        doc["output"]["checkpoint"] = {"interval": 7200}
+
+    rewrite_config(config, full_setup)
+    if not validate_config(args.frehg, config):
+        print(f"rl restart gate: {CAPABILITY_ABSENT_S3RL}")
+        print("rl restart determinism: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    full_output = case_dir / "out" / "output.h5"
+
+    restart_dir = stage_case(args.repo, "rl-realloc", args.work / "restart")
+    restart_config = restart_dir / "rl2-tidal-box.yaml"
+
+    def add_restart(doc):
+        full_setup(doc)
+        doc["restart"] = {"enabled": True, "file": str(full_output.resolve()),
+                          "time": 7200}
+        doc["output"]["filename"] = "out/restarted.h5"
+
+    rewrite_config(restart_config, add_restart)
+    run_case(args.frehg, restart_config, restart_dir, args.mpiexec, args.ranks)
+
+    ok = True
+    with h5py.File(full_output, "r") as full, \
+         h5py.File(restart_dir / "out" / "restarted.h5", "r") as part:
+        for var in ["hydraulic_head", "water_content", "realloc_created",
+                    "realloc_dropped", "vloss"]:
+            for t in output_times(part, f"/groundwater/{var}"):
+                if t <= 7200:
+                    continue
+                a = full[f"/groundwater/{var}/{t}"][:]
+                b = part[f"/groundwater/{var}/{t}"][:]
+                same = np.array_equal(np.nan_to_num(a, nan=-9.0e99),
+                                      np.nan_to_num(b, nan=-9.0e99))
+                if not same or t == output_times(part, f"/groundwater/{var}")[-1]:
+                    print(f"  restart {var}@{t}: {'bitwise' if same else 'DIFFERS'}")
+                ok = ok and same
+    print("rl restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_rl2(args: argparse.Namespace) -> int:
+    tol = rl_tolerances("rl2")
+    lanes: dict[str, dict] = {}
+    for lane in ("legacy", "disabled"):
+        config = rl_stage_lane(args, "rl-realloc", "rl2-tidal-box.yaml", lane)
+        if config is None:
+            print(f"rl2 gate: {CAPABILITY_ABSENT_S3RL}")
+            print("rl2 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, config.parent, args.mpiexec, args.ranks)
+        output = config.parent / "out" / "output.h5"
+        with h5py.File(output, "r") as handle:
+            audit = handle["/monitor/gw_mass_audit"][:]
+            t_last = output_times(handle, "/groundwater/water_content")[-1]
+            wc = handle[f"/groundwater/water_content/{t_last}"][:]
+        lanes[lane] = {
+            "audit": audit,
+            "wc": wc,
+            "created": rl_field_sum(output, "realloc_created", t_last),
+            "dropped": rl_field_sum(output, "realloc_dropped", t_last),
+            "vloss": rl_field_sum(output, "vloss", t_last),
+            "substeps": rl_substeps(config),
+            "config": config,
+        }
+    ok = True
+
+    def report(label: str, result) -> None:
+        nonlocal ok
+        good, msg = result
+        print(f"  {label}: {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+
+    theta_lo, theta_hi = rl_soil_bounds(lanes["disabled"]["config"])
+    off = lanes["disabled"]
+    legacy = lanes["legacy"]
+    report("disabled ledger", gate_realloc.check_ledger(off["audit"], tol["ledger_rel"]))
+    report("disabled realloc exactly zero",
+           gate_realloc.check_realloc_exactly_zero(off["audit"]))
+    report("disabled theta bounds",
+           gate_realloc.check_theta_bounds(off["wc"], theta_lo, theta_hi,
+                                           tol["theta_slack"]))
+    # S3-A4 domain-of-applicability record: this box saturates (that is what
+    # makes its legacy lane exercise reallocation), which is OUTSIDE the
+    # disabled mode's vadose domain — its clamp cost and substep count are
+    # RECORDED here as the owner's C-RL data, and BOUNDED on the vadose rl3
+    # case where the mode is meant to run.
+    d_off = gate_realloc.deltas(off["audit"])
+    print(f"  disabled (recorded, S3-A4): vloss {d_off[gate_realloc.VLOSS]:.3e} m^3 "
+          f"over T {gate_realloc.throughput(off['audit']):.3e} m^3; substeps "
+          f"{off['substeps']} vs legacy {legacy['substeps']}")
+    for lane in ("legacy", "disabled"):
+        report(f"{lane} per-cell sums",
+               gate_realloc.check_percell_sums(lanes[lane]["created"],
+                                               lanes[lane]["dropped"],
+                                               lanes[lane]["vloss"],
+                                               lanes[lane]["audit"],
+                                               tol["percell_rel"]))
+        report(f"{lane} ledger", gate_realloc.check_ledger(lanes[lane]["audit"],
+                                                           tol["ledger_rel"]))
+    report("legacy churn (anti-vacuity)",
+           gate_realloc.check_legacy_churn(legacy["audit"],
+                                           tol["churn_floor_rel"]))
+    print("rl2 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_rl3(args: argparse.Namespace) -> int:
+    tol = rl_tolerances("rl3")
+    results: dict[str, dict] = {}
+    for lane in ("legacy", "disabled"):
+        config = rl_stage_lane(args, "rl-realloc", "rl3-steady-column.yaml", lane)
+        if config is None:
+            print(f"rl3 gate: {CAPABILITY_ABSENT_S3RL}")
+            print("rl3 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, config.parent, args.mpiexec, args.ranks)
+        output = config.parent / "out" / "output.h5"
+        with h5py.File(output, "r") as handle:
+            audit = handle["/monitor/gw_mass_audit"][:]
+            times = output_times(handle, "/groundwater/water_content")
+            window = times[int(0.9 * (len(times) - 1)):]
+            first = handle[f"/groundwater/water_content/{window[0]}"][:]
+            last = handle[f"/groundwater/water_content/{window[-1]}"][:]
+            qz = handle[f"/groundwater/qz/{times[-1]}"][:]
+        results[lane] = {"audit": audit, "first": first, "last": last, "qz": qz,
+                         "substeps": rl_substeps(config)}
+    ok = True
+
+    def report(label: str, result) -> None:
+        nonlocal ok
+        good, msg = result
+        print(f"  {label}: {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+
+    off = results["disabled"]
+    report("disabled steadiness", gate_realloc.check_steady(off["first"], off["last"],
+                                                       tol["steady_abs"]))
+    report("disabled flux uniformity",
+           gate_realloc.check_uniform_flux(off["qz"], -2.0e-6, tol["uniform_rel"]))
+    report("disabled realloc exactly zero",
+           gate_realloc.check_realloc_exactly_zero(off["audit"]))
+    report("disabled ledger",
+           gate_realloc.check_ledger(off["audit"], tol["ledger_rel"],
+                                     tol["ledger_abs"]))
+    # The vadose-domain cost bounds (S3-A4): vloss and substeps are gated
+    # HERE, where the mode is applicable; rl2's saturated box records them.
+    report("disabled vloss", gate_realloc.check_vloss(off["audit"], tol["vloss_rel"]))
+    report("disabled substep cost",
+           gate_realloc.check_substep_ratio(off["substeps"], results["legacy"]["substeps"],
+                                            tol["substep_ratio"]))
+    # Legacy lane: recorded, not gated (the restore's effect on a steady front).
+    d = gate_realloc.deltas(results["legacy"]["audit"])
+    churn = d[gate_realloc.REALLOC] + 2.0 * d[gate_realloc.REALLOC_DROPPED]
+    _, legacy_uniform = gate_realloc.check_uniform_flux(results["legacy"]["qz"],
+                                                        -2.0e-6, tol["uniform_rel"])
+    print(f"  legacy (recorded): gross churn {churn:.3e} m^3; {legacy_uniform}")
+    print("rl3 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_rl4(args: argparse.Namespace) -> int:
+    tol = rl_tolerances("rl4")
+    results: dict[str, dict] = {}
+    for lane in ("legacy", "disabled"):
+        def consistent(doc):
+            doc.setdefault("transport", {})["subsurface_update"] = "consistent"
+        config = rl_stage_lane(args, "x-orient", "coupled-salt-base.yaml", lane,
+                               extra_transform=consistent)
+        if config is None:
+            print(f"rl4 gate: {CAPABILITY_ABSENT_S3RL}")
+            print("rl4 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, config.parent, args.mpiexec, args.ranks)
+        output = config.parent / "out" / "output.h5"
+        with h5py.File(output, "r") as handle:
+            gw_audit = handle["/monitor/gw_mass_audit"][:]
+            tr_audit = handle["/monitor/transport_audit"][:]
+            s_max = 0.0
+            for group in ("/transport/concentration", "/transport/concentration_surface"):
+                if group in handle:
+                    for t in handle[group]:
+                        s_max = max(s_max, float(np.nanmax(handle[f"{group}/{t}"][:])))
+        results[lane] = {"gw": gw_audit, "tr": tr_audit, "s_max": s_max}
+    ok = True
+    good, msg = gate_realloc.check_anchor(results["disabled"]["tr"], results["legacy"]["tr"],
+                                          results["disabled"]["s_max"],
+                                          results["disabled"]["gw"], tol["anchor_rel"],
+                                          tol["anchor_improvement"],
+                                          tol["anchor_legacy_floor_rel"])
+    print(f"  disabled vs legacy subs_anchor: {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("rl4 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T2: the open-boundary-closure gates ob1/ob3/ob5 (Stage-3 plan §6).
+# Pure references and checks live in gate_openbc.py (the discrete steady
+# chain); tolerances in tolerances/stage3-ob.yaml; §6.3 battery in
+# scripts/test_ob_gates.py.
+# ---------------------------------------------------------------------------
+
+import gate_openbc  # noqa: E402
+
+CAPABILITY_ABSENT_S3OB = ("capability absent: the schema rejects the T2 "
+                          "target key (boundary_conditions[].inflow)")
+
+
+def ob_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-ob.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def ob_stage_lane(args: argparse.Namespace, case_yaml: str, lane: str,
+                  bc_name: str, u_ext: float | None = None) -> Path | None:
+    """Stage ob-openbc into work/<lane> and set the named BC's inflow block:
+    lane 'external' / 'zero_gradient', optionally with a constant u_ext."""
+    case_dir = stage_case(args.repo, "ob-openbc", args.work / lane)
+    config = case_dir / case_yaml
+
+    def set_lane(doc):
+        for bc in doc["boundary_conditions"]:
+            if bc["name"] == bc_name:
+                bc["inflow"] = {"closure": "external" if lane != "zero_gradient"
+                                else "zero_gradient"}
+                if u_ext is not None and lane != "zero_gradient":
+                    bc["inflow"]["velocity"] = {"u": {"constant": u_ext}}
+
+    rewrite_config(config, set_lane)
+    if not validate_config(args.frehg, config):
+        return None
+    return config
+
+
+def gate_ob1(args: argparse.Namespace) -> int:
+    tol = ob_tolerances("ob1")
+    ob1 = dict(nx=24, dx=1.0, dy=1.0, dt=0.25, bed=0.0, n_manning=0.01,
+               eta_west=1.005)
+    lanes = {"external": 0.0, "ext-moving": 0.1, "zero_gradient": None}
+    results: dict[str, dict] = {}
+    for lane, u_ext in lanes.items():
+        config = ob_stage_lane(args, "ob1-channel.yaml", lane, "west-stage", u_ext)
+        if config is None:
+            print(f"ob1 gate: {CAPABILITY_ABSENT_S3OB}")
+            print("ob1 gate: FAIL")
+            return 1
+        # Strict solver: the gated identity is the momentum chain, so the
+        # free-surface solve must sit at machine precision (the default
+        # bjacoby-icc rtol 1e-8 leaves a solver-class residual).
+        run_case(args.frehg, config, config.parent, args.mpiexec, args.ranks,
+                 STRICT_PETSC_OPTIONS)
+        with h5py.File(config.parent / "out" / "output.h5", "r") as handle:
+            times = output_times(handle, "/surface/uu")
+            # Flat output index k holds uu(j, k+1) — face k+1 (the east face
+            # of cell k+1); faces 1..nx-1 therefore sit at indices 0..nx-2.
+            uu_last = handle[f"/surface/uu/{times[-1]}"][:].reshape(1, 24)
+            eta_last = handle[f"/surface/eta/{times[-1]}"][:].reshape(1, 24)
+            tail = times[int(0.9 * (len(times) - 1)):]
+            u_in_tail = np.array([
+                float(handle[f"/surface/uu/{t}"][:].reshape(1, 24)[0, 0])
+                for t in tail])
+        results[lane] = {"uu": uu_last[0], "eta": eta_last[0], "tail": u_in_tail}
+    ok = True
+
+    def report(label, result):
+        nonlocal ok
+        good, msg = result
+        print(f"  {label}: {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+
+    chains = {}
+    for lane, u_ext in (("external", 0.0), ("ext-moving", 0.1)):
+        chain = gate_openbc.Chain(closure="external", u_ext=u_ext, **ob1)
+        q, eta_chain, u_chain = gate_openbc.chain_solve(chain, 1.0)
+        chains[lane] = (q, eta_chain, u_chain)
+        # Model faces: uu field index i is the east face of cell i+1
+        # (0-based flat output), so faces 1..nx-1 sit at indices 1..nx-1.
+        model_u = results[lane]["uu"][0:ob1["nx"] - 1]
+        report(f"{lane} velocity profile",
+               gate_openbc.check_velocity_profile(model_u, u_chain[1:],
+                                                  tol["velocity_rel"]))
+        report(f"{lane} steadiness",
+               gate_openbc.check_steadiness(results[lane]["tail"],
+                                            tol["steady_abs"]))
+        ratio_chain = ((eta_chain[1] - eta_chain[2])
+                       / (u_chain[1]**2 / (2.0 * gate_openbc.GRAVITY)))
+        report(f"{lane} entrance ratio",
+               gate_openbc.check_entrance_ratio(
+                   1.005, float(results[lane]["eta"][1]),
+                   float(results[lane]["uu"][0]), ratio_chain,
+                   tol["ratio_abs"]))
+    u_a = float(results["external"]["uu"][0])
+    u_c = float(results["zero_gradient"]["uu"][0])
+    r_a = (1.005 - float(results["external"]["eta"][1])) / (
+        u_a**2 / (2.0 * gate_openbc.GRAVITY))
+    r_c = (1.005 - float(results["zero_gradient"]["eta"][1])) / (
+        u_c**2 / (2.0 * gate_openbc.GRAVITY))
+    report("zero_gradient contrast (the real negative lane)",
+           gate_openbc.check_lane_contrast(u_a, u_c, tol["contrast_factor"],
+                                           r_a, r_c, tol["ratio_cap"]))
+    print("ob1 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_ob3(args: argparse.Namespace) -> int:
+    tol = ob_tolerances("ob3")
+    results: dict[str, dict] = {}
+    for lane in ("external", "zero_gradient"):
+        config = ob_stage_lane(args, "ob3-tidal-basin.yaml", lane, "tide-stage")
+        if config is None:
+            print(f"ob3 gate: {CAPABILITY_ABSENT_S3OB}")
+            print("ob3 gate: FAIL")
+            return 1
+        # Strict solver: the ledger identity is gated at rounding; under the
+        # default rtol 1e-8 the flux/volume mismatch is the solver residual
+        # (first execution measured -6.6e-4 m^3 over X = 3.0e4 m^3).
+        run_case(args.frehg, config, config.parent, args.mpiexec, args.ranks,
+                 STRICT_PETSC_OPTIONS)
+        with h5py.File(config.parent / "out" / "output.h5", "r") as handle:
+            ma = handle["/monitor/mass_audit"][:]
+            fr2 = 0.0
+            for t in output_times(handle, "/surface/vv"):
+                vv = handle[f"/surface/vv/{t}"][:]
+                depth = handle[f"/surface/depth/{t}"][:]
+                speed2 = float(np.nanmax(vv * vv))
+                h_min = max(float(np.nanmin(depth)), 1.0e-3)
+                fr2 = max(fr2, speed2 / (gate_openbc.GRAVITY * h_min))
+        results[lane] = {"audit": ma, "fr2": fr2}
+    ok = True
+    for lane in ("external", "zero_gradient"):
+        good, msg = gate_openbc.check_surface_ledger(results[lane]["audit"],
+                                                     tol["ledger_rel"])
+        print(f"  {lane} ledger: {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+    fr2 = max(results["external"]["fr2"], results["zero_gradient"]["fr2"])
+    prisms = {lane: gate_openbc.prism_per_cycle(results[lane]["audit"], 3600.0)
+              for lane in results}
+    good, msg = gate_openbc.check_prism_agreement(
+        prisms["external"], prisms["zero_gradient"], fr2,
+        tol["prism_coef"], tol["prism_floor_rel"])
+    print(f"  prism agreement: {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("ob3 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_ob5(args: argparse.Namespace) -> int:
+    tol = ob_tolerances("ob5")
+    results: dict[str, dict] = {}
+    for lane in ("external", "zero_gradient"):
+        config = ob_stage_lane(args, "ob5-gyre.yaml", lane, "sea-stage")
+        if config is None:
+            print(f"ob5 gate: {CAPABILITY_ABSENT_S3OB}")
+            print("ob5 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, config.parent, args.mpiexec, args.ranks)
+        with h5py.File(config.parent / "out" / "output.h5", "r") as handle:
+            times = output_times(handle, "/surface/uu")
+            ke = []
+            influx = 0.0
+            prev_t = 0.0
+            for t in times:
+                uu = handle[f"/surface/uu/{t}"][:].reshape(30, 20)
+                vv = handle[f"/surface/vv/{t}"][:].reshape(30, 20)
+                depth = handle[f"/surface/depth/{t}"][:].reshape(30, 20)
+                ke.append(gate_openbc.domain_ke(uu, vv, depth, 1.0, 1.0))
+                # Faces into the stage row: vv at interior row 28 (0-based),
+                # the north face of the last interior row.
+                influx += gate_openbc.stage_ke_influx(vv[28, :], depth[28, :],
+                                                      1.0, t - prev_t)
+                prev_t = t
+        results[lane] = {"ke": np.array(ke), "influx": influx}
+    ok = True
+    ext = results["external"]
+    good, msg = gate_openbc.check_ke_decay(ext["ke"], tol["settle_frames"],
+                                           tol["rise_rel"])
+    print(f"  external KE decay: {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good, msg = gate_openbc.check_ke_influx(ext["influx"], float(ext["ke"][0]),
+                                            tol["influx_rel"])
+    print(f"  external stage KE influx: {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good, msg = gate_openbc.check_influx_contrast(
+        results["zero_gradient"]["influx"], ext["influx"],
+        tol["contrast_factor"], tol["influx_floor_j"])
+    print(f"  zero_gradient contrast: {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("ob5 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T3: the periodic-topology gates pd1-pd8 (Stage-3 plan §7).
+# Pure references and checks live in gate_periodic.py; tolerances in
+# tolerances/stage3-pd.yaml; §6.3 battery in scripts/test_pd_gates.py.
+# ---------------------------------------------------------------------------
+
+import gate_periodic  # noqa: E402
+
+CAPABILITY_ABSENT_S3PD = ("capability absent: the schema rejects the T3 "
+                          "target key (domain.periodic)")
+
+
+def pd_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-pd.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def pd_transpose_doc(doc: dict) -> dict:
+    """The pd1 transposed lane: swap nx/ny, dx/dy, periodic axes, wind
+    components, wall polygons (x <-> y), and monitor indices."""
+    doc = yaml.safe_load(yaml.safe_dump(doc))
+    dom = doc["domain"]
+    dom["nx"], dom["ny"] = dom["ny"], dom["nx"]
+    dom["dx"], dom["dy"] = dom["dy"], dom["dx"]
+    per = dom.get("periodic", {})
+    dom["periodic"] = {"x": bool(per.get("y", False)), "y": bool(per.get("x", False))}
+    wind = doc["surface_water"]["wind"]
+    wind["u10"], wind["v10"] = wind["v10"], wind["u10"]
+    for bc in doc.get("boundary_conditions", []):
+        bc["region"]["polygon"] = [[pt[1], pt[0]] for pt in bc["region"]["polygon"]]
+    for mon in doc.get("output", {}).get("monitors", []):
+        mon["i"], mon["j"] = mon["j"], mon["i"]
+    doc["simulation"]["id"] += "-T"
+    return doc
+
+
+def gate_pd_restart(args: argparse.Namespace) -> int:
+    """Stage-3 restart gate, pd lane (plan §3.4, S3-A6): a periodic surface
+    run (pd2-surface) checkpoints mid-run and restarts to the project's
+    restart class — flow fields to 1e-12 ABSOLUTE (measured 1.9e-15; the
+    wrapped halos and seam advection carry no restart-order state), the
+    superbee tracer to its measured branch-amplification class (the walled
+    control of the same case measures LARGER deviations on every field)."""
+    tol = pd_tolerances("pd-restart")
+    case_dir = stage_case(args.repo, "pd-periodic", args.work)
+    config = case_dir / "pd2-surface.yaml"
+
+    def full_setup(doc):
+        doc["output"]["checkpoint"] = {"interval": 300}
+
+    rewrite_config(config, full_setup)
+    if not validate_config(args.frehg, config):
+        print(f"pd restart gate: {CAPABILITY_ABSENT_S3PD}")
+        print("pd restart determinism: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    full_output = case_dir / "out" / "output.h5"
+
+    restart_dir = stage_case(args.repo, "pd-periodic", args.work / "restart")
+    restart_config = restart_dir / "pd2-surface.yaml"
+
+    def add_restart(doc):
+        full_setup(doc)
+        doc["restart"] = {"enabled": True, "file": str(full_output.resolve()),
+                          "time": 300}
+        doc["output"]["filename"] = "out/restarted.h5"
+
+    rewrite_config(restart_config, add_restart)
+    run_case(args.frehg, restart_config, restart_dir, args.mpiexec, args.ranks)
+    ok = True
+    with h5py.File(full_output, "r") as full, \
+         h5py.File(restart_dir / "out" / "restarted.h5", "r") as part:
+        for group in ("/surface/eta", "/surface/uu", "/surface/vv",
+                      "/surface/depth", "/transport/concentration_surface"):
+            tracer = "concentration" in group
+            for t in output_times(part, group):
+                if t <= 300:
+                    continue
+                a = full[f"{group}/{t}"][:]
+                b = part[f"{group}/{t}"][:]
+                good, msg = gate_periodic.check_restart_field(
+                    a, b, f"{group.rsplit('/', 1)[-1]}@{t}",
+                    tol_abs=None if tracer else tol["flow_abs"],
+                    tol_rel=tol["tracer_rel"] if tracer else None)
+                print(f"  restart {msg}{'' if good else ' FAIL'}")
+                ok = ok and good
+    print("pd restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_pd1(args: argparse.Namespace) -> int:
+    tol = pd_tolerances("pd1")
+    u_ref = gate_periodic.discrete_balance(10.0, 0.5, 0.05, 2.0)
+    u_cont = gate_periodic.continuum_balance(10.0, 0.5, 0.05)
+    print(f"  discrete balance {u_ref:.6f} m/s (continuum {u_cont:.6f}, recorded)")
+    ok = True
+
+    def report(label, result):
+        nonlocal ok
+        good, msg = result
+        print(f"  {label}: {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+
+    for lane in ("strict", "default", "transposed"):
+        case_dir = stage_case(args.repo, "pd-periodic", args.work / lane)
+        config = case_dir / "pd1-alongshore.yaml"
+        transposed = (lane == "transposed")
+        if transposed:
+            with open(config, encoding="utf-8") as handle:
+                doc = yaml.safe_load(handle)
+            with open(config, "w", encoding="utf-8") as handle:
+                yaml.safe_dump(pd_transpose_doc(doc), handle, sort_keys=False)
+        if not validate_config(args.frehg, config):
+            print(f"pd1 gate: {CAPABILITY_ABSENT_S3PD}")
+            print("pd1 gate: FAIL")
+            return 1
+        extra = [] if lane == "default" else STRICT_PETSC_OPTIONS
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks, extra)
+        shape = (8, 4) if transposed else (4, 8)  # (ny, nx)
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            times = output_times(handle, "/surface/eta")
+            eta = handle[f"/surface/eta/{times[-1]}"][:].reshape(shape)
+            vel_name = "vv" if transposed else "uu"
+            vel = handle[f"/surface/{vel_name}/{times[-1]}"][:].reshape(shape)
+            tail = times[-5:]
+            mon = np.array([float(np.nanmax(np.abs(
+                handle[f"/surface/{vel_name}/{t}"][:]))) for t in tail])
+        # The along-shore faces: every face along the periodic axis (walls
+        # make the cross-axis velocity ~0; the wall rows' along-axis faces
+        # carry the same balance).
+        if lane == "default":
+            report("default-solver eta flatness (recorded class)",
+                   gate_periodic.check_flat(eta, tol["default_eta_flat_abs"]))
+            continue
+        label = "strict" if lane == "strict" else "transposed (periodic y)"
+        report(f"{label} eta flatness", gate_periodic.check_flat(eta, tol["eta_flat_abs"]))
+        report(f"{label} u uniformity",
+               gate_periodic.check_flat(vel, tol["u_flat_abs"], "u"))
+        report(f"{label} balance",
+               gate_periodic.check_balance(vel, u_ref, tol["balance_rel"]))
+        report(f"{label} steadiness",
+               gate_periodic.check_steady(mon, tol["steady_abs"]))
+    print("pd1 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def pd_roll_inputs(case_dir: Path, config_name: str, k: int) -> Path:
+    """Stage a rolled variant: every x-dependent raster rolled k columns and
+    the config pointed at the rolled files."""
+    config = case_dir / config_name
+    with open(config, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    nx = int(doc["domain"]["nx"])
+    ny = int(doc["domain"]["ny"])
+    nz = int(doc["domain"]["nz"])
+
+    def roll_raster(rel: str, is3d: bool) -> str:
+        src = case_dir / rel
+        values = [line for line in src.read_text().splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+        flat = " ".join(values).split()
+        if is3d:
+            arr = np.array(flat).reshape(ny, nx, nz)
+            arr = np.roll(arr, k, axis=1)
+        else:
+            arr = np.array(flat).reshape(ny, nx)
+            arr = np.roll(arr, k, axis=1)
+        out = case_dir / "input" / f"rolled_{k}_{Path(rel).name}"
+        with open(out, "w", encoding="utf-8") as handle:
+            handle.write(f"# rolled by {k} columns for the pd2 lane\n")
+            for v in arr.reshape(-1):
+                handle.write(f"{v}\n")
+        return str(out.relative_to(case_dir))
+
+    dom = doc["domain"]["bottom_elevation"]
+    if isinstance(dom, dict) and "file" in dom:
+        dom["file"] = roll_raster(dom["file"], False)
+    soil = doc.get("soil", {}).get("map", {})
+    if isinstance(soil, dict) and "file" in soil:
+        soil["file"] = roll_raster(soil["file"], True)
+    tr_ic = doc.get("initial_conditions", {}).get("transport", {})
+    if isinstance(tr_ic.get("surface"), dict) and "file" in tr_ic["surface"]:
+        tr_ic["surface"]["file"] = roll_raster(tr_ic["surface"]["file"], False)
+    doc["simulation"]["id"] += f"-roll{k}"
+    doc["output"]["filename"] = f"out-roll{k}/output.h5"
+    rolled = case_dir / f"{Path(config_name).stem}-roll{k}.yaml"
+    with open(rolled, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(doc, handle, sort_keys=False)
+    return rolled
+
+
+PD2_FIELDS = {
+    "pd2-surface.yaml": [("/surface/eta", 1), ("/surface/uu", 1),
+                         ("/surface/vv", 1), ("/surface/depth", 1),
+                         ("/transport/concentration_surface", 1)],
+    "pd2-gw.yaml": [("/groundwater/hydraulic_head", 8),
+                    ("/groundwater/water_content", 8),
+                    ("/groundwater/qy", 8), ("/groundwater/qz", 8)],
+    "pd2-coupled.yaml": [("/surface/eta", 1), ("/surface/uu", 1),
+                         ("/surface/vv", 1),
+                         ("/groundwater/hydraulic_head", 6),
+                         ("/groundwater/water_content", 6),
+                         ("/transport/concentration", 6),
+                         ("/transport/concentration_surface", 1)],
+}
+
+
+def pd2_strict_options(config_name: str) -> list[str]:
+    if "coupled" in config_name:
+        return STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW
+    return (STRICT_PETSC_OPTIONS if "surface" in config_name
+            else STRICT_PETSC_OPTIONS_GW)
+
+
+def pd2_roll_bound(tol: dict, config_name: str, group: str) -> float:
+    """S3-A6 per-field-class bounds: the branch-free gw lane holds the
+    authored strict bound; the surface and coupled lanes' branches amplify
+    the rolled solver-ordering rounding (tracers at the tracer class,
+    everything else at the surface class — the coupled subsurface fields
+    inherit the surface class through the seepage exchange)."""
+    if "pd2-gw" in config_name:
+        return tol["roll_abs"]
+    if "concentration" in group:
+        return tol["roll_tracer_abs"]
+    return tol["roll_surface_abs"]
+
+
+def gate_pd2(args: argparse.Namespace) -> int:
+    tol = pd_tolerances("pd2")
+    ok = True
+    lanes = PD2_FIELDS
+    if getattr(args, "pd2_lane", None):
+        lanes = {name: fields for name, fields in PD2_FIELDS.items()
+                 if args.pd2_lane in name}
+    for config_name, fields in lanes.items():
+        case_dir = stage_case(args.repo, "pd-periodic",
+                              args.work / Path(config_name).stem)
+        config = case_dir / config_name
+        if not validate_config(args.frehg, config):
+            print(f"pd2 gate: {CAPABILITY_ABSENT_S3PD}")
+            print("pd2 gate: FAIL")
+            return 1
+        strict = pd2_strict_options(config_name)
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks, strict)
+        base_out = case_dir / "out" / "output.h5"
+        with h5py.File(base_out, "r") as handle:
+            nx = 12
+            doc_shape = None
+            base = {}
+            t_last = None
+            for group, nz in fields:
+                t_last = output_times(handle, group)[-1]
+                data = handle[f"{group}/{t_last}"][:]
+                ny = data.size // (nx * nz)
+                shape = (ny, nx, nz) if nz > 1 else (ny, nx)
+                base[group] = (data.reshape(ny, nx, nz) if nz > 1
+                               else data.reshape(ny, nx))
+            if "pd2-surface" in config_name:
+                tracer_frames = [
+                    handle[f"/transport/concentration_surface/{t}"][:].reshape(6, 12)
+                    for t in output_times(handle, "/transport/concentration_surface")]
+            if "coupled" in config_name:
+                c_times = output_times(handle, "/transport/concentration")
+                c_first = handle[f"/transport/concentration/{c_times[0]}"][:]
+                c_last = handle[f"/transport/concentration/{c_times[-1]}"][:]
+        if "pd2-surface" in config_name:
+            good, msg = gate_periodic.check_seam_crossing(tracer_frames, 0,
+                                                          tol["seam_floor"])
+            print(f"  [{config_name}] {msg}{'' if good else ' FAIL'}")
+            ok = ok and good
+        if "coupled" in config_name:
+            good, msg = gate_periodic.check_coupled_exchange(
+                c_first, c_last, tol["coupled_exchange_floor"])
+            print(f"  [{config_name}] {msg}{'' if good else ' FAIL'}")
+            ok = ok and good
+        for k in (3, 6):
+            rolled_cfg = pd_roll_inputs(case_dir, config_name, k)
+            run_case(args.frehg, rolled_cfg, case_dir, args.mpiexec, args.ranks,
+                     strict)
+            with h5py.File(case_dir / f"out-roll{k}" / "output.h5", "r") as handle:
+                for group, nz in fields:
+                    t_last = output_times(handle, group)[-1]
+                    data = handle[f"{group}/{t_last}"][:]
+                    ny = data.size // (12 * nz)
+                    arr = (data.reshape(ny, 12, nz) if nz > 1
+                           else data.reshape(ny, 12))
+                    unrolled = np.roll(arr, -k, axis=1)
+                    bound = pd2_roll_bound(tol, config_name, group)
+                    good, msg = gate_periodic.check_roll(
+                        base[group], unrolled, k, bound,
+                        f"[{config_name}] {group.rsplit('/', 1)[-1]}")
+                    print(f"  {msg}{'' if good else ' FAIL'}")
+                    ok = ok and good
+    print("pd2 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_pd3(args: argparse.Namespace) -> int:
+    tol = pd_tolerances("pd3")
+    ok = True
+    for config_name, fields in PD2_FIELDS.items():
+        strict = pd2_strict_options(config_name)
+        outputs = {}
+        # The coupled lane adds a 2 x 2 decomposition (plan §7 pd3): both
+        # wrapped-rank interfaces plus a y split through the tide rows.
+        decomps = [(1, 1), (2, 1), (4, 1)]
+        if "coupled" in config_name:
+            decomps.append((2, 2))
+        for px, py in decomps:
+            n = px * py
+            label = f"{Path(config_name).stem}-n{px}x{py}"
+            case_dir = stage_case(args.repo, "pd-periodic", args.work / label)
+            config = case_dir / config_name
+
+            def set_decomp(doc):
+                doc["domain"]["decomposition"] = {"mpi_nx": px, "mpi_ny": py}
+
+            rewrite_config(config, set_decomp)
+            if not validate_config(args.frehg, config):
+                print(f"pd3 gate: {CAPABILITY_ABSENT_S3PD}")
+                print("pd3 gate: FAIL")
+                return 1
+            run_case(args.frehg, config, case_dir, args.mpiexec, n, strict)
+            outputs[(px, py)] = case_dir / "out" / "output.h5"
+        with h5py.File(outputs[(1, 1)], "r") as base_h:
+            for px, py in decomps[1:]:
+                with h5py.File(outputs[(px, py)], "r") as other:
+                    for group, _ in fields:
+                        worst = 0.0
+                        for t in output_times(base_h, group):
+                            a = base_h[f"{group}/{t}"][:]
+                            b = other[f"{group}/{t}"][:]
+                            worst = max(worst,
+                                        float(np.nanmax(np.abs(a - b))))
+                        # S3-A6 per-field-class bounds (the pd2 classes):
+                        # the gw lane holds strict 1e-12; the surface and
+                        # coupled lanes' branches amplify the rank-dependent
+                        # allreduce rounding (walled control measures ~10x
+                        # worse than the periodic lane on every field).
+                        if "pd2-gw" in config_name:
+                            bound = tol["rank_abs"]
+                        elif "concentration" in group:
+                            bound = tol["rank_tracer_abs"]
+                        else:
+                            bound = tol["rank_surface_abs"]
+                        good = worst <= bound
+                        print(f"  [{config_name}] {group.rsplit('/', 1)[-1]} "
+                              f"n=1 vs {px}x{py} (self-wrap vs wrapped "
+                              f"ranks): max |delta| = {worst:.3e} "
+                              f"(<= {bound:.0e}){'' if good else ' FAIL'}")
+                        ok = ok and good
+    print("pd3 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_pd4(args: argparse.Namespace) -> int:
+    tol = pd_tolerances("pd4")
+    case_dir = stage_case(args.repo, "pd-periodic", args.work)
+    config = case_dir / "pd4-tidal-periodic.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"pd4 gate: {CAPABILITY_ABSENT_S3PD}")
+        print("pd4 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks,
+             STRICT_PETSC_OPTIONS)
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/mass_audit"][:]
+    good, msg = gate_periodic.check_surface_ledger(audit, tol["ledger_rel"])
+    print(f"  periodic-x tidal ledger: {msg}{'' if good else ' FAIL'}")
+    print("pd4 gate:", "PASS" if good else "FAIL")
+    return 0 if good else 1
+
+
+def gate_pd5(args: argparse.Namespace) -> int:
+    tol = pd_tolerances("pd5")
+    ok = True
+    results = {}
+    for lane in ("uniform", "columns"):
+        case_dir = stage_case(args.repo, "pd-periodic", args.work / lane)
+        config = case_dir / "pd5-confined.yaml"
+        if lane == "columns":
+            def vary_k(doc):
+                # Periodic-by-construction x-column K variation: 3 types
+                # cycling over the 6 columns.
+                types = []
+                for n, ks in enumerate((8.0e-6, 1.0e-5, 1.2e-5)):
+                    types.append({"name": f"a{n}", "ksx": ks, "ksy": ks,
+                                  "ksz": ks, "theta_s": 0.41, "theta_r": 0.05,
+                                  "vg_alpha": 2.0, "vg_n": 1.8})
+                doc["soil"]["types"] = types
+                ids = []
+                for j in range(10):
+                    for i in range(6):
+                        ids.extend([i % 3] * 5)
+                raster = case_dir / "input" / "pd5_columns.dat"
+                with open(raster, "w", encoding="utf-8") as handle:
+                    handle.write("# pd5 periodic column ids\n")
+                    for v in ids:
+                        handle.write(f"{v}\n")
+                doc["soil"]["map"] = {"file": "input/pd5_columns.dat"}
+            rewrite_config(config, vary_k)
+        if not validate_config(args.frehg, config):
+            print(f"pd5 gate: {CAPABILITY_ABSENT_S3PD}")
+            print("pd5 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks,
+                 STRICT_PETSC_OPTIONS_GW)
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            t = output_times(handle, "/groundwater/hydraulic_head")[-1]
+            head = handle[f"/groundwater/hydraulic_head/{t}"][:].reshape(10, 6, 5)
+            qx = handle[f"/groundwater/qx/{t}"][:]
+            qy = handle[f"/groundwater/qy/{t}"][:]
+        results[lane] = head
+        good, msg = gate_periodic.check_linear_head(head, np.arange(10) + 0.5,
+                                                    3.0, 2.8, tol["head_abs"])
+        print(f"  [{lane}] {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+        qy_scale = float(np.nanmax(np.abs(qy)))
+        good, msg = gate_periodic.check_zero_x_flux(qx, qy_scale, tol["qx_rel"])
+        print(f"  [{lane}] {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+    worst = float(np.nanmax(np.abs(results["uniform"] - results["columns"])))
+    good = worst <= tol["head_abs"]
+    print(f"  uniform vs column-K head: max |delta| = {worst:.3e} "
+          f"(<= {tol['head_abs']:.0e}){'' if good else ' FAIL'}")
+    ok = ok and good
+    print("pd5 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_pd6(args: argparse.Namespace) -> int:
+    ok = True
+    case_dir = stage_case(args.repo, "pd-periodic", args.work)
+    # (a) x-edge-only BC under periodic x: setup fatal with the §13.B text.
+    config = case_dir / "pd1-alongshore.yaml"
+
+    def add_x_wall(doc):
+        # Column 0's INTERIOR rows only (centres x = 5, y = 15/25): every
+        # selected face is on the periodic x axis — the y-edge corner faces
+        # would otherwise legitimately attach and defeat the probe.
+        doc["boundary_conditions"].append({
+            "name": "x-wall",
+            "region": {"polygon": [[-1.0, 10.5], [5.5, 10.5], [5.5, 29.5],
+                                    [-1.0, 29.5]]},
+            "target": "surface", "kind": "velocity",
+            "value": {"constant": 0.0}})
+
+    rewrite_config(config, add_x_wall)
+    if not validate_config(args.frehg, config):
+        print(f"pd6 gate: {CAPABILITY_ABSENT_S3PD}")
+        print("pd6 gate: FAIL")
+        return 1
+    result = subprocess.run(
+        [str(args.mpiexec), "-n", "1", str(args.frehg), config.name],
+        cwd=case_dir, capture_output=True, text=True, check=False)
+    fatal = (result.returncode != 0 and
+             "selects only faces on the periodic" in
+             (result.stdout + result.stderr))
+    print(f"  x-edge wall under periodic x: exit {result.returncode}, "
+          f"message {'found' if fatal else 'MISSING'}"
+          f"{'' if fatal else ' FAIL'}")
+    ok = ok and fatal
+    # (a2, Stage-3 T8 W8.7) the y-axis twin: pd1 flipped to periodic y,
+    # with a probe BC on row 0's INTERIOR columns only (centres x = 15..65)
+    # — its y-edge faces are periodic-skipped and, unlike the full-span
+    # walls, it has no legitimate x-corner faces to attach (the same trap
+    # the x probe's polygon avoids). Same fatal, axis-correct message.
+    y_dir = stage_case(args.repo, "pd-periodic", args.work / "y-axis")
+    config = y_dir / "pd1-alongshore.yaml"
+
+    def flip_axis(doc):
+        doc["domain"]["periodic"] = {"y": True}
+        doc["boundary_conditions"].append({
+            "name": "y-wall",
+            "region": {"polygon": [[10.5, -1.0], [69.5, -1.0], [69.5, 5.5],
+                                    [10.5, 5.5]]},
+            "target": "surface", "kind": "velocity",
+            "value": {"constant": 0.0}})
+        doc["simulation"]["id"] += "-ywall"
+
+    rewrite_config(config, flip_axis)
+    result = subprocess.run(
+        [str(args.mpiexec), "-n", "1", str(args.frehg), config.name],
+        cwd=y_dir, capture_output=True, text=True, check=False)
+    fatal = (result.returncode != 0 and
+             "selects only faces on the periodic y" in
+             (result.stdout + result.stderr))
+    print(f"  y-edge wall under periodic y: exit {result.returncode}, "
+          f"message {'found' if fatal else 'MISSING'}"
+          f"{'' if fatal else ' FAIL'}")
+    ok = ok and fatal
+    # (b) seam warning on a deliberately non-periodic bed.
+    warn_dir = stage_case(args.repo, "pd-periodic", args.work / "seam-warning")
+    config = warn_dir / "pd2-surface.yaml"
+
+    def break_seam(doc):
+        doc["domain"]["bottom_elevation"] = {"file": "input/pd6_ramp.dat"}
+        doc["time"]["t_end"] = 2.0
+        doc["time"]["output_interval"] = 2.0
+    ramp = ["# pd6 non-periodic ramp bed"]
+    for j in range(6):
+        for i in range(12):
+            ramp.append(f"{-1.0 + 0.05 * i:.6f}")
+    (warn_dir / "input" / "pd6_ramp.dat").write_text("\n".join(ramp) + "\n")
+    rewrite_config(config, break_seam)
+    result = subprocess.run(
+        [str(args.mpiexec), "-n", "1", str(args.frehg), config.name],
+        cwd=warn_dir, capture_output=True, text=True, check=False)
+    warned = "the seam is a discontinuity" in (result.stdout + result.stderr)
+    record = (warn_dir / "out" / "run-record.yaml")
+    in_record = record.exists() and "seam is a discontinuity" in record.read_text()
+    print(f"  seam warning on a ramp bed: log {'found' if warned else 'MISSING'}, "
+          f"record {'found' if in_record else 'MISSING'}"
+          f"{'' if warned and in_record else ' FAIL'}")
+    ok = ok and warned and in_record
+    print("pd6 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_pd8(args: argparse.Namespace) -> int:
+    # The vadose rl5 base with periodic x through the 8-transform battery:
+    # the W3.7 flag swap maps periodic-x variants onto periodic-y ones, so a
+    # pass proves the implementation axis-generic (plan §7 / O3).
+    case_dir = stage_case(args.repo, "rl-realloc", args.work / "stage")
+    config = case_dir / "rl5-orient-base.yaml"
+
+    def make_periodic(doc):
+        doc["domain"]["periodic"] = {"x": True}
+        # Drop the x-edge side heads (their faces are now interior); keep
+        # the y-side flux probe for injectivity, add a y+ drain.
+        doc["boundary_conditions"] = [
+            bc for bc in doc["boundary_conditions"]
+            if bc["name"] not in ("drain-west", "drain-east")]
+        doc["boundary_conditions"].append({
+            "name": "drain-north",
+            "region": {"polygon": [[-0.1, 5.7], [6.1, 5.7], [6.1, 6.1],
+                                    [-0.1, 6.1]]},
+            "target": "groundwater_side", "kind": "head",
+            "value": {"constant": -2.0}})
+
+    rewrite_config(config, make_periodic)
+    if not validate_config(args.frehg, config):
+        print(f"pd8 gate: {CAPABILITY_ABSENT_S3PD}")
+        print("pd8 gate: FAIL")
+        return 1
+    # Re-stage the modified base into the battery's expected location.
+    battery_dir = args.work / "battery"
+    if battery_dir.exists():
+        shutil.rmtree(battery_dir)
+    shutil.copytree(case_dir, battery_dir / "rl-realloc")
+    args2 = argparse.Namespace(**vars(args))
+    args2.work = battery_dir
+    rc_gw = run_dihedral_battery(
+        args2, "pd8-orient", "rl5-orient-base.yaml",
+        {"/groundwater/hydraulic_head": 8, "/groundwater/water_content": 8},
+        STRICT_PETSC_OPTIONS_GW, case="rl-realloc", tol_key="gw")
+    # Surface lane (plan §7 pd8): the pd-periodic orient-base (periodic-x
+    # torus bump, oblique wind rotated with the domain, tracer slab at the
+    # seam, y walls). Scalar fields only — the dihedral push compares
+    # cell-centered scalars; uu/vv are staggered vector components that
+    # transform with sign flips and a component swap (the swe-orient
+    # convention: a velocity asymmetry feeds eta within steps). S3-A6
+    # field classes for `transpose` (the solver unknown-ordering change
+    # seeds the same branch amplification the pd2 roll measures); the six
+    # mixed transforms additionally swap the y walls' minus/plus legacy
+    # edge arithmetic — the x-orient swe class (1e-2) applies.
+    tol_surface = pd_tolerances("pd8")
+    rc_sw = run_dihedral_battery(
+        args, "pd8-surface", "pd8-orient-base.yaml",
+        {"/surface/eta": 1, "/surface/depth": 1,
+         "/transport/concentration_surface": 1},
+        STRICT_PETSC_OPTIONS, case="pd-periodic",
+        raster_keys=[("domain", "bottom_elevation"),
+                     ("initial_conditions", "transport", "surface")],
+        tol_override={
+            "tol_abs_transpose": tol_surface["surface_transpose_abs"],
+            "tol_abs_mixed": tol_surface["surface_mixed_abs"],
+            "per_field_transpose": {
+                "/transport/concentration_surface":
+                    tol_surface["tracer_transpose_abs"]}})
+    return rc_gw or rc_sw
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T4 diagnostics gates (plan §8): dg1 (interval-mean seepage rate
+# vs the coupled ledger + the V3 anti-vacuity), dg2 (monitor decimation as
+# a bitwise row subset, plus the checkpoint/t_end forced-row lane) and the
+# dg restart lane (seepage_rate bitwise across a checkpoint).
+# ---------------------------------------------------------------------------
+import gate_diagnostics  # noqa: E402
+
+CAPABILITY_ABSENT_S3DG = ("capability absent: the schema rejects the T4 "
+                          "target keys (seepage_rate / output.monitor_interval)")
+
+
+def dg_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-dg.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def gate_dg1(args: argparse.Namespace) -> int:
+    tol = dg_tolerances("dg1")
+    case_dir = stage_case(args.repo, "dg-diagnostics", args.work)
+    config = case_dir / "dg1-seepage.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"dg1 gate: {CAPABILITY_ABSENT_S3DG}")
+        print("dg1 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    with open(config, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    area = float(doc["domain"]["dx"]) * float(doc["domain"]["dy"])
+    min_depth = float(doc["surface_water"]["min_depth"])
+    ok = True
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        times = output_times(handle, "/surface/seepage_rate")
+        rates = [handle[f"/surface/seepage_rate/{t}"][:] for t in times]
+        snaps = [handle[f"/surface/seepage/{t}"][:] for t in times]
+        depths = [handle[f"/surface/depth/{t}"][:] for t in times]
+        audit = handle["/monitor/mass_audit"][:]
+    # mass_audit columns (coupled): time, volume, rain, evap, outflow,
+    # bc_inflow, seepage, clamped, stage_deposit — seepage is column 6.
+    good, msgs = gate_diagnostics.check_rate_ledger(
+        [float(t) for t in times], rates, audit[:, 0], audit[:, 6], area,
+        tol["ledger_rel"])
+    for msg in msgs:
+        print(f"  {msg}")
+    ok = ok and good
+    good, msg = gate_diagnostics.check_rate_antivacuity(snaps, rates, depths,
+                                                        min_depth)
+    print(f"  {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("dg1 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def dg2_stage_lane(args: argparse.Namespace, name: str, transform) -> Path:
+    case_dir = stage_case(args.repo, "dg-diagnostics", args.work / name)
+    config = case_dir / "dg1-seepage.yaml"
+    rewrite_config(config, transform)
+    if not validate_config(args.frehg, config):
+        return None
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    return case_dir / "out" / "output.h5"
+
+
+def gate_dg2(args: argparse.Namespace) -> int:
+    t_end = 3600.0
+
+    def every_step(doc):
+        doc["simulation"]["id"] += "-full"
+
+    def decimated(doc):
+        doc["simulation"]["id"] += "-dec60"
+        doc["output"]["monitor_interval"] = 60
+
+    def forced(doc):
+        # 77 s divides neither the 1800 s checkpoint nor t_end = 3600 s:
+        # the rows at 1800 and 3600 exist only through the forced-row
+        # paths (checkpoint instants and t_end).
+        doc["simulation"]["id"] += "-dec77"
+        doc["output"]["monitor_interval"] = 77
+        doc["output"]["checkpoint"] = {"interval": 1800}
+
+    lanes = {}
+    for name, transform in (("full", every_step), ("dec60", decimated),
+                            ("dec77", forced)):
+        out = dg2_stage_lane(args, name, transform)
+        if out is None:
+            print(f"dg2 gate: {CAPABILITY_ABSENT_S3DG}")
+            print("dg2 gate: FAIL")
+            return 1
+        lanes[name] = out
+    ok = True
+    with h5py.File(lanes["full"], "r") as handle:
+        tables = sorted(handle["/monitor"].keys())
+        full = {name: handle[f"/monitor/{name}"][:] for name in tables}
+    for lane in ("dec60", "dec77"):
+        with h5py.File(lanes[lane], "r") as handle:
+            for name in tables:
+                dec = handle[f"/monitor/{name}"][:]
+                good, msg = gate_diagnostics.check_decimated_subset(
+                    full[name], dec, t_end, f"[{lane}] {name}")
+                print(f"  {msg}{'' if good else ' FAIL'}")
+                ok = ok and good
+                if lane == "dec77":
+                    expected = ([0.0] + [77.0 * k for k in
+                                         range(1, int(t_end / 77.0) + 1)]
+                                + [1800.0, t_end])
+                    good, msg = gate_diagnostics.check_row_times(
+                        dec[:, 0], expected, f"[{lane}] {name} schedule")
+                    print(f"  {msg}{'' if good else ' FAIL'}")
+                    ok = ok and good
+    print("dg2 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_dg_restart(args: argparse.Namespace) -> int:
+    """Stage-3 restart gate, dg lane (plan §8): the interval-rate
+    accumulators (acc_<name> + acc_t_prev) restart BITWISE — a seepage_rate
+    frame written after the restart equals the continuous run's frame."""
+    case_dir = stage_case(args.repo, "dg-diagnostics", args.work)
+    config = case_dir / "dg1-seepage.yaml"
+
+    def full_setup(doc):
+        doc["output"]["checkpoint"] = {"interval": 1800}
+
+    rewrite_config(config, full_setup)
+    if not validate_config(args.frehg, config):
+        print(f"dg restart gate: {CAPABILITY_ABSENT_S3DG}")
+        print("dg restart determinism: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    full_output = case_dir / "out" / "output.h5"
+
+    restart_dir = stage_case(args.repo, "dg-diagnostics", args.work / "restart")
+    restart_config = restart_dir / "dg1-seepage.yaml"
+
+    def add_restart(doc):
+        full_setup(doc)
+        doc["restart"] = {"enabled": True, "file": str(full_output.resolve()),
+                          "time": 1800}
+        doc["output"]["filename"] = "out/restarted.h5"
+
+    rewrite_config(restart_config, add_restart)
+    run_case(args.frehg, restart_config, restart_dir, args.mpiexec, args.ranks)
+    ok = True
+    with h5py.File(full_output, "r") as full, \
+         h5py.File(restart_dir / "out" / "restarted.h5", "r") as part:
+        for group in ("/surface/seepage_rate", "/surface/seepage",
+                      "/surface/eta", "/surface/depth"):
+            for t in output_times(part, group):
+                if t <= 1800:
+                    continue
+                a = full[f"{group}/{t}"][:]
+                b = part[f"{group}/{t}"][:]
+                same = np.array_equal(a, b)
+                if not same or t == output_times(part, group)[-1]:
+                    print(f"  restart {group.rsplit('/', 1)[-1]}@{t}: "
+                          f"{'bitwise' if same else 'DIFFERS'}")
+                ok = ok and same
+    print("dg restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T5 evapotranspiration gates (plan §9): et1 (new block vs the v2.0
+# bulk path + the D1 coupled lane), et2 (coupled dry == uncoupled), et3 (the
+# pond-to-soil switch + the v2.0 window-lag real negative), et4 (water
+# balance), et7 (supply cap), et8 (salt lanes a/b/c/d), et9 (the tidal-flat
+# smoke with the noET bitwise pin), et-x (orient battery + rank lane) and
+# the et restart lanes.
+# ---------------------------------------------------------------------------
+import gate_et  # noqa: E402
+
+CAPABILITY_ABSENT_S3ET = ("capability absent: the schema rejects the T5 "
+                          "target keys (evapotranspiration / surface_dryout "
+                          "/ atmosphere outputs)")
+
+
+def et_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-et.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def h5_bitwise_groups(path_a: Path, path_b: Path, groups) -> tuple[bool, list]:
+    msgs = []
+    ok = True
+    with h5py.File(path_a, "r") as a, h5py.File(path_b, "r") as b:
+        for group in groups:
+            if group not in a or group not in b:
+                ok = False
+                msgs.append(f"{group}: missing")
+                continue
+            for t in output_times(a, group):
+                x = a[f"{group}/{t}"][:]
+                y = b[f"{group}/{t}"][:]
+                same = np.array_equal(np.nan_to_num(x, nan=-9.0e99),
+                                      np.nan_to_num(y, nan=-9.0e99))
+                if not same:
+                    ok = False
+                    msgs.append(f"{group}@{t}: DIFFERS (max |d| = "
+                                f"{np.nanmax(np.abs(x - y)):.3e})")
+    if ok:
+        msgs.append(f"{len(list(groups))} groups bitwise")
+    return ok, msgs
+
+
+def gate_et1(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et1")
+    ok = True
+    # Lane a: the NEW uncoupled soil channel vs the v2.0 bulk path, bitwise.
+    case_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "a-new")
+    config = case_dir / "et1-column.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"et1 gate: {CAPABILITY_ABSENT_S3ET}")
+        print("et1 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    old_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "a-old")
+    old_cfg = old_dir / "et1-column.yaml"
+
+    def to_old(doc):
+        del doc["evapotranspiration"]
+        doc["groundwater"]["evaporation"] = {
+            "mode": "bulk",
+            "region": {"polygon": [[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0],
+                                    [-1.0, 2.0]]}}
+        doc["simulation"]["id"] += "-v20"
+
+    rewrite_config(old_cfg, to_old)
+    run_case(args.frehg, old_cfg, old_dir, args.mpiexec, args.ranks)
+    # S3-A8: the two kernels' fma contraction differs under the build's
+    # default -ffp-contract=fast (bitwise through substep 15; measured
+    # class in stage3-et.yaml).
+    with h5py.File(case_dir / "out" / "output.h5", "r") as new_h, \
+         h5py.File(old_dir / "out" / "output.h5", "r") as old_h:
+        for group, bound in (("/groundwater/water_content", tol["a_theta_abs"]),
+                             ("/groundwater/hydraulic_head", tol["a_head_abs"])):
+            worst = 0.0
+            for t in output_times(new_h, group):
+                x = new_h[f"{group}/{t}"][:]
+                y = old_h[f"{group}/{t}"][:]
+                m = np.isfinite(x) & np.isfinite(y)
+                worst = max(worst, float(np.max(np.abs(x[m] - y[m]))))
+            good = worst <= bound
+            print(f"  [a] new-vs-v2.0 {group.rsplit('/', 1)[-1]}: max |d| = "
+                  f"{worst:.3e} (<= {bound:.0e}){'' if good else ' FAIL'}")
+            ok = ok and good
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+    unreal = audit[-1][8]
+    good = abs(unreal) <= 1.0e-30
+    print(f"  [a] unrealised == 0 (cap never binds): {unreal:.3e}"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+
+    # Lane b (S3-A8): the coupled D1 guard-mismatch lane.
+    b_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "b-new")
+    b_cfg = b_dir / "et1b-coupled.yaml"
+    run_case(args.frehg, b_cfg, b_dir, args.mpiexec, args.ranks)
+    bold_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "b-old")
+    bold_cfg = bold_dir / "et1b-coupled.yaml"
+
+    def b_to_old(doc):
+        del doc["evapotranspiration"]
+        doc["simulation"]["id"] += "-v20"
+        doc.setdefault("boundary_conditions", []).append({
+            "name": "evap-top",
+            "region": {"polygon": [[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0],
+                                    [-1.0, 2.0]]},
+            "target": "groundwater_top", "kind": "flux",
+            "value": {"constant": 1.0e-6}})
+
+    rewrite_config(bold_cfg, b_to_old)
+    run_case(args.frehg, bold_cfg, bold_dir, args.mpiexec, args.ranks)
+    with h5py.File(b_dir / "out" / "output.h5", "r") as new_h, \
+         h5py.File(bold_dir / "out" / "output.h5", "r") as old_h:
+        t1 = output_times(new_h, "/groundwater/hydraulic_head")[1]
+        hn = new_h[f"/groundwater/hydraulic_head/{t1}"][:]
+        ho = old_h[f"/groundwater/hydraulic_head/{t1}"][:]
+        mask = np.isfinite(hn) & np.isfinite(ho)
+        d1 = float(np.max(np.abs(hn[mask] - ho[mask])))
+        audit_new = new_h["/monitor/gw_mass_audit"][:]
+    good = d1 >= tol["d1_head_floor"]
+    print(f"  [b] D1 head difference at t = {t1}: {d1:.3e} "
+          f"(>= {tol['d1_head_floor']:.0e}){'' if good else ' FAIL'}")
+    ok = ok and good
+    # The new lane's ledger closes: dV = boundary_in - ss + realloc - vloss.
+    dv = audit_new[-1][1] - audit_new[0][1]
+    rhs = (audit_new[-1][2] - audit_new[-1][3] + audit_new[-1][4]
+           - audit_new[-1][6])
+    resid = abs(dv - rhs) / max(abs(audit_new[-1][7]), 1.0e-12)
+    good = resid <= 1.0e-6
+    print(f"  [b] new-path ledger residual / soil_evap: {resid:.3e}"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("et1 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et2(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et2")
+    unc_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "uncoupled")
+    unc_cfg = unc_dir / "et1-column.yaml"
+    if not validate_config(args.frehg, unc_cfg):
+        print(f"et2 gate: {CAPABILITY_ABSENT_S3ET}")
+        print("et2 gate: FAIL")
+        return 1
+    run_case(args.frehg, unc_cfg, unc_dir, args.mpiexec, args.ranks,
+             STRICT_PETSC_OPTIONS_GW)
+    cpl_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "coupled")
+    cpl_cfg = cpl_dir / "et2-coupled-dry.yaml"
+    run_case(args.frehg, cpl_cfg, cpl_dir, args.mpiexec, args.ranks,
+             STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW)
+    ok = True
+    with h5py.File(unc_dir / "out" / "output.h5", "r") as unc, \
+         h5py.File(cpl_dir / "out" / "output.h5", "r") as cpl:
+        worst = 0.0
+        for group in ("/groundwater/hydraulic_head", "/groundwater/water_content"):
+            for t in output_times(unc, group):
+                a = unc[f"{group}/{t}"][:]
+                b = cpl[f"{group}/{t}"][:]
+                m = np.isfinite(a) & np.isfinite(b)
+                scale = max(float(np.max(np.abs(a[m]))), 1.0e-12)
+                worst = max(worst, float(np.max(np.abs(a[m] - b[m]))) / scale)
+        good = worst <= tol["traj_rel"]
+        print(f"  coupled-dry vs uncoupled trajectory: worst rel "
+              f"{worst:.3e} (<= {tol['traj_rel']:.0e}){'' if good else ' FAIL'}")
+        ok = ok and good
+        depth_max = max(float(np.nanmax(cpl[f"/surface/depth/{t}"][:]))
+                        for t in output_times(cpl, "/surface/depth"))
+        good = depth_max <= 0.0
+        print(f"  anti-vacuity: surface depth max = {depth_max:.3e} (== 0)"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+    print("et2 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et3(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et3")
+    area = 1.0
+    h0 = 4.0e-4
+    ok = True
+    lanes = {}
+    for lane in ("bulk", "prescribed", "v20"):
+        case_dir = stage_case(args.repo, "et-evapotranspiration", args.work / lane)
+        config = case_dir / "et3-pond-switch.yaml"
+        if lane == "prescribed":
+            def presc(doc):
+                doc["evapotranspiration"]["potential"] = "prescribed"
+                doc["evapotranspiration"]["prescribed"] = {"constant": 1.3e-6}
+                doc["evapotranspiration"]["soil"]["limiter"] = "none"
+                doc["simulation"]["id"] += "-presc"
+            rewrite_config(config, presc)
+        elif lane == "v20":
+            def v20(doc):
+                ew = gate_et.potential_bulk(
+                    30.0, 101.3, gate_et.aero_resistance("liu2006", 8.0), 0.0,
+                    gate_et.met_specific_humidity(25.0, 101.3, 0.3))
+                del doc["evapotranspiration"]
+                doc["surface_water"]["evaporation"] = {"mode": "bulk"}
+                doc["boundary_conditions"] = [{
+                    "name": "evap-top",
+                    "region": {"polygon": [[-1.0, -1.0], [2.0, -1.0],
+                                            [2.0, 2.0], [-1.0, 2.0]]},
+                    "target": "groundwater_top", "kind": "flux",
+                    "value": {"constant": float(ew)}}]
+                doc["output"]["variables"].pop("atmosphere", None)
+                doc["simulation"]["id"] += "-v20"
+            rewrite_config(config, v20)
+        if not validate_config(args.frehg, config):
+            print(f"et3 gate [{lane}]: {CAPABILITY_ABSENT_S3ET}")
+            print("et3 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks,
+                 STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW)
+        lanes[lane] = case_dir / "out" / "output.h5"
+
+    qa = gate_et.met_specific_humidity(25.0, 101.3, 0.3)
+    ew_bulk = gate_et.potential_bulk(30.0, 101.3,
+                                     gate_et.aero_resistance("liu2006", 8.0),
+                                     0.0, qa)
+    for lane, ew in (("bulk", ew_bulk), ("prescribed", 1.3e-6)):
+        with h5py.File(lanes[lane], "r") as handle:
+            times = output_times(handle, "/surface/depth")
+            audit = handle["/monitor/mass_audit"][:]
+            depths = []
+            cum_open = []
+            cum_exch = []
+            for t in times:
+                depths.append(float(np.nanmax(handle[f"/surface/depth/{t}"][:])))
+                row = audit[np.isclose(audit[:, 0], t, atol=1.0e-6)][0]
+                cum_open.append(float(row[3]))   # evaporation column
+                cum_exch.append(float(row[6]))   # seepage column
+            good, msg = gate_et.check_pond_phase(
+                [float(t) for t in times], depths, cum_open, h0, ew,
+                cum_exch, area, tol["pond_rel"])
+            print(f"  [{lane}] {msg}{'' if good else ' FAIL'}")
+            ok = ok and good
+            wet = handle[f"/atmosphere/wet_time/{times[-1]}"][:]
+            soil = handle[f"/atmosphere/soil_evaporation_time/{times[-1]}"][:]
+            good, msg = gate_et.check_no_double_count(wet, soil, float(times[-1]))
+            print(f"  [{lane}] {msg}{'' if good else ' FAIL'}")
+            ok = ok and good
+            # (3) combined-rate identity from the AUDIT columns (an
+            # impermeable saturated column funds the soil flux from Ss
+            # storage, invisible in theta — the books are the observable),
+            # asserted WHILE alpha_1 = 1 per the plan: the latest output up
+            # to which the surface-extrapolated top moisture stays >= the
+            # 0.375 cap mark (from the theta output; the bulk lane's top
+            # cell desaturates past it near the end — measured rate decay
+            # 1.6514e-6 -> 1.6413e-6 over the last two frames).
+            gw_audit = handle["/monitor/gw_mass_audit"][:]
+            t_ok = times[-1]
+            if lane == "bulk":
+                for n, t in enumerate(times):
+                    th = handle[f"/groundwater/water_content/{t}"][:]
+                    w_surf = 1.5 * float(th[0]) - 0.5 * float(th[1])
+                    if w_surf < 0.3751:
+                        t_ok = times[max(0, n - 1)]
+                        break
+            row_ok = int(np.nonzero(np.isclose(gw_audit[:, 0], float(t_ok),
+                                               atol=1.0e-6))[0][0])
+            cum_soil = float(gw_audit[row_ok][7])
+            open_ok = cum_open[times.index(t_ok)]
+            good, msg = gate_et.check_combined_rate(
+                open_ok, cum_soil, ew, float(t_ok), area, tol["combined_rel"])
+            print(f"  [{lane}] (alpha_1 = 1 through t = {t_ok}) {msg}"
+                  f"{'' if good else ' FAIL'}")
+            ok = ok and good
+            # (4) continuity across the switch: the first full dry frame's
+            # soil rate over E_w.
+            t_d = h0 / ew
+            full_dry = [t for t in times if float(t) - 70.0 >= t_d]
+            rate = float(np.nanmax(
+                handle[f"/atmosphere/soil_evaporation_rate/{full_dry[0]}"][:]))
+            ratio = rate / ew
+            good = abs(ratio - 1.0) <= tol["continuity_rel"]
+            print(f"  [{lane}] post-switch soil rate / E_w = {ratio:.6f} "
+                  f"(within {tol['continuity_rel']:.0e}){'' if good else ' FAIL'}")
+            ok = ok and good
+            # Anti-vacuity: >= 1 frame mid-transition.
+            fracs = []
+            prev = 0.0
+            for t in times:
+                w = float(np.nanmax(handle[f"/atmosphere/wet_time/{t}"][:]))
+                fracs.append((w - prev) / 70.0 if t != times[0] else 0.0)
+                prev = w
+            partial = [f for f in fracs if 1.0e-6 < f < 1.0 - 1.0e-6]
+            good = len(partial) >= 1
+            print(f"  [{lane}] anti-vacuity: {len(partial)} partial-wet "
+                  f"frame(s){'' if good else ' FAIL'}")
+            ok = ok and good
+    # The real negative: the v2.0 lane double counts (system volume drops
+    # faster than E_w t by > v20_violation_min during/after the switch).
+    with h5py.File(lanes["v20"], "r") as handle:
+        times = output_times(handle, "/surface/depth")
+        audit = handle["/monitor/mass_audit"][:]
+        # v2.0's soil loss leaves through the exchange-accumulator strip,
+        # i.e. as NEGATIVE audited seepage (the Darcy part is the ET
+        # lane's measured 4e-6-relative class — negligible at 1e-3).
+        combined = float(audit[-1][3]) - float(audit[-1][6])
+        ratio = combined / (area * ew_bulk * float(times[-1]))
+        good = abs(ratio - 1.0) > tol["v20_violation_min"]
+        print(f"  [v20 negative] removal / (E_w t) = {ratio:.6f} "
+              f"(must deviate > {tol['v20_violation_min']:.0e})"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+    print("et3 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et4(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et4")
+    case_dir = stage_case(args.repo, "et-evapotranspiration", args.work)
+    config = case_dir / "et4-balance.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"et4 gate: {CAPABILITY_ABSENT_S3ET}")
+        print("et4 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    ok = True
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+    # Columns: t, vol, boundary_in, ss, realloc, dropped, vloss, soil, unreal.
+    dv = audit[-1][1] - audit[0][1]
+    applied = audit[-1][7]
+    scale = max(abs(applied), 1.0e-12)
+    # The closed column: boundary_in == -soil (the channel is the only BC).
+    ident = abs(audit[-1][2] + applied) / scale
+    good = ident <= tol["balance_rel"]
+    print(f"  boundary_in == -soil_evaporation: rel {ident:.3e} "
+          f"(<= {tol['balance_rel']:.0e}){'' if good else ' FAIL'}")
+    ok = ok and good
+    closure = abs(dv - (audit[-1][2] - audit[-1][3] + audit[-1][4]
+                        - audit[-1][6])) / scale
+    good = closure <= 1.0e-9
+    print(f"  dS = boundary_in - ss + realloc - vloss: rel {closure:.3e} "
+          f"(<= 1e-9){'' if good else ' FAIL'}")
+    ok = ok and good
+    good = abs(audit[-1][6]) == 0.0
+    print(f"  vloss == 0: {audit[-1][6]:.3e}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good = applied > 1.0e-4
+    print(f"  anti-vacuity: soil channel removed {applied:.3e} m^3 "
+          f"(> 1e-4){'' if good else ' FAIL'}")
+    ok = ok and good
+    print(f"  unrealised (recorded): {audit[-1][8]:.3e} m^3")
+    print("et4 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et7(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et7")
+    case_dir = stage_case(args.repo, "et-evapotranspiration", args.work)
+    config = case_dir / "et7-cap.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"et7 gate: {CAPABILITY_ABSENT_S3ET}")
+        print("et7 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    ok = True
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+        theta_min = min(float(np.nanmin(handle[f"/groundwater/water_content/{t}"][:]))
+                        for t in output_times(handle, "/groundwater/water_content"))
+    demand = 1.0e-5 * 1.0 * 3600.0
+    applied = float(audit[-1][7])
+    unreal = float(audit[-1][8])
+    good, msg = gate_et.check_cap_trace(theta_min, 0.05, unreal, demand,
+                                        applied, float(audit[-1][6]),
+                                        tol["cap_abs"])
+    print(f"  {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("et7 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et8(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et8")
+    ok = True
+    # Lane a: soil concentration without creation/destruction.
+    a_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "a")
+    a_cfg = a_dir / "et8a-soil-salt.yaml"
+    if not validate_config(args.frehg, a_cfg):
+        print(f"et8 gate: {CAPABILITY_ABSENT_S3ET}")
+        print("et8 gate: FAIL")
+        return 1
+    run_case(args.frehg, a_cfg, a_dir, args.mpiexec, args.ranks)
+    with h5py.File(a_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/transport_audit"][:]
+        times = output_times(handle, "/transport/concentration")
+        c0 = handle[f"/transport/concentration/{times[0]}"][:]
+        th0 = handle[f"/groundwater/water_content/{times[0]}"][:]
+        c1 = handle[f"/transport/concentration/{times[-1]}"][:]
+        th1 = handle[f"/groundwater/water_content/{times[-1]}"][:]
+    m0 = float(audit[0][2])
+    good, msg = gate_et.check_conserved(float(audit[-1][2]), m0,
+                                        tol["conserve_rel"], "[a] subs mass")
+    print(f"  {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good, msg = gate_et.check_cell_salt(c1, th1, c0, th0, tol["cell_rel"])
+    print(f"  [a] {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    for name, col in (("subs_adjust", 9), ("subs_anchor", 10)):
+        v = abs(float(audit[-1][col]))
+        good = v <= tol["adjust_rel"] * m0
+        print(f"  [a] {name} = {v:.3e} (<= {tol['adjust_rel']:.0e} M)"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+
+    # Lane b: the pond store; lane c: the v2.0 delete loss (real negative,
+    # staged WITHOUT the ET block — the schema forbids ET+salinity+delete
+    # by construction, S3-A8).
+    for lane in ("b", "c"):
+        lane_dir = stage_case(args.repo, "et-evapotranspiration", args.work / lane)
+        lane_cfg = lane_dir / "et8b-pond-store.yaml"
+        if lane == "c":
+            def to_delete(doc):
+                del doc["evapotranspiration"]
+                doc["surface_water"]["evaporation"] = {"mode": "bulk"}
+                doc["transport"]["surface_dryout"] = "discard"
+                doc["output"]["variables"]["transport"] = ["concentration_surface"]
+                doc["output"]["variables"].pop("atmosphere", None)
+                doc["simulation"]["id"] += "-delete"
+            rewrite_config(lane_cfg, to_delete)
+        run_case(args.frehg, lane_cfg, lane_dir, args.mpiexec, args.ranks)
+        with h5py.File(lane_dir / "out" / "output.h5", "r") as handle:
+            audit = handle["/monitor/transport_audit"][:]
+            times = output_times(handle, "/transport/concentration_surface")
+            s_h = []
+            for t in times:
+                s_v = float(np.nanmax(
+                    handle[f"/transport/concentration_surface/{t}"][:]))
+                h_v = float(np.nanmax(handle[f"/surface/depth/{t}"][:]))
+                s_h.append((float(t), s_v, h_v))
+        m_ref = 35.0 * 0.005
+        if lane == "b":
+            for t, s_v, h_v in s_h:
+                if h_v <= 1.0e-5 or t == 0.0:
+                    continue
+                good, msg = gate_et.check_pond_salt(s_v, h_v, m_ref,
+                                                    tol["pond_rel"] * 1.0e2,
+                                                    f"[b] t={t:g}")
+                if not good:
+                    print(f"  {msg} FAIL")
+                ok = ok and good
+            # Store full at dry-out, mass conserved throughout.
+            store_col = audit[:, 11]
+            peak = float(np.max(store_col))
+            good = abs(peak - m_ref) <= tol["conserve_rel"] * 1.0e2 * m_ref
+            print(f"  [b] store peak = {peak:.6e} vs 35 h0 A = {m_ref:.6e}"
+                  f"{'' if good else ' FAIL'}")
+            ok = ok and good
+            total = audit[:, 1] + store_col
+            worst = float(np.max(np.abs(total - total[0]))) / m_ref
+            good = worst <= tol["conserve_rel"] * 1.0e2
+            print(f"  [b] total (mass + store) drift = {worst:.3e} rel"
+                  f"{'' if good else ' FAIL'}")
+            ok = ok and good
+        else:
+            # The v2.0 loss: the pond's salt lands in surf_adjust and the
+            # total mass drops by ~35 h0 A — the gate asserts the LOSS.
+            lost = float(audit[0][1] - audit[-1][1])
+            good = lost > 0.9 * m_ref
+            print(f"  [c negative] v2.0 delete loses {lost:.6e} of {m_ref:.6e}"
+                  f"{'' if good else ' FAIL'}")
+            ok = ok and good
+
+    # Lane d: held-seepage salt.
+    d_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "d")
+    d_cfg = d_dir / "et8d-held-seepage.yaml"
+    run_case(args.frehg, d_cfg, d_dir, args.mpiexec, args.ranks)
+    with h5py.File(d_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/transport_audit"][:]
+        times = output_times(handle, "/transport/salt_store")
+        store_series = [float(np.nansum(handle[f"/transport/salt_store/{t}"][:]))
+                        for t in times]
+    # D9's claim is that NO salt is deleted: (1) the full audit identity
+    # closes (every change is a booked term); (2) surf_adjust stays
+    # EXACTLY zero — v2.0's deletion channel (the dry-cell discard) never
+    # fires. subs_boundary (the bottom influx) and subs_anchor (the
+    # theta-basis re-anchor of the upward-flow column, a measured legacy
+    # property) are booked data, not losses.
+    m0 = float(audit[0][1] + audit[0][2] + audit[0][11])
+    lhs = float((audit[-1][1] + audit[-1][2] + audit[-1][11])) - m0
+    rhs = float(audit[-1][4] + audit[-1][5] + audit[-1][6] + audit[-1][7]
+                + audit[-1][8] + audit[-1][9] + audit[-1][10])
+    resid = abs(lhs - rhs) / m0
+    good = resid <= tol["conserve_rel"] * 1.0e2
+    print(f"  [d] full audit identity residual = {resid:.3e} rel "
+          f"(<= {tol['conserve_rel'] * 1.0e2:.0e}){'' if good else ' FAIL'}")
+    ok = ok and good
+    good = float(np.max(np.abs(audit[:, 6]))) == 0.0
+    print(f"  [d] surf_adjust == 0 exactly (no deletion, the D9 observable): "
+          f"max {float(np.max(np.abs(audit[:, 6]))):.3e}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good = max(store_series) > 1.0e-4
+    print(f"  [d] store holds salt while the seepage is held: peak "
+          f"{max(store_series):.3e} (> 1e-4){'' if good else ' FAIL'}")
+    ok = ok and good
+    adj = abs(float(audit[-1][9]))
+    good = adj <= tol["held_rel"] * m0
+    print(f"  [d] subs_adjust = {adj:.3e} (<= {tol['held_rel']:.0e} M)"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("et8 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et9(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et9")
+    ok = True
+    outputs = {}
+    records = {}
+    for lane in ("et", "noet"):
+        case_dir = stage_case(args.repo, "et-evapotranspiration", args.work / lane)
+        config = case_dir / ("et9-tidal-flat.yaml" if lane == "et"
+                             else "et9-noet.yaml")
+        if lane == "et" and not validate_config(args.frehg, config):
+            print(f"et9 gate: {CAPABILITY_ABSENT_S3ET}")
+            print("et9 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        outputs[lane] = case_dir / "out" / "output.h5"
+        with open(case_dir / "out" / "run-record.yaml", encoding="utf-8") as h:
+            records[lane] = yaml.safe_load(h)
+    bed = np.loadtxt(args.repo / "benchmarks" / "et-evapotranspiration" /
+                     "input" / "et9_dem.dat").reshape(24, 4)
+    with h5py.File(outputs["et"], "r") as handle:
+        times = output_times(handle, "/surface/depth")
+        t_end = float(times[-1])
+        wet = handle[f"/atmosphere/wet_time/{times[-1]}"][:].reshape(24, 4)
+        soil = handle[f"/atmosphere/soil_evaporation_time/{times[-1]}"][:].reshape(24, 4)
+        # Zone integrals from the per-cell clocks and the rate outputs.
+        sub = bed < -0.36
+        supra = bed > 0.36
+        inter = (bed >= -0.2) & (bed <= 0.2)
+        good = float(soil[sub].max()) == 0.0
+        print(f"  subtidal soil_evaporation_time max = {soil[sub].max():.3e} "
+              f"(== 0){'' if good else ' FAIL'}")
+        ok = ok and good
+        good = float((t_end - wet[supra]).min()) >= 0.0 and \
+               float(wet[supra].max()) == 0.0
+        print(f"  supratidal wet_time max = {wet[supra].max():.3e} (== 0)"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+        good, msg = gate_et.check_no_double_count(wet, soil, t_end)
+        print(f"  {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+        # Intertidal transitions: wet_time increments stop and restart.
+        trans_ok = True
+        wet_series = np.stack([
+            handle[f"/atmosphere/wet_time/{t}"][:].reshape(24, 4)
+            for t in times])
+        for (j, i) in zip(*np.nonzero(inter)):
+            incr = np.diff(wet_series[:, j, i])
+            active = incr > 1.0e-9
+            flips = int(np.sum(np.abs(np.diff(active.astype(int)))))
+            if flips < 3:  # >= 1 wet->dry per cycle over 3 cycles
+                trans_ok = False
+        print(f"  intertidal wet/dry transitions per cell: "
+              f"{'>= 1/cycle' if trans_ok else 'MISSING'}"
+              f"{'' if trans_ok else ' FAIL'}")
+        ok = ok and trans_ok
+        # Anti-vacuity: both channels moved real volume.
+        closure = records["et"].get("closure", {})
+        et_cl = closure.get("evapotranspiration", {})
+        vol_open = abs(float(et_cl.get("open_water_evaporation_m3", 0.0)))
+        vol_soil = abs(float(et_cl.get("soil_evaporation_m3", 0.0)))
+        good = vol_open > tol["zone_floor_m3"] and vol_soil > tol["zone_floor_m3"]
+        print(f"  anti-vacuity: open {vol_open:.3e} / soil {vol_soil:.3e} m^3 "
+              f"(> {tol['zone_floor_m3']:.0e}){'' if good else ' FAIL'}")
+        ok = ok and good
+        # Salt ledger: the FULL audit identity (the tide Dirichlet and the
+        # side heads import/export salt legitimately through the booked
+        # source/boundary columns; the et8d convention).
+        audit = handle["/monitor/transport_audit"][:]
+        m0 = float(audit[0][1] + audit[0][2] + audit[0][11])
+        lhs = float(audit[-1][1] + audit[-1][2] + audit[-1][11]) - m0
+        rhs = float(audit[-1][4] + audit[-1][5] + audit[-1][6] + audit[-1][7]
+                    + audit[-1][8] + audit[-1][9] + audit[-1][10])
+        drift = abs(lhs - rhs) / m0
+        good = drift <= tol["ledger_salt_rel"]
+        print(f"  salt audit identity residual = {drift:.3e} (<= "
+              f"{tol['ledger_salt_rel']:.0e}){'' if good else ' FAIL'}")
+        ok = ok and good
+    # Substep-count ratio.
+    def substeps(record):
+        solver = record.get("solver", {}) or {}
+        gws = solver.get("groundwater", {}) or {}
+        return float(gws.get("solves", 0.0))
+    s_et = substeps(records["et"])
+    s_noet = substeps(records["noet"])
+    if s_noet > 0:
+        ratio = s_et / s_noet
+        good = ratio <= tol["substep_ratio_max"]
+        print(f"  substep ratio ET/noET = {ratio:.3f} (<= "
+              f"{tol['substep_ratio_max']}){'' if good else ' FAIL'}")
+        ok = ok and good
+    # The noET lane is bitwise against its T5-start pin — defined only at
+    # the pin's recording configuration (1 thread, the default aij LA
+    # path). A p1 backend lane (--mat-type, OMP 4) changes the reduction
+    # and solver algebra, so the comparison is skipped there, like
+    # perf_baseline under sanitizers (S3-A11); the lane's tolerance-based
+    # criteria above still gate.
+    # Recorded on the T4 binary at the T5 start (g++-16 / arm64 Darwin);
+    # off that toolchain h5_bitwise exits 77 and the skip is printed.
+    pin = HERE / "reference-hashes" / "stage3-et9-noet.json"
+    if args.mat_type is not None:
+        print("  noET bitwise pin: SKIPPED under --mat-type "
+              f"{args.mat_type} (recorded on the default path)")
+    elif os.environ.get("FREHG_SANITIZED_BUILD"):
+        # The h5_bitwise toolchain fingerprint is compiler identity only;
+        # sanitizer instrumentation changes codegen (and so the chaotic
+        # et9 trajectory) under the SAME compiler. run_sanitizers.sh
+        # exports the flag (S3-A11).
+        print("  noET bitwise pin: SKIPPED under FREHG_SANITIZED_BUILD "
+              "(instrumented codegen; recorded on the default build)")
+    elif pin.exists():
+        result = subprocess.run(
+            [sys.executable, str(args.repo / "tools" / "h5_bitwise.py"),
+             "compare", str(outputs["noet"]), str(pin), "--case", "et9-noet",
+             "--require-toolchain"],
+            capture_output=True, text=True)
+        good = result.returncode == 0
+        tail = (result.stdout or result.stderr).strip().splitlines()
+        print(f"  noET bitwise vs the T5-start pin: "
+              f"{tail[-1] if tail else result.returncode}"
+              f"{'' if good else ' FAIL'}")
+        if result.returncode == 77:
+            print("  (off-toolchain skip accepted)")
+            good = True
+        ok = ok and good
+    print("et9 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et_orient(args: argparse.Namespace) -> int:
+    # The et-x dihedral battery on the coupled ET + store base (scalar
+    # fields, the pd8/S3-A6 conventions). Classes adjudicated at first
+    # green and recorded in stage3-et.yaml under a S3-A8 note if needed.
+    return run_dihedral_battery(
+        args, "et-orient", "orient-base.yaml",
+        {"/surface/eta": 1, "/surface/depth": 1,
+         "/transport/concentration_surface": 1, "/transport/salt_store": 1,
+         "/groundwater/water_content": 6},
+        STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW,
+        case="et-evapotranspiration",
+        raster_keys=[("domain", "bottom_elevation")],
+        tol_override={"tol_abs_transpose": 1.0e-6,
+                      "tol_abs_mixed": 1.0e-2,
+                      "per_field_transpose": {
+                          "/transport/concentration_surface": 1.0e-4,
+                          "/transport/salt_store": 1.0e-4},
+                      # S3-A8.9: T5's symmetry assertion is the TRANSPOSE
+                      # class (measured exact: tracer 0.0, store 8e-20,
+                      # theta 9e-15 — T5 adds no edge arithmetic). The six
+                      # mixed lanes are RECORDED: the documented legacy
+                      # live-east/north-edge-face asymmetry
+                      # (symmetry-exemptions.md) lets the rotated pond
+                      # drain its shoreline row (measured depth 5.9e-2,
+                      # tracer 20 = the wet/dry status of shoreline
+                      # cells), a pre-existing surface property whose own
+                      # gate is the swe-orient battery.
+                      "mixed_recorded": True})
+
+
+def gate_et_rank(args: argparse.Namespace) -> int:
+    # S3-A8: the strict rank identity runs on the trajectory-stable
+    # orient base (et9's tide front is chaotic — the 1e-12 twin
+    # reproduces its rank deltas exactly, so no per-field identity can
+    # gate it; its ledgers/zones/complementarity stay in gate_et9).
+    ok = True
+    outputs = {}
+    for n in (1, 2, 4):
+        case_dir = stage_case(args.repo, "et-evapotranspiration",
+                              args.work / f"n{n}")
+        config = case_dir / "orient-base.yaml"
+
+        def decomp(doc, n=n):
+            doc["domain"]["decomposition"] = {"mpi_nx": n, "mpi_ny": 1}
+
+        rewrite_config(config, decomp)
+        if not validate_config(args.frehg, config):
+            print(f"et rank gate: {CAPABILITY_ABSENT_S3ET}")
+            print("et rank invariance: FAIL")
+            return 1
+        run_case(args.frehg, config, case_dir, args.mpiexec, n,
+                 STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW)
+        outputs[n] = case_dir / "out" / "output.h5"
+    with h5py.File(outputs[1], "r") as base:
+        for n in (2, 4):
+            with h5py.File(outputs[n], "r") as other:
+                for group, bound in (("/surface/eta", 1.0e-6),
+                                     ("/surface/depth", 1.0e-6),
+                                     ("/groundwater/water_content", 1.0e-6),
+                                     ("/transport/concentration_surface", 1.0e-4),
+                                     ("/transport/salt_store", 1.0e-4)):
+                    worst = 0.0
+                    for t in output_times(base, group):
+                        a = base[f"{group}/{t}"][:]
+                        b = other[f"{group}/{t}"][:]
+                        m = np.isfinite(a) & np.isfinite(b)
+                        worst = max(worst, float(np.max(np.abs(a[m] - b[m]))))
+                    good = worst <= bound
+                    print(f"  {group.rsplit('/', 1)[-1]} n=1 vs n={n}: "
+                          f"max |delta| = {worst:.3e} (<= {bound:.0e})"
+                          f"{'' if good else ' FAIL'}")
+                    ok = ok and good
+    print("et rank invariance:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et_restart(args: argparse.Namespace) -> int:
+    """T5 restart lanes: et3-prescribed checkpointed inside the pond-to-
+    soil transition, and et8b checkpointed while the store is full."""
+    ok = True
+    for name, base, ckpt, groups in (
+            ("et3", "et3-pond-switch.yaml", 280,
+             ["/surface/eta", "/surface/depth", "/atmosphere/wet_time",
+              "/atmosphere/soil_evaporation_time",
+              "/groundwater/water_content"]),
+            ("et8b", "et8b-pond-store.yaml", 3600,
+             ["/surface/eta", "/surface/depth",
+              "/transport/concentration_surface", "/transport/salt_store"])):
+        full_dir = stage_case(args.repo, "et-evapotranspiration",
+                              args.work / f"{name}-full")
+        config = full_dir / base
+
+        def setup(doc, name=name, ckpt=ckpt):
+            doc["output"]["checkpoint"] = {"interval": ckpt}
+            if name == "et3":
+                doc["evapotranspiration"]["potential"] = "prescribed"
+                doc["evapotranspiration"]["prescribed"] = {"constant": 1.3e-6}
+                doc["evapotranspiration"]["soil"]["limiter"] = "none"
+
+        rewrite_config(config, setup)
+        if not validate_config(args.frehg, config):
+            print(f"et restart gate: {CAPABILITY_ABSENT_S3ET}")
+            print("et restart determinism: FAIL")
+            return 1
+        run_case(args.frehg, config, full_dir, args.mpiexec, args.ranks)
+        full_out = full_dir / "out" / "output.h5"
+        re_dir = stage_case(args.repo, "et-evapotranspiration",
+                            args.work / f"{name}-restart")
+        re_cfg = re_dir / base
+
+        def add_restart(doc, name=name, ckpt=ckpt, full_out=full_out):
+            setup(doc, name=name, ckpt=ckpt)
+            doc["restart"] = {"enabled": True,
+                              "file": str(full_out.resolve()), "time": ckpt}
+            doc["output"]["filename"] = "out/restarted.h5"
+
+        rewrite_config(re_cfg, add_restart)
+        run_case(args.frehg, re_cfg, re_dir, args.mpiexec, args.ranks)
+        with h5py.File(full_out, "r") as full, \
+             h5py.File(re_dir / "out" / "restarted.h5", "r") as part:
+            for group in groups:
+                for t in output_times(part, group):
+                    if t <= ckpt:
+                        continue
+                    a = full[f"{group}/{t}"][:]
+                    b = part[f"{group}/{t}"][:]
+                    same = np.array_equal(np.nan_to_num(a, nan=-9.0e99),
+                                          np.nan_to_num(b, nan=-9.0e99))
+                    if not same or t == output_times(part, group)[-1]:
+                        print(f"  [{name}] restart "
+                              f"{group.rsplit('/', 1)[-1]}@{t}: "
+                              f"{'bitwise' if same else 'DIFFERS'}")
+                    ok = ok and same
+    print("et restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T6 vegetation/transpiration gates (plan §10): et4-t (the ET water
+# balance with a canopy), et5 (partition + root-zone location, with the
+# vegetation-absent bitwise pin and the bare-contrast real negative), et6
+# (root-fraction exactness incl. the root_uptake Field3 output), et7-t
+# (Feddes stress + the T supply cap), et8-t (transpiration salt exclusion)
+# and et9-veg (the vegetated tidal flat + O7) with its restart lane.
+# ---------------------------------------------------------------------------
+
+CAPABILITY_ABSENT_S3VG = ("capability absent: the schema rejects the T6 "
+                          "target keys (vegetation / root_uptake / "
+                          "transpiration outputs)")
+
+ET9_MARSH = {
+    "types": [{"name": "marsh", "lai": 2.5, "extinction": 0.5,
+               "leaf_resistance": 100.0, "root_depth": 0.3,
+               "root_profile": "linear",
+               "feddes": {"h3": -4.0, "h4": -80.0}}],
+    "map": {"file": "input/et9_veg.dat"},
+}
+
+
+def gate_et4t(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et4")
+    case_dir = stage_case(args.repo, "et-evapotranspiration", args.work)
+    config = case_dir / "et4-balance.yaml"
+
+    def add_veg(doc):
+        doc["vegetation"] = {
+            "types": [{"name": "shrub", "lai": 2.0, "extinction": 0.5,
+                       "leaf_resistance": 100.0, "root_depth": 0.4,
+                       "root_profile": "linear",
+                       "feddes": {"h3": -10.0, "h4": -150.0}}],
+            "map": {"constant": "shrub"}}
+        doc["output"]["variables"]["atmosphere"] = [
+            "soil_evaporation_rate", "transpiration_rate",
+            "transpiration_unrealised_rate"]
+        doc["simulation"]["id"] += "-veg"
+
+    rewrite_config(config, add_veg)
+    if not validate_config(args.frehg, config):
+        print(f"et4-t gate: {CAPABILITY_ABSENT_S3VG}")
+        print("et4-t gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    ok = True
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+    # Columns: t, vol, bin, ss, re, dr, vloss, soil, soil_un, T, T_un.
+    dv = audit[-1][1] - audit[0][1]
+    rhs = (audit[-1][2] - audit[-1][3] + audit[-1][4] - audit[-1][6]
+           - audit[-1][9])
+    scale = max(abs(audit[-1][7]) + abs(audit[-1][9]), 1.0e-12)
+    resid = abs(dv - rhs) / scale
+    good = resid <= 1.0e-9
+    print(f"  dS = bin - ss + re - vloss - T: rel {resid:.3e} (<= 1e-9)"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    ident = abs(audit[-1][2] + audit[-1][7]) / scale
+    good = ident <= tol["balance_rel"]
+    print(f"  boundary_in == -soil_evaporation: rel {ident:.3e}"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    good = audit[-1][9] > 1.0e-4 and audit[-1][7] > 1.0e-5
+    print(f"  anti-vacuity: T = {audit[-1][9]:.3e}, E = {audit[-1][7]:.3e} m^3"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    # The negative: dropping T from the identity must fail.
+    bad = abs(dv - (rhs + audit[-1][9])) / scale
+    good = bad > 1.0e-6
+    print(f"  negative: identity without T misses by {bad:.3e} (> 1e-6)"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("et4-t gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et5(args: argparse.Namespace) -> int:
+    ok = True
+    # (i) the et2 column with a vegetation map of ALL ZEROS: bitwise
+    # against the vegetation-absent run (the same case unmodified).
+    base_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "base")
+    base_cfg = base_dir / "et2-coupled-dry.yaml"
+    if not validate_config(args.frehg, base_cfg):
+        print(f"et5 gate: {CAPABILITY_ABSENT_S3VG}")
+        print("et5 gate: FAIL")
+        return 1
+    run_case(args.frehg, base_cfg, base_dir, args.mpiexec, args.ranks,
+             STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW)
+    zero_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "zeros")
+    zero_cfg = zero_dir / "et2-coupled-dry.yaml"
+
+    def add_zero_map(doc):
+        doc["vegetation"] = {
+            "types": [{"name": "unused", "lai": 1.0, "extinction": 0.5,
+                       "leaf_resistance": 100.0, "root_depth": 0.1,
+                       "feddes": {"h3": -1.0, "h4": -10.0}}],
+            "map": {"file": "input/et5_zeros.dat"}}
+        doc["simulation"]["id"] += "-zeros"
+
+    (zero_dir / "input" / "et5_zeros.dat").write_text(
+        "# all-bare vegetation ids\n0\n")
+    rewrite_config(zero_cfg, add_zero_map)
+    run_case(args.frehg, zero_cfg, zero_dir, args.mpiexec, args.ranks,
+             STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW)
+    good, msgs = h5_bitwise_groups(
+        base_dir / "out" / "output.h5", zero_dir / "out" / "output.h5",
+        ["/groundwater/hydraulic_head", "/groundwater/water_content",
+         "/surface/eta"])
+    for m in msgs:
+        print(f"  [i] all-zeros map vs vegetation-absent: {m}")
+    ok = ok and good
+
+    # (ii) the dense canopy: E_soil ~ 0, depletion spread over the roots.
+    ii_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "canopy")
+    ii_cfg = ii_dir / "et5-canopy.yaml"
+    run_case(args.frehg, ii_cfg, ii_dir, args.mpiexec, args.ranks)
+    with h5py.File(ii_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+        times = output_times(handle, "/groundwater/water_content")
+        th0 = handle[f"/groundwater/water_content/{times[0]}"][:]
+        th1 = handle[f"/groundwater/water_content/{times[-1]}"][:]
+    e_soil = abs(float(audit[-1][7]))
+    t_act = float(audit[-1][9])
+    good = e_soil < 1.0e-12 * max(t_act, 1.0e-30) or e_soil < 1.0e-15
+    print(f"  [ii] E_soil = {e_soil:.3e} vs T = {t_act:.3e} "
+          f"(E < 1e-12 T){'' if good else ' FAIL'}")
+    ok = ok and good
+    depletion = (th0 - th1) * 0.02  # dz uniform
+    total = float(np.nansum(depletion))
+    top_share = float(depletion[0]) / total
+    good = top_share <= 2.0 * (0.02 / 0.4)
+    print(f"  [ii] top-cell share = {top_share:.4f} (<= {2.0 * 0.05:.2f})"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+
+    # (iii) the bare contrast at (ii)'s T_pot: top-concentrated removal.
+    t_pot = t_act / (86400.0 * 1.0)  # mean applied rate [m/s] over A = 1
+    iii_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "bare")
+    iii_cfg = iii_dir / "et5-canopy.yaml"
+
+    def to_bare(doc, rate=t_pot):
+        # S3-A9: the contrast runs 2 h, not the day — on the full horizon
+        # the silt redistribution smears the top-face removal over the
+        # whole column (measured: a uniform theta_r end state), erasing
+        # the locality the lane contrasts. At 2 h the removal (~8 mm
+        # water-equivalent) is top-concentrated before redistribution
+        # catches up — the share the plan's criterion targets.
+        del doc["vegetation"]
+        doc["evapotranspiration"]["potential"] = "prescribed"
+        doc["evapotranspiration"]["prescribed"] = {"constant": float(rate)}
+        doc["evapotranspiration"]["open_water"] = False
+        doc["evapotranspiration"]["soil"] = {"limiter": "none"}
+        doc["time"]["t_end"] = 7200.0
+        doc["time"]["output_interval"] = 7200.0
+        doc["output"]["variables"]["groundwater"] = ["hydraulic_head",
+                                                     "water_content"]
+        doc["output"]["variables"].pop("atmosphere", None)
+        doc["simulation"]["id"] += "-bare"
+
+    rewrite_config(iii_cfg, to_bare)
+    run_case(args.frehg, iii_cfg, iii_dir, args.mpiexec, args.ranks)
+    with h5py.File(iii_dir / "out" / "output.h5", "r") as handle:
+        times = output_times(handle, "/groundwater/water_content")
+        b0 = handle[f"/groundwater/water_content/{times[0]}"][:]
+        b1 = handle[f"/groundwater/water_content/{times[-1]}"][:]
+    bdep = (b0 - b1) * 0.02
+    btotal = float(np.nansum(bdep))
+    bshare = float(bdep[0]) / btotal
+    good = bshare >= 0.5
+    print(f"  [iii negative] bare top-cell share = {bshare:.4f} (>= 0.5)"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("et5 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et6(args: argparse.Namespace) -> int:
+    ok = True
+    for profile in ("uniform", "linear"):
+        case_dir = stage_case(args.repo, "et-evapotranspiration",
+                              args.work / profile)
+        config = case_dir / "et6-roots.yaml"
+        if profile == "linear":
+            def set_linear(doc):
+                doc["vegetation"]["types"][0]["root_profile"] = "linear"
+                doc["simulation"]["id"] += "-linear"
+            rewrite_config(config, set_linear)
+        if not validate_config(args.frehg, config):
+            print(f"et6 gate: {CAPABILITY_ABSENT_S3VG}")
+            print("et6 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            times = output_times(handle, "/groundwater/water_content")
+            th0 = handle[f"/groundwater/water_content/{times[0]}"][:].reshape(1, 2, 14)
+            th1 = handle[f"/groundwater/water_content/{times[-1]}"][:].reshape(1, 2, 14)
+            uptake = handle[f"/groundwater/root_uptake/{times[-1]}"][:].reshape(1, 2, 14)
+            audit = handle["/monitor/gw_mass_audit"][:]
+        # dz-free exactness (S3-A9: the regular mesh trims partial top
+        # cells, so no raster-side dz ladder is reliable): with Ss = 0
+        # and K ~ 0 the corrector gives theta_new = theta_n - sink dtg
+        # exactly, so per cell Delta theta_k == uptake_k * t (root_uptake
+        # is the interval MEAN sink — the Field3 IntervalRates leg's
+        # first consumer).
+        t_pot = (1.0 - math.exp(-0.5 * 2.0)) * 2.0e-7
+        t_total = 600.0
+        worst = 0.0
+        theta_scale = t_pot * t_total / 0.05  # the largest per-cell dtheta
+        for i in range(2):
+            dth = np.nan_to_num(th0[0, i] - th1[0, i])
+            up = np.nan_to_num(uptake[0, i]) * t_total
+            for k in range(14):
+                worst = max(worst, abs(dth[k] - up[k]) / theta_scale)
+        # The audit total: T_act = 2 columns x T_pot x t, nothing capped.
+        # (No soil channel in et6: T is column 7 — vol..vloss, T, T_un.)
+        t_act = float(audit[-1][7])
+        worst = max(worst,
+                    abs(t_act - 2.0 * t_pot * t_total) / (2.0 * t_pot * t_total))
+        if profile == "uniform":
+            # Fully-covered cells share ONE sink value T_pot / L
+            # (dz-free). The zone-cutting cell sinks at its partial
+            # fraction (the ladder cuts k = 4 at 0.594 of its thickness)
+            # — exclude it with a strict 98% filter.
+            vals = np.nan_to_num(uptake).ravel()
+            vals = vals[vals > 0.98 * vals.max()]
+            spread = float(vals.max() - vals.min()) / (t_pot / 0.33)
+            worst = max(worst, spread)
+            worst = max(worst, abs(float(vals.max()) - t_pot / 0.33) / (t_pot / 0.33))
+        # S3-A9: K = 1e-15 (K = 0 is outside the vG solver) redistributes
+        # at the 3e-10 class over the 10 substeps; bound 1e-9.
+        good = worst <= 1.0e-9
+        print(f"  [{profile}] exactness worst rel = {worst:.3e} (<= 1e-9)"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+    print("et6 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et10(args: argparse.Namespace) -> int:
+    """Stage-3 T7 (plan §11): the Penman-Monteith potential at model
+    level — the FAO-56 Example-19 grass column. (1) The audit T_act over
+    the hour equals gate_et.pm_q_form() with the model's constants and
+    the case's exact met inputs; (2) the rate reproduces FAO's published
+    0.63 mm/h within the measured convention gap delta_conv (+ FAO's
+    print rounding). Negative: the canopy albedo moved 0.23 -> 0.20 must
+    break (1)."""
+    tol = et_tolerances("et10")
+    ok = True
+
+    def run_lane(label, mutate=None):
+        case_dir = stage_case(args.repo, "et-evapotranspiration",
+                              args.work / label)
+        config = case_dir / "et10-pm-grass.yaml"
+        if mutate is not None:
+            rewrite_config(config, mutate)
+        if not validate_config(args.frehg, config):
+            return None, None
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        with open(config, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+            audit = handle["/monitor/gw_mass_audit"][:]
+        # No soil channel: T_act is column 7 (vol..vloss, T, T_un);
+        # area 1 m^2, 3600 s -> T_act [m^3] is the depth over the hour.
+        return float(audit[-1][7]), doc
+
+    def reference(doc):
+        atm = doc["atmosphere"]
+        veg = doc["vegetation"]["types"][0]
+        p = atm["pressure"]["constant"]
+        t_air = atm["air_temperature"]["constant"]
+        qa = gate_et.met_specific_humidity(t_air, p,
+                                           atm["relative_humidity"]["constant"])
+        ra = gate_et.aero_resistance("fao56", atm["wind_speed"]["constant"])
+        tau = math.exp(-veg["extinction"] * veg["lai"])
+        rc = veg["leaf_resistance"] / (0.5 * veg["lai"])
+        g_frac = doc["evapotranspiration"]["energy"]["ground_heat_fraction"]["canopy"]
+        e = gate_et.pm_q_form(t_air, p, qa,
+                              atm["shortwave_incoming"]["constant"],
+                              atm["longwave_in"]["constant"],
+                              veg["albedo"], g_frac, ra, rc)
+        return (1.0 - tau) * e * 3600.0
+
+    t_act, doc = run_lane("base")
+    if t_act is None:
+        print("et10 gate: capability absent: the schema rejects "
+              "potential: penman_monteith / its energy keys")
+        print("et10 gate: FAIL")
+        return 1
+    ref = reference(doc)
+    rel = abs(t_act - ref) / ref
+    good = rel <= tol["exact_rel"]
+    print(f"  (1) T_act vs pm_q_form: rel {rel:.3e} "
+          f"(<= {tol['exact_rel']:.0e}){'' if good else ' FAIL'}")
+    ok = ok and good
+
+    mm_h = t_act * 1000.0
+    bound = tol["delta_conv_mm_h"] + tol["fao_rounding_mm_h"]
+    diff = abs(mm_h - 0.63)
+    good = diff <= bound
+    print(f"  (2) vs FAO ET0: {mm_h:.5f} mm/h, |d| = {diff:.5f} "
+          f"(<= {bound:.5f}){'' if good else ' FAIL'}")
+    ok = ok and good
+
+    # Real negative: albedo 0.23 -> 0.20 must break criterion (1)
+    # against the UNCHANGED reference.
+    def drop_albedo(doc):
+        doc["vegetation"]["types"][0]["albedo"] = 0.20
+        doc["simulation"]["id"] += "-neg"
+
+    t_neg, _ = run_lane("neg", drop_albedo)
+    rel_neg = abs(t_neg - ref) / ref
+    good = rel_neg > tol["exact_rel"]
+    print(f"  negative (albedo 0.20): rel {rel_neg:.3e} "
+          f"(> {tol['exact_rel']:.0e}){'' if good else ' FAIL'}")
+    ok = ok and good
+    print("et10 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et7t(args: argparse.Namespace) -> int:
+    ok = True
+    # (a) a column entirely below h4: T_act == 0, unrealised = demand,
+    # the soil channel still works.
+    a_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "a")
+    a_cfg = a_dir / "et4-balance.yaml"
+
+    def lane_a(doc):
+        doc["initial_conditions"]["groundwater"] = {"head": {"constant": -5.0}}
+        doc["vegetation"] = {
+            "types": [{"name": "stressed", "lai": 2.0, "extinction": 0.5,
+                       "leaf_resistance": 100.0, "root_depth": 0.4,
+                       "feddes": {"h3": -1.0, "h4": -2.0}}],
+            "map": {"constant": "stressed"}}
+        doc["time"]["t_end"] = 7200.0
+        doc["time"]["output_interval"] = 3600.0
+        doc["output"]["variables"].pop("atmosphere", None)
+        doc["simulation"]["id"] += "-stress"
+
+    rewrite_config(a_cfg, lane_a)
+    if not validate_config(args.frehg, a_cfg):
+        print(f"et7-t gate: {CAPABILITY_ABSENT_S3VG}")
+        print("et7-t gate: FAIL")
+        return 1
+    run_case(args.frehg, a_cfg, a_dir, args.mpiexec, args.ranks)
+    with h5py.File(a_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+    t_act = float(audit[-1][9])
+    t_un = float(audit[-1][10])
+    e_soil = abs(float(audit[-1][7]))
+    good = t_act == 0.0 and t_un > 0.0 and e_soil > 0.0
+    print(f"  [a] below h4: T_act = {t_act:.3e} (== 0), unrealised = "
+          f"{t_un:.3e} (> 0), E_soil = {e_soil:.3e} (> 0)"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+
+    # (c) root zone at theta_r + 1e-4 under a huge demand: the floor holds
+    # and the books balance exactly.
+    c_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "c")
+    c_cfg = c_dir / "et7-cap.yaml"
+
+    def lane_c(doc):
+        doc["evapotranspiration"]["open_water"] = False
+        doc["evapotranspiration"].pop("soil", None)
+        doc["vegetation"] = {
+            "types": [{"name": "thirsty", "lai": 1.0e9, "extinction": 1.0,
+                       "leaf_resistance": 0.0, "root_depth": 0.5,
+                       "feddes": {"h3": -1000.0, "h4": -2000.0}}],
+            "map": {"constant": "thirsty"}}
+        doc["output"]["variables"].pop("atmosphere", None)
+        doc["simulation"]["id"] += "-tcap"
+
+    rewrite_config(c_cfg, lane_c)
+    run_case(args.frehg, c_cfg, c_dir, args.mpiexec, args.ranks)
+    with h5py.File(c_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+        theta_min = min(float(np.nanmin(handle[f"/groundwater/water_content/{t}"][:]))
+                        for t in output_times(handle, "/groundwater/water_content"))
+    # gw_mass_audit here: ..., vloss(6), T(7), T_un(8) — no soil channel.
+    t_act = float(audit[-1][7])
+    t_un = float(audit[-1][8])
+    demand = 1.0e-5 * 3600.0  # T_pot = E_pot at lai -> inf, A = 1
+    good = theta_min >= 0.05 - 1.0e-14
+    print(f"  [c] theta floor: min - theta_r = {theta_min - 0.05:.3e} "
+          f"(>= -1e-14){'' if good else ' FAIL'}")
+    ok = ok and good
+    resid = abs((t_act + t_un) - demand) / demand
+    good = resid <= 1.0e-12
+    print(f"  [c] T + unrealised = demand: rel {resid:.3e} (<= 1e-12)"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    good = abs(float(audit[-1][6])) == 0.0
+    print(f"  [c] vloss == 0: {audit[-1][6]:.3e}{'' if good else ' FAIL'}")
+    ok = ok and good
+    # (b) per-substep T_act <= T_pot holds by the per-cell min() —
+    # asserted globally: cumulative T <= cumulative demand everywhere.
+    mono = np.all(audit[:, 7] <= (audit[:, 7] + audit[:, 8]) + 1.0e-15)
+    print(f"  [b] T_act <= T_pot per row: {'ok' if mono else 'FAIL'}")
+    ok = ok and bool(mono)
+    print("et7-t gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et8t(args: argparse.Namespace) -> int:
+    tol = et_tolerances("et8")
+    case_dir = stage_case(args.repo, "et-evapotranspiration", args.work)
+    config = case_dir / "et8a-soil-salt.yaml"
+
+    def add_veg(doc):
+        doc["evapotranspiration"].pop("soil", None)  # T only
+        doc["vegetation"] = {
+            "types": [{"name": "halophyte", "lai": 2.0, "extinction": 0.5,
+                       "leaf_resistance": 100.0, "root_depth": 0.3,
+                       "root_profile": "linear",
+                       "feddes": {"h3": -1000.0, "h4": -2000.0}}],
+            "map": {"constant": "halophyte"}}
+        doc["output"]["variables"]["groundwater"] = [
+            "hydraulic_head", "water_content", "root_uptake"]
+        doc["output"]["variables"].pop("atmosphere", None)
+        doc["simulation"]["id"] += "-veg"
+
+    rewrite_config(config, add_veg)
+    if not validate_config(args.frehg, config):
+        print(f"et8-t gate: {CAPABILITY_ABSENT_S3VG}")
+        print("et8-t gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    ok = True
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        audit = handle["/monitor/transport_audit"][:]
+        times = output_times(handle, "/transport/concentration")
+        c0 = handle[f"/transport/concentration/{times[0]}"][:]
+        th0 = handle[f"/groundwater/water_content/{times[0]}"][:]
+        c1 = handle[f"/transport/concentration/{times[-1]}"][:]
+        th1 = handle[f"/groundwater/water_content/{times[-1]}"][:]
+        uptake = handle[f"/groundwater/root_uptake/{times[-1]}"][:]
+    m0 = float(audit[0][2])
+    good, msg = gate_et.check_conserved(float(audit[-1][2]), m0,
+                                        tol["conserve_rel"], "total salt")
+    print(f"  {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good, msg = gate_et.check_cell_salt(c1, th1, c0, th0, tol["cell_rel"])
+    print(f"  {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    for name, col in (("subs_adjust", 9), ("subs_anchor", 10)):
+        v = abs(float(audit[-1][col]))
+        good = v <= tol["adjust_rel"] * m0
+        print(f"  {name} = {v:.3e} (<= {tol['adjust_rel']:.0e} M)"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+    # Salinity rise proportional to the uptake (correlation = 1): the
+    # concentration factor c1/c0 - 1 ~ uptake_k dz/theta over root cells.
+    m = np.isfinite(c1) & np.isfinite(c0) & (np.nan_to_num(uptake) > 0)
+    if m.sum() >= 2:
+        rise = (c1[m] / c0[m]) - 1.0
+        frac = np.nan_to_num(uptake)[m]
+        corr = float(np.corrcoef(rise, frac)[0, 1])
+        # S3-A9: the multiplicative concentration factor is exp-nonlinear
+        # in the uptake (c1/c0 = theta0/theta1), so the linear correlation
+        # carries a quadratic linearization deviation (measured 6.9e-6
+        # over the 2 h horizon); the EXACT statement is the per-cell
+        # c*theta identity above. Bound 1e-4: 14x the measured class.
+        good = corr >= 1.0 - 1.0e-4
+        print(f"  salinity rise ~ rootFrac: corr = {corr:.10f} "
+              f"(>= 1 - 1e-4){'' if good else ' FAIL'}")
+        ok = ok and good
+    print("et8-t gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et9veg(args: argparse.Namespace) -> int:
+    case_dir = stage_case(args.repo, "et-evapotranspiration", args.work)
+    config = case_dir / "et9-tidal-flat.yaml"
+
+    def add_marsh(doc):
+        doc["vegetation"] = dict(ET9_MARSH)
+        doc["output"]["variables"]["atmosphere"] = [
+            "evaporation_rate", "soil_evaporation_rate", "wet_time",
+            "soil_evaporation_time", "transpiration_rate"]
+        doc["simulation"]["id"] += "-veg"
+
+    rewrite_config(config, add_marsh)
+    if not validate_config(args.frehg, config):
+        print(f"et9-veg gate: {CAPABILITY_ABSENT_S3VG}")
+        print("et9-veg gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    ok = True
+    bed = np.loadtxt(args.repo / "benchmarks" / "et-evapotranspiration" /
+                     "input" / "et9_dem.dat").reshape(24, 4)
+    veg = np.loadtxt(args.repo / "benchmarks" / "et-evapotranspiration" /
+                     "input" / "et9_veg.dat").reshape(24, 4) > 0
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        times = output_times(handle, "/atmosphere/transpiration_rate")
+        t_end = float(times[-1])
+        wet = handle[f"/atmosphere/wet_time/{times[-1]}"][:].reshape(24, 4)
+        soil = handle[f"/atmosphere/soil_evaporation_time/{times[-1]}"][:].reshape(24, 4)
+        # Cumulative T per cell from the interval-mean frames.
+        t_cum = np.zeros((24, 4))
+        prev = 0.0
+        for t in times:
+            frame = handle[f"/atmosphere/transpiration_rate/{t}"][:].reshape(24, 4)
+            t_cum += np.nan_to_num(frame) * (float(t) - prev)
+            prev = float(t)
+        # T during inundated instants (O7): the marsh band's lower rows
+        # flood each cycle — find a frame where a marsh cell is wet AND
+        # the T rate that interval is positive.
+        o7 = False
+        prev = 0.0
+        for t in times:
+            frame = handle[f"/atmosphere/transpiration_rate/{t}"][:].reshape(24, 4)
+            depth = handle[f"/surface/depth/{t}"][:].reshape(24, 4)
+            m = veg & (np.nan_to_num(depth) > 0.01)
+            if m.any() and float(np.nan_to_num(frame)[m].max()) > 0.0:
+                o7 = True
+                break
+        audit = handle["/monitor/gw_mass_audit"][:]
+    good, msg = gate_et.check_no_double_count(wet, soil, t_end)
+    print(f"  {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good = float(t_cum[veg].min()) > 0.0
+    print(f"  T > 0 on every marsh cell: min cum = {t_cum[veg].min():.3e}"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    good = float(np.abs(t_cum[~veg]).max()) == 0.0
+    print(f"  T == 0 outside the band: max = {np.abs(t_cum[~veg]).max():.3e}"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    print(f"  O7 (transpiration while inundated): "
+          f"{'observed' if o7 else 'NOT OBSERVED'}{'' if o7 else ' FAIL'}")
+    ok = ok and o7
+    # gw_mass_audit here: ..., soil(7), soil_un(8), T(9), T_un(10).
+    good = float(audit[-1][9]) > 1.0e-6
+    print(f"  anti-vacuity: cumulative T = {audit[-1][9]:.3e} m^3 (> 1e-6)"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("et9-veg gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_et_veg_restart(args: argparse.Namespace) -> int:
+    """T6 restart lane: et9-vegetated checkpointed mid-cycle; every field
+    including the sink window accumulators restarts bitwise."""
+    case_dir = stage_case(args.repo, "et-evapotranspiration", args.work)
+    config = case_dir / "et9-tidal-flat.yaml"
+
+    def full_setup(doc):
+        doc["vegetation"] = dict(ET9_MARSH)
+        doc["output"]["variables"]["atmosphere"] = [
+            "wet_time", "soil_evaporation_time", "transpiration_rate"]
+        doc["output"]["variables"]["groundwater"] = [
+            "hydraulic_head", "water_content", "root_uptake"]
+        doc["output"]["checkpoint"] = {"interval": 5400}
+        doc["simulation"]["id"] += "-veg"
+
+    rewrite_config(config, full_setup)
+    if not validate_config(args.frehg, config):
+        print(f"et-veg restart gate: {CAPABILITY_ABSENT_S3VG}")
+        print("et-veg restart determinism: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    full_output = case_dir / "out" / "output.h5"
+    re_dir = stage_case(args.repo, "et-evapotranspiration", args.work / "restart")
+    re_cfg = re_dir / "et9-tidal-flat.yaml"
+
+    def add_restart(doc):
+        full_setup(doc)
+        doc["restart"] = {"enabled": True, "file": str(full_output.resolve()),
+                          "time": 5400}
+        doc["output"]["filename"] = "out/restarted.h5"
+
+    rewrite_config(re_cfg, add_restart)
+    run_case(args.frehg, re_cfg, re_dir, args.mpiexec, args.ranks)
+    ok = True
+    with h5py.File(full_output, "r") as full, \
+         h5py.File(re_dir / "out" / "restarted.h5", "r") as part:
+        for group in ("/surface/eta", "/groundwater/water_content",
+                      "/groundwater/root_uptake", "/transport/salt_store",
+                      "/atmosphere/wet_time", "/atmosphere/transpiration_rate"):
+            for t in output_times(part, group):
+                if t <= 5400:
+                    continue
+                a = full[f"{group}/{t}"][:]
+                b = part[f"{group}/{t}"][:]
+                same = np.array_equal(np.nan_to_num(a, nan=-9.0e99),
+                                      np.nan_to_num(b, nan=-9.0e99))
+                if not same or t == output_times(part, group)[-1]:
+                    print(f"  restart {group.rsplit('/', 1)[-1]}@{t}: "
+                          f"{'bitwise' if same else 'DIFFERS'}")
+                ok = ok and same
+    print("et-veg restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gate", choices=["b1", "b2", "b3", "b4", "b5", "b6", "b1-restart",
@@ -3513,7 +6341,17 @@ def main() -> int:
                                          "rank-invariance-coupled-salt",
                                          "wind-drydown", "terrain-heat",
                                          "two-scalar-restart", "evap-heat",
-                                         "heat-subcycled"])
+                                         "heat-subcycled", "default-bitwise",
+                                         "rl2", "rl3", "rl4", "rl5-orient", "rl-restart",
+                                         "ob1", "ob3", "ob5",
+                                         "pd1", "pd2", "pd3", "pd4", "pd5",
+                                         "pd6", "pd8", "pd-restart",
+                                         "dg1", "dg2", "dg-restart",
+                                         "et1", "et2", "et3", "et4", "et7",
+                                         "et8", "et9", "et-orient", "et-rank",
+                                         "et-restart",
+                                         "et4-t", "et5", "et6", "et7-t",
+                                         "et8-t", "et9-veg", "et-veg-restart", "et10"])
     parser.add_argument("--frehg", type=Path, required=True)
     parser.add_argument("--mpiexec", type=Path, required=True)
     parser.add_argument("--repo", type=Path, required=True)
@@ -3542,6 +6380,18 @@ def main() -> int:
     parser.add_argument("--transposed", action="store_true",
                         help="g5 gate: run the case as the y-z slice (the §9 Q4 "
                              "'transposed g5 slice' x-battery row); same criteria")
+    parser.add_argument("--record", action="store_true",
+                        help="default-bitwise gate: record the reference hashes "
+                             "instead of comparing (Stage-3 plan W0.8)")
+    parser.add_argument("--allow", action="append", default=[],
+                        help="default-bitwise gate: dataset glob exempt from the "
+                             "bitwise comparison (Stage-3 plan §2.6 declared "
+                             "exceptions)")
+    parser.add_argument("--pd2-lane", choices=["surface", "gw", "coupled"],
+                        default=None,
+                        help="pd2: run only this lane (Stage-3 T8 W8.4: the "
+                             "p1 omp4 backend lanes run the coupled lane "
+                             "alone); default = all three")
     parser.add_argument("--mat-type", choices=["aij", "aijkokkos"], default=None,
                         help="p1 backend-invariance gate (v2 plan §2B.3): run the "
                              "gate with this PETSc matrix/vector backend selected "
@@ -3648,6 +6498,82 @@ def main() -> int:
         return gate_evap_heat(args)
     if args.gate == "heat-subcycled":
         return gate_heat_subcycled(args)
+    if args.gate == "default-bitwise":
+        return gate_default_bitwise(args)
+    if args.gate == "rl2":
+        return gate_rl2(args)
+    if args.gate == "rl3":
+        return gate_rl3(args)
+    if args.gate == "rl4":
+        return gate_rl4(args)
+    if args.gate == "rl5-orient":
+        return gate_rl5_orient(args)
+    if args.gate == "rl-restart":
+        return gate_rl_restart(args)
+    if args.gate == "ob1":
+        return gate_ob1(args)
+    if args.gate == "ob3":
+        return gate_ob3(args)
+    if args.gate == "ob5":
+        return gate_ob5(args)
+    if args.gate == "pd1":
+        return gate_pd1(args)
+    if args.gate == "pd2":
+        return gate_pd2(args)
+    if args.gate == "pd3":
+        return gate_pd3(args)
+    if args.gate == "pd4":
+        return gate_pd4(args)
+    if args.gate == "pd5":
+        return gate_pd5(args)
+    if args.gate == "pd6":
+        return gate_pd6(args)
+    if args.gate == "pd8":
+        return gate_pd8(args)
+    if args.gate == "pd-restart":
+        return gate_pd_restart(args)
+    if args.gate == "dg1":
+        return gate_dg1(args)
+    if args.gate == "dg2":
+        return gate_dg2(args)
+    if args.gate == "dg-restart":
+        return gate_dg_restart(args)
+    if args.gate == "et1":
+        return gate_et1(args)
+    if args.gate == "et2":
+        return gate_et2(args)
+    if args.gate == "et3":
+        return gate_et3(args)
+    if args.gate == "et4":
+        return gate_et4(args)
+    if args.gate == "et7":
+        return gate_et7(args)
+    if args.gate == "et8":
+        return gate_et8(args)
+    if args.gate == "et9":
+        return gate_et9(args)
+    if args.gate == "et-orient":
+        return gate_et_orient(args)
+    if args.gate == "et-rank":
+        return gate_et_rank(args)
+    if args.gate == "et-restart":
+        return gate_et_restart(args)
+    if args.gate == "et4-t":
+        return gate_et4t(args)
+    if args.gate == "et5":
+        return gate_et5(args)
+    if args.gate == "et6":
+        return gate_et6(args)
+    if args.gate == "et7-t":
+        return gate_et7t(args)
+    if args.gate == "et8-t":
+        return gate_et8t(args)
+    if args.gate == "et9-veg":
+        return gate_et9veg(args)
+    if args.gate == "et-veg-restart":
+        return gate_et_veg_restart(args)
+    if args.gate == "et10":
+        return gate_et10(args)
     return gate_rank_invariance(args)
 
 
