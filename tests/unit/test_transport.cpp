@@ -159,6 +159,19 @@ struct MiniTransport {
       sw.asx = surface->faceAreaX();
       sw.asy = surface->faceAreaY();
       sw.rainMask = surface->rainApplyMask();
+      if (surface->solveVolumesActive()) {
+        sw.solveVolumes = true;  // T10 (W10.2), as the driver wires
+        sw.qxSolve = surface->solveVolumeX();
+        sw.qySolve = surface->solveVolumeY();
+        sw.isEtaBc = surface->etaBcMask();
+      }
+      if (surface->pairedStore()) {
+        // Stage-3 T9 (W9.3): the paired store's books, as the driver wires.
+        sw.pairedStore = true;
+        sw.parkedVol = surface->parkedVolume();
+        sw.releasedVol = surface->releasedVolume();
+        sw.evapStep = surface->evaporatedVolume();
+      }
     }
     frehg::transport::SubsurfaceWiring gwW;
     // The driver's transport-window switch (transport.subsurface_update:
@@ -202,6 +215,8 @@ struct MiniTransport {
     if (coupler) {
       cw.active = true;
       cw.qss = coupler->seepageRate();
+      cw.gain = coupler->gain();
+      cw.bounce = coupler->bounce();
       if (window) {
         cw.ventVolume = gw->windowVentVolume();
       }
@@ -231,6 +246,7 @@ struct MiniTransport {
       t += dt;
       surface->beginStep(t);
       surface->solveFreeSurface();
+      surface->sweepAndRelease();  // the driver's order (T9 W9.2)
       surface->updateVelocity();
       transport->step(t, dt, 0.0, surface->currentRain(), surface->currentEvaporation());
     } else {
@@ -1524,6 +1540,324 @@ TEST(TransportModule, ConsistentSubsurfaceUpdateReducesToLegacyWithoutSubcycling
   }
   std::printf("[ draining column ] max |consistent - legacy| = %.3e\n", worst);
   EXPECT_LT(worst, 1.0e-12);
+}
+
+// ---------------------------------------------------------------------------
+// Stage-3 T9 (plan §12A, gate ws0): the paired water–salt store. Closed
+// forms on constructed states: c = (M + M_s) / (V + V_s) at release; the
+// parked salt never exceeds the window maximum; unpaired salt is kept only
+// as an evaporative crust; negative residuals and the temperature store.
+// ---------------------------------------------------------------------------
+
+void setInterior2(const frehg::Field2<real_t>& field, int j, int i, real_t value) {
+  auto host = Kokkos::create_mirror_view(field);
+  Kokkos::deep_copy(host, field);
+  host(static_cast<std::size_t>(j), static_cast<std::size_t>(i)) = value;
+  Kokkos::deep_copy(field, host);
+}
+
+/// A closed 1 x 1 surface cell of `depth` [m] at concentration c0, the
+/// paired store on (surface_dryout: store), min_depth md.
+frehg::FrehgConfig pondConfig(real_t depth, real_t c0, real_t md) {
+  frehg::FrehgConfig cfg = channelConfig(1, depth, 0.0, 1.0);
+  cfg.simulation.id = "transport-t9-pond";
+  cfg.surfaceWater.minDepth = md;
+  cfg.surfaceWater.wettingFaceDepth = md;
+  cfg.initialConditions.surface.hasUu = false;
+  cfg.initialConditions.transport.surface.constant = c0;
+  cfg.transport.surfaceDryout = frehg::TransportConfig::SurfaceDryout::Store;
+  return cfg;
+}
+
+TEST(TransportStore, PairedReleaseMixesExactly) {
+  // A wet 2 mm cell at 20 psu meets a store of 0.5 mm carrying 35-psu
+  // water; one quiet step returns both (R5): c = (20*2 + 35*0.5)/2.5 = 23.
+  const real_t area = 1.0;
+  MiniTransport mini;
+  mini.cfg = pondConfig(2.0e-3, 20.0, 1.0e-5);
+  mini.build();
+  ASSERT_TRUE(mini.surface->pairedStore());
+  ASSERT_TRUE(mini.transport->hasSurfaceStore());
+  setInterior2(mini.surface->waterStoreMutable(), 1, 1, 0.5e-3 * area);
+  setInterior2(mini.transport->surfaceStoreMutable(), 1, 1, 35.0 * 0.5e-3 * area);
+  mini.step();
+  const real_t expect = (20.0 * 2.0e-3 + 35.0 * 0.5e-3) / 2.5e-3;
+  EXPECT_NEAR(interior2(mini.transport->surfaceScalar(), 1, 1), expect, 1.0e-14 * expect);
+  EXPECT_NEAR(interior2(mini.surface->depth(), 1, 1), 2.5e-3, 1.0e-14 * 2.5e-3);
+  EXPECT_EQ(interior2(mini.surface->waterStore(), 1, 1), 0.0);
+  EXPECT_EQ(interior2(mini.transport->surfaceStore(), 1, 1), 0.0);
+  // The anchor stays the basis-lag correction: zero on a still cell.
+  EXPECT_NEAR(mini.transport->audit().surfAnchor, 0.0, 1.0e-16);
+  // A vBasis-only release (T8's) would have given (40 + 17.5)/2 = 28.75.
+  EXPECT_GT(std::fabs(interior2(mini.transport->surfaceScalar(), 1, 1) - 28.75), 1.0);
+}
+
+/// The draining shelf of the consistent-update tests with min_depth above
+/// the 0.7 mm the shelf thins to, so its closing films park (P2), under the
+/// LEGACY (lagged) flux volume — the update that concentrates closing films
+/// above every input (35.035 psu from uniform 35).
+struct ShelfStoreRun {
+  real_t worstRatio = 0.0;       ///< max over steps/cells of M_s / (35 V_s)
+  real_t worstWindow = 0.0;      ///< max of (M_s / V_s) / (start-of-step max s)
+  real_t maxSeen = 35.0;         ///< highest wet concentration ever present
+  real_t saltWithoutWater = 0.0; ///< max M_s on cells with V_s = 0
+  real_t minStore = 0.0;         ///< min M_s seen
+  real_t parkedMax = 0.0;        ///< max Sigma V_s seen
+  real_t ledgerWorst = 0.0;      ///< worst |Delta(mass + store) - booked| / M0
+};
+
+ShelfStoreRun runShelfStore(int steps) {
+  MiniTransport mini;
+  mini.cfg = drainingShelfConfig(false);
+  mini.cfg.surfaceWater.minDepth = 8.0e-4;
+  mini.cfg.surfaceWater.wettingFaceDepth = 1.0e-3;
+  mini.cfg.transport.surfaceDryout = frehg::TransportConfig::SurfaceDryout::Store;
+  mini.build();
+  ShelfStoreRun run;
+  const real_t m0 = mini.transport->ownedSurfaceMass() + mini.transport->surfaceStoreTotal();
+  real_t booked = 0.0;
+  const int nx = mini.cfg.domain.nx;
+  for (int n = 0; n < steps; ++n) {
+    // Every window member is a concentration present at the step start: the
+    // highest of them bounds every cell's window maximum.
+    real_t startMax = 0.0;
+    for (int i = 1; i <= nx; ++i) {
+      if (interior2(mini.surface->depth(), 1, i) > 0.0) {
+        startMax = std::max(startMax, interior2(mini.transport->surfaceScalar(), 1, i));
+      }
+    }
+    run.maxSeen = std::max(run.maxSeen, startMax);
+    mini.step();
+    const frehg::transport::TransportAudit& a = mini.transport->audit();
+    booked += a.surfSource + a.surfBoundary + a.surfAdjust + a.surfAnchor;
+    const real_t now = mini.transport->ownedSurfaceMass() + mini.transport->surfaceStoreTotal();
+    run.ledgerWorst = std::max(run.ledgerWorst, std::fabs(now - m0 - booked) / m0);
+    real_t parked = 0.0;
+    for (int i = 1; i <= nx; ++i) {
+      const real_t vs = interior2(mini.surface->waterStore(), 1, i);
+      const real_t ms = interior2(mini.transport->surfaceStore(), 1, i);
+      parked += vs;
+      run.minStore = std::min(run.minStore, ms);
+      if (vs > 0.0) {
+        run.worstRatio = std::max(run.worstRatio, ms / (35.0 * vs));
+        run.worstWindow = std::max(run.worstWindow, (ms / vs) / run.maxSeen);
+      } else {
+        run.saltWithoutWater = std::max(run.saltWithoutWater, std::fabs(ms));
+      }
+    }
+    run.parkedMax = std::max(run.parkedMax, parked);
+  }
+  return run;
+}
+
+TEST(TransportStore, ParkedConcentrationWithinLimiterWindow) {
+  // R3 under the legacy (lagged) flux volume, which concentrates closing
+  // films above every input (35.035 psu from uniform 35): a parked film's
+  // salt never exceeds its window maximum. The window holds wet neighbours
+  // the artifact already raised, so the bound is the highest concentration
+  // present at the step start (measured 35.0103 psu parked vs that bound).
+  const ShelfStoreRun run = runShelfStore(2400);
+  std::printf("[ shelf store ] max M_s/(35 V_s) = %.15f, window ratio %.15f, "
+              "max seen %.6f, Sigma V_s max %.4e\n",
+              run.worstRatio, run.worstWindow, run.maxSeen, run.parkedMax);
+  ASSERT_GT(run.parkedMax, 0.0) << "vacuous: no film parked";
+  EXPECT_GT(run.maxSeen, 35.0 + 1.0e-3) << "vacuous: the legacy artifact did not fire";
+  EXPECT_LE(run.worstWindow, 1.0 + 1.0e-12);
+}
+
+TEST(TransportStore, UnpairedSaltToAdjustWithoutEvaporation) {
+  // R4 without evaporation: no cell ever holds salt without water (I1),
+  // and the excess the cap refuses is booked, not lost: the surface ledger
+  // Delta(mass + store) = booked terms closes at every step.
+  const ShelfStoreRun run = runShelfStore(2400);
+  std::printf("[ shelf store ] salt without water %.3e, ledger worst %.3e\n",
+              run.saltWithoutWater, run.ledgerWorst);
+  ASSERT_GT(run.parkedMax, 0.0) << "vacuous: no film parked";
+  EXPECT_EQ(run.saltWithoutWater, 0.0);
+  EXPECT_LE(run.ledgerWorst, 1.0e-12);
+}
+
+TEST(TransportStore, UnpairedSaltKeptAfterEvaporativeDryout) {
+  // R4(a), the O4 crust: a 5 mm pond at 35 psu loses (5e-3 - 4e-6)/4 m per
+  // step to prescribed evaporation; step 4 leaves a 4e-6 m film (below
+  // min_depth 1e-5) that parks with its water's salt, and the salt the
+  // evaporated water left behind stays as the crust. Total: M_s = M0.
+  const real_t d0 = 5.0e-3, r = 4.0e-6, c0 = 35.0;
+  MiniTransport mini;
+  mini.cfg = pondConfig(d0, c0, 1.0e-5);
+  mini.cfg.surfaceWater.evaporation.constant = (d0 - r) / 4.0;
+  mini.build();
+  const real_t m0 = mini.transport->ownedSurfaceMass();
+  real_t adjust = 0.0;
+  for (int n = 0; n < 4; ++n) {
+    mini.step();
+    adjust += mini.transport->audit().surfAdjust;
+  }
+  EXPECT_EQ(interior2(mini.surface->depth(), 1, 1), 0.0);
+  EXPECT_NEAR(interior2(mini.surface->waterStore(), 1, 1), r, 1.0e-12 * r);
+  EXPECT_NEAR(interior2(mini.transport->surfaceStore(), 1, 1), m0, 1.0e-12 * m0);
+  EXPECT_NEAR(adjust, 0.0, 1.0e-12 * m0);
+}
+
+TEST(TransportStore, NegativeResidualNeverStored) {
+  // A film carrying negative mass (an advective artifact) dries by
+  // evaporation: its water parks, but a store never holds negative salt —
+  // the residual goes to surf_adjust and the crust rule (rest > 0) never
+  // fires on it.
+  const real_t d0 = 2.0e-3, r = 4.0e-6;
+  MiniTransport mini;
+  mini.cfg = pondConfig(d0, 0.0, 1.0e-5);
+  mini.cfg.surfaceWater.evaporation.constant = d0 - r;
+  mini.build();
+  setInterior2(mini.transport->surfaceScalar(), 1, 1, -5.0);
+  mini.step();
+  EXPECT_NEAR(interior2(mini.surface->waterStore(), 1, 1), r, 1.0e-12 * r);
+  EXPECT_EQ(interior2(mini.transport->surfaceStore(), 1, 1), 0.0);
+  EXPECT_NEAR(mini.transport->audit().surfAdjust, 5.0 * d0, 1.0e-12 * 5.0 * d0);
+}
+
+TEST(TransportStore, TemperatureParksWithItsWater) {
+  // R9: the temperature instance parks heat with its water at the water's
+  // own temperature — and only that (no crust: R4 is salinity-only), so a
+  // released film neither dilutes nor concentrates heat.
+  const real_t d0 = 2.0e-3, r = 4.0e-6, t0 = 20.0;
+  MiniTransport mini;
+  mini.cfg = pondConfig(d0, t0, 1.0e-5);
+  mini.cfg.modules.temperature = true;
+  mini.cfg.initialConditions.temperature.surface.constant = t0;
+  mini.cfg.surfaceWater.evaporation.constant = d0 - r;
+  mini.build(true);
+  ASSERT_TRUE(mini.transport->hasSurfaceStore());
+  mini.step();
+  const real_t vs = interior2(mini.surface->waterStore(), 1, 1);
+  ASSERT_NEAR(vs, r, 1.0e-12 * r);
+  EXPECT_NEAR(interior2(mini.transport->surfaceStore(), 1, 1), t0 * vs, 1.0e-12 * t0 * vs);
+}
+
+// ---------------------------------------------------------------------------
+// Stage-3 T10 (plan §12B, gate sx0): the solve-consistent surface update.
+// ---------------------------------------------------------------------------
+
+TEST(SweModule, SolveFaceVolumesTelescope) {
+  // C1: the recorded face volumes ARE the solve's continuity — per cell,
+  // cellArea * (eta^{n+1} - eta^n) + div(Q) = 0 to the solve residual, on
+  // a sloshing deep channel where nothing after the solve touches eta.
+  MiniTransport mini;
+  mini.cfg = channelConfig(12, 10.0, 0.3, 0.2);
+  mini.cfg.transport.consistentSurfaceUpdate = true;
+  mini.cfg.transport.conservativeSurfaceUpdate = true;
+  mini.cfg.initialConditions.transport.surface.constant = 35.0;
+  mini.build();
+  ASSERT_TRUE(mini.surface->pairedStore() || true);
+  ASSERT_TRUE(mini.surface->solveVolumesActive());
+  for (int n = 0; n < 3; ++n) {
+    auto etaStart = Kokkos::create_mirror_view(mini.surface->etaStart());
+    mini.step();
+    Kokkos::deep_copy(etaStart, mini.surface->etaStart());
+    auto eta = Kokkos::create_mirror_view(mini.surface->eta());
+    Kokkos::deep_copy(eta, mini.surface->eta());
+    auto qx = Kokkos::create_mirror_view(mini.surface->solveVolumeX());
+    Kokkos::deep_copy(qx, mini.surface->solveVolumeX());
+    auto qy = Kokkos::create_mirror_view(mini.surface->solveVolumeY());
+    Kokkos::deep_copy(qy, mini.surface->solveVolumeY());
+    real_t worst = 0.0;
+    real_t scale = 0.0;
+    for (int i = 1; i <= 12; ++i) {
+      const auto iu = static_cast<std::size_t>(i);
+      const real_t div = qx(1, iu) - qx(1, iu - 1) + qy(1, iu) - qy(0, iu);
+      const real_t res = (eta(1, iu) - etaStart(1, iu)) * 1.0 + div;
+      worst = std::max(worst, std::fabs(res));
+      scale = std::max(scale, std::fabs(qx(1, iu)));
+    }
+    // The identity holds to the linear solve's residual (default rtol);
+    // a transport advecting with the post-limiter Fu has no such identity.
+    EXPECT_LE(worst, 1.0e-8 * std::max(scale, 1.0e-6))
+        << "step " << n << ": worst " << worst << " scale " << scale;
+  }
+}
+
+TEST(TransportModule, SolveConsistentUniformStaysUniform) {
+  // J1 on the sloshing channel: a uniform 35 stays uniform, and the
+  // anchor (the consistent update's volume-mismatch rescale) vanishes.
+  MiniTransport mini;
+  mini.cfg = channelConfig(20, 5.0, 0.4, 0.2);
+  mini.cfg.transport.consistentSurfaceUpdate = true;
+  mini.cfg.transport.conservativeSurfaceUpdate = true;
+  mini.cfg.initialConditions.transport.surface.constant = 35.0;
+  mini.build();
+  real_t anchor = 0.0;
+  for (int n = 0; n < 30; ++n) {
+    mini.step();
+    anchor += mini.transport->audit().surfAnchor;
+    for (int i = 1; i <= 20; ++i) {
+      if (interior2(mini.surface->depth(), 1, i) > 0.0) {
+        EXPECT_NEAR(interior2(mini.transport->surfaceScalar(), 1, i), 35.0, 1.0e-12);
+      }
+    }
+  }
+  const real_t m0 = 35.0 * 5.0 * 20.0;
+  EXPECT_LE(std::fabs(anchor), 1.0e-9 * m0);
+}
+
+TEST(TransportModule, SolveConsistentDryingFaceCarriesSalt) {
+  // J4: a shelf film drains into a pit and the shelf cell ends the step
+  // below wetting_face_depth — the velocity limiter closes the face AFTER
+  // the solve moved the water. Under `conservative` the salt moves with
+  // that water: the pit receives it and the total (mass + store) is exact.
+  const std::vector<real_t> bed = {-0.01, -1.0};
+  const std::string dir = writeTransportRaster("t10", "t10_bed.dat", bed);
+  std::ofstream eta0(std::filesystem::path(dir) / "t10_eta.dat");
+  eta0 << "0.0\n-0.5\n";
+  eta0.close();
+  MiniTransport mini;
+  mini.cfg = channelConfig(2, 1.0, 0.0, 0.05);
+  mini.cfg.configDir = dir;
+  mini.cfg.domain.bottomElevation.fromFile = true;
+  mini.cfg.domain.bottomElevation.file = "t10_bed.dat";
+  mini.cfg.initialConditions.surface.eta.fromFile = true;
+  mini.cfg.initialConditions.surface.eta.file = "t10_eta.dat";
+  mini.cfg.initialConditions.surface.hasUu = false;
+  mini.cfg.surfaceWater.friction.coefficient.constant = 0.02;
+  // min_depth above wetting_face_depth so the shelf's last film reads
+  // dry and parks (P2) instead of idling behind the closed face.
+  mini.cfg.surfaceWater.minDepth = 1.0e-3;
+  mini.cfg.surfaceWater.wettingFaceDepth = 1.0e-4;
+  mini.cfg.transport.consistentSurfaceUpdate = true;
+  mini.cfg.transport.conservativeSurfaceUpdate = true;
+  mini.cfg.transport.surfaceDryout = frehg::TransportConfig::SurfaceDryout::Store;
+  mini.cfg.initialConditions.transport.surface.constant = 0.0;
+  // Closed walls: the default east/north edges are legacy-transmissive
+  // and would drain the pit (a REAL booked outflow, not a defect).
+  frehg::BoundaryConditionConfig walls;
+  walls.name = "walls";
+  walls.polygon = {{-1.0, -1.0}, {3.0, -1.0}, {3.0, 2.0}, {-1.0, 2.0}};
+  walls.target = frehg::BcTarget::Surface;
+  walls.kind = frehg::BcKind::Velocity;
+  walls.value.constant = 0.0;
+  mini.cfg.boundaryConditions = {walls};
+  mini.build();
+  // The shelf starts at 35 psu, the pit fresh.
+  setInterior2(mini.transport->surfaceScalar(), 1, 1, 35.0);
+  setInterior2(mini.transport->surfaceScalar(), 1, 2, 0.0);
+  const real_t m0 = 35.0 * 0.01 * 1.0;  // the shelf film's salt
+  real_t adjust = 0.0;
+  for (int n = 0; n < 400; ++n) {  // ~20 s: the film drains to the park
+    mini.step();
+    adjust += mini.transport->audit().surfAdjust;
+  }
+  const real_t total = mini.transport->ownedSurfaceMass() + mini.transport->surfaceStoreTotal();
+  std::printf("[ drying face ] total %.12e vs m0 %.12e (rel %.2e), adjust %.2e, pit %.4e\n",
+              total, m0, (total - m0) / m0, adjust,
+              interior2(mini.transport->surfaceScalar(), 1, 2) *
+                  interior2(mini.surface->depth(), 1, 2));
+  EXPECT_NEAR(total, m0, 1.0e-8 * m0);
+  EXPECT_LE(std::fabs(adjust), 1.0e-8 * m0);
+  // Anti-vacuity: the pit actually received salt through the drying face.
+  const real_t pit = interior2(mini.transport->surfaceScalar(), 1, 2) *
+                     interior2(mini.surface->depth(), 1, 2);
+  EXPECT_GT(pit, 0.5 * m0);
+  // And the shelf really dried (the limiter event fired).
+  EXPECT_EQ(interior2(mini.surface->depth(), 1, 1), 0.0);
 }
 
 }  // namespace

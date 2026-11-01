@@ -434,6 +434,133 @@ void SurfaceSolver::fillAndSolve() {
       });
 }
 
+
+void SurfaceSolver::recordSolveFaceVolumes() {
+  // Stage-3 T10 (W10.1, plan §12B C1): the continuity face volumes of the
+  // solve just taken, Q = dt As E - S (eta_nb - eta) with the POST-SOLVE
+  // eta and the start-of-step geometry the matrix was assembled with.
+  // These are the volumes whose telescoped sum IS the solve's per-cell
+  // eta update, the same expression accumulateBoundaryFluxes books at
+  // stage and edge faces. Slots match Fu/Fv; the west/south interface
+  // slots use the mirror coefficient (Sxp(j, i) == Sxm(j, i + 1), both
+  // pointwise functions of exchanged data, so every rank writes the same
+  // face volume). At a folded (non-periodic) domain-edge face the
+  // implicit leg is zero by the ghost's zero-gradient copy; velocity-BC
+  // faces carry exactly their prescribed dt As u, and outflow-BC faces
+  // add the transmissive drop volume the RHS correction released.
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const int i0 = grid_.i0();
+  const int j0 = grid_.j0();
+  const Grid::EdgeTopology topo = grid_.edgeTopology();
+  const real_t dt = dt_;
+  Field2<real_t> Qx = Qx_, Qy = Qy_, eta = eta_, Ex = Ex_, Ey = Ey_;
+  Field2<real_t> Asx = Asx_, Asy = Asy_, Sxp = Sxp_, Sxm = Sxm_, Syp = Syp_, Sym = Sym_;
+
+  Kokkos::parallel_for(
+      "swe_solve_volumes_x",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 0}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i) {
+        // The face between global cells g and g + 1.
+        const int g = i0 + i - 1;
+        const real_t S = (i >= 1) ? Sxp(j, i) : Sxm(j, 1);
+        const bool edge = topo.east(g) || topo.west(g + 1);
+        real_t q = dt * Asx(j, i) * Ex(j, i);
+        if (!edge) {
+          q -= S * (eta(j, i + 1) - eta(j, i));
+        }
+        Qx(j, i) = q;
+      });
+  Kokkos::parallel_for(
+      "swe_solve_volumes_y",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {0, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i) {
+        const int g = j0 + j - 1;
+        const real_t S = (j >= 1) ? Syp(j, i) : Sym(1, i);
+        const bool edge = topo.north(g) || topo.south(g + 1);
+        real_t q = dt * Asy(j, i) * Ey(j, i);
+        if (!edge) {
+          q -= S * (eta(j + 1, i) - eta(j, i));
+        }
+        Qy(j, i) = q;
+      });
+
+  // Velocity-BC faces carry the prescribed flux (assembleRhs's exact
+  // replacement volumes).
+  for (const DeviceBcList& list : velocityBcs_) {
+    auto lj = list.j;
+    auto li = list.i;
+    auto lface = list.face;
+    const real_t u = list.current;
+    Kokkos::parallel_for(
+        "swe_solve_volumes_velocity_bc",
+        Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
+        KOKKOS_LAMBDA(const std::size_t m) {
+          const int j = lj(m);
+          const int i = li(m);
+          switch (static_cast<BcFace>(lface(m))) {
+            case BcFace::XMinus:
+              Qx(j, 0) = dt * Asx(j, 0) * u;
+              break;
+            case BcFace::XPlus:
+              Qx(j, i) = dt * Asx(j, i) * u;
+              break;
+            case BcFace::YMinus:
+              Qy(0, i) = dt * Asy(0, i) * u;
+              break;
+            case BcFace::YPlus:
+              Qy(j, i) = dt * Asy(j, i) * u;
+              break;
+            default:
+              break;
+          }
+        });
+  }
+
+  // Outflow faces: the transmissive drop volume leaves through the face
+  // (the applyOutflowCorrections coefficient, recomputed identically).
+  const real_t coef = gravity_ * dt_ * dt_;
+  Field2<real_t> Vsx = Vsx_, Vsy = Vsy_, Dx = Dx_, Dy = Dy_;
+  for (const DeviceBcList& list : outflowBcs_) {
+    auto lj = list.j;
+    auto li = list.i;
+    auto lface = list.face;
+    auto drop = list.bedDrop;
+    Kokkos::parallel_for(
+        "swe_solve_volumes_outflow_bc",
+        Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
+        KOKKOS_LAMBDA(const std::size_t m) {
+          const int j = lj(m);
+          const int i = li(m);
+          real_t sface = 0.0;
+          switch (static_cast<BcFace>(lface(m))) {
+            case BcFace::XPlus:
+              sface = Sxp(j, i);
+              Qx(j, i) += sface * drop(m);
+              break;
+            case BcFace::XMinus:
+              sface = (Vsx(j, 0) > 0.0) ? coef * Asx(j, 0) * Asx(j, 0) * Dx(j, i) / Vsx(j, 0)
+                                        : 0.0;
+              Qx(j, 0) -= sface * drop(m);
+              break;
+            case BcFace::YPlus:
+              sface = Syp(j, i);
+              Qy(j, i) += sface * drop(m);
+              break;
+            case BcFace::YMinus:
+              sface = (Vsy(0, i) > 0.0) ? coef * Asy(0, i) * Asy(0, i) * Dy(j, i) / Vsy(0, i)
+                                        : 0.0;
+              Qy(0, i) -= sface * drop(m);
+              break;
+            default:
+              break;
+          }
+        });
+  }
+}
+
 void SurfaceSolver::accumulateBoundaryFluxes() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();

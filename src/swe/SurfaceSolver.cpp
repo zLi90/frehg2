@@ -168,6 +168,34 @@ SurfaceSolver::SurfaceSolver(const Grid& grid, const FrehgConfig& config,
     Kokkos::deep_copy(wetClock_, 0.0);
     Kokkos::deep_copy(wetClockStepStart_, 0.0);
   }
+  // Stage-3 T10 (W10.1): the solve face volumes, conservative update only.
+  recordSolveVolumes_ = config.modules.transport &&
+                        config.transport.conservativeSurfaceUpdate;
+  if (recordSolveVolumes_) {
+    Qx_ = alloc("swe_qx_solve");
+    Qy_ = alloc("swe_qy_solve");
+    Kokkos::deep_copy(Qx_, 0.0);
+    Kokkos::deep_copy(Qy_, 0.0);
+  }
+  // Stage-3 T9 (W9.1): the thin-layer removal books exist in every mode.
+  etaPreLimit_ = alloc("swe_eta_pre_limit");
+  filmRemoved_ = alloc("swe_film_removed");
+  Kokkos::deep_copy(filmRemoved_, 0.0);
+  // W9.2: the paired water store is active iff the salinity store is
+  // (plan §12A) — otherwise every store path below is inert.
+  pairedStore_ = config.modules.transport &&
+                 config.transport.surfaceDryout == TransportConfig::SurfaceDryout::Store;
+  if (pairedStore_) {
+    waterStore_ = alloc("swe_water_store");
+    parkedVol_ = alloc("swe_parked_vol");
+    releasedVol_ = alloc("swe_released_vol");
+    etaPreEvap_ = alloc("swe_eta_pre_evap");
+    evapStep_ = alloc("swe_evap_step");
+    Kokkos::deep_copy(waterStore_, 0.0);
+    Kokkos::deep_copy(parkedVol_, 0.0);
+    Kokkos::deep_copy(releasedVol_, 0.0);
+    Kokkos::deep_copy(evapStep_, 0.0);
+  }
   frictionCoef_ = alloc("swe_friction_coef");
 
   halo_.add("swe_eta", eta_);
@@ -649,6 +677,13 @@ void SurfaceSolver::beginStep(real_t t) {
   Timer::Scoped timer("swe/begin_step");
   Kokkos::deep_copy(etan_, eta_);
   audit_ = SurfaceStepAudit{};
+  if (pairedStore_) {
+    // Stage-3 T9 (W9.2): the per-step park/release/evaporation books the
+    // transport reads after the surface step.
+    Kokkos::deep_copy(parkedVol_, 0.0);
+    Kokkos::deep_copy(releasedVol_, 0.0);
+    Kokkos::deep_copy(evapStep_, 0.0);
+  }
 
   rain_ = rainIsSeries_ ? rainSeries_.value(t) : rainConstant_;
   if (etOpenWater_) {
@@ -762,9 +797,20 @@ void SurfaceSolver::solveFreeSurface() {
   assembleCoefficients();
   applyOutflowCorrections();
   fillAndSolve();
+  if (recordSolveVolumes_) {
+    // T10 (W10.1): the halo needs the POST-SOLVE eta for the interface
+    // and periodic-seam faces (the scatter writes interiors only); the
+    // default path keeps its single eta exchange in updateVelocity.
+    halo_.exchange({"swe_eta"});
+    recordSolveFaceVolumes();
+  }
   accumulateBoundaryFluxes();
   enforceSurfBc(true);
+  // Stage-3 T9 (W9.1): snapshot eta so the removals of the (unchanged)
+  // limiter are booked per path afterwards.
+  Kokkos::deep_copy(etaPreLimit_, eta_);
   cflLimiter();
+  bookLimiterRemovals();
   evapRain();
 }
 

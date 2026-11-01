@@ -81,6 +81,9 @@ class Simulation {
   /// Stage-3 T5 (W5.10): per-outer-step ET contributions to the
   /// atmosphere interval rates (and the soil depth-window reset).
   void addEtRateContributions();
+  /// Stage-3 T9 (W9.1): add the step's counted thin-layer removal to the
+  /// film_removal_rate accumulator (when requested).
+  void addFilmRateContribution();
   void writeCheckpoint(real_t t, long step, real_t labelTime = -1.0);
   /// Refresh the run record's dynamic sections (solver telemetry, closure)
   /// and rewrite it. Collective (v2 plan §2A).
@@ -123,6 +126,16 @@ class Simulation {
   real_t cumClamped_ = 0.0;  ///< running below-bed clamp creation [m^3]
   /// Running coupled deposit on prescribed-stage cells [m^3] (Stage-3 T2).
   real_t cumStageDeposit_ = 0.0;
+  /// Stage-3 T9 (W9.1/W9.2): the running counted thin-layer removal, its
+  /// per-path books (run-record lines; P3 is informational under discard)
+  /// and the store's running release [m^3].
+  real_t cumFilmRemoved_ = 0.0;
+  real_t cumFilmIsolated_ = 0.0;
+  real_t cumFilmSmall_ = 0.0;
+  real_t cumFilmClamp_ = 0.0;
+  real_t cumFilmSweep_ = 0.0;
+  real_t cumStoreRelease_ = 0.0;
+  real_t cumGwVentThin_ = 0.0;  ///< W9.4 thin vents deposited (P4) [m^3]
   real_t cumGwBoundary_ = 0.0;
   real_t cumGwStorage_ = 0.0;
   real_t cumGwRealloc_ = 0.0;

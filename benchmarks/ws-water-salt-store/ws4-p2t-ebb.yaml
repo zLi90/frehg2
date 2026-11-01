@@ -1,0 +1,86 @@
+# ws4 — path coverage (Stage-3 plan §12A): one small lane per removal path,
+# under the paired store; the harness asserts the path's parked volume equals
+# its removed volume (1e-12), the salt parks at the cell's concentration
+# (uniform 35 psu here: M_s = 35 V_s, 1e-12), and anti-vacuity (the lane's
+# own path fires above a floor). P1 rides the ws1 lane's books (a solve
+# wetting an isolated cell needs flow) and P4 the ws1 dry seepage face.
+simulation:
+  id: ws4-p2t
+  title: Stage-3 ws4 P2 with temperature (R9)
+domain:
+  nx: 1
+  ny: 10
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation:
+    file: input/ws4_slope.dat
+time:
+  dt: 1.0
+  t_end: 1800.0
+  output_interval: 1800.0
+modules:
+  surface_water: true
+  transport: true
+  temperature: true
+surface_water:
+  friction:
+    law: manning
+    coefficient:
+      constant: 0.03
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 0.0001
+transport:
+  scheme:
+    advection: upwind
+  dispersion:
+    longitudinal: 0.0
+    transverse: 0.0
+    molecular: 0.0
+  surface_update: consistent
+  surface_dryout: store
+boundary_conditions:
+- name: walls
+  region:
+    polygon:
+    - - -1
+      - -1
+    - - 2
+      - -1
+    - - 2
+      - 11
+    - - -1
+      - 11
+  target: surface
+  kind: velocity
+  value:
+    constant: 0.0
+initial_conditions:
+  surface:
+    eta:
+      file: input/ws4_slope_eta.dat
+  transport:
+    surface:
+      constant: 35.0
+  temperature:
+    surface:
+      constant: 20.0
+output:
+  filename: out/output.h5
+  monitor_interval: 0
+  variables:
+    surface:
+    - eta
+    - depth
+    - water_store
+    - film_removal_rate
+    transport:
+    - concentration_surface
+    - salt_store
+    temperature:
+    - temperature_surface
+temperature:
+  scheme:
+    advection: upwind

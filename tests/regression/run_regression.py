@@ -67,6 +67,7 @@ import json
 import os
 import shutil
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -3685,6 +3686,7 @@ def gate_default_bitwise(args: argparse.Namespace) -> int:
             return 77
     allow = list(args.allow or [])
     ok = True
+    prefix_doc = load_mass_audit_prefix_doc(args)
     for label, case_dir_name, config_name in BITWISE_CASES:
         case_dir = stage_case(args.repo, case_dir_name, args.work / label)
         config = case_dir / config_name
@@ -3706,6 +3708,11 @@ def gate_default_bitwise(args: argparse.Namespace) -> int:
             print(f"  pins [{label}]: {', '.join(pinned)}")
         run_case(args.frehg, config, case_dir, args.mpiexec, 1)
         output = case_dir / doc["output"]["filename"]
+        # Stage-3 T9 (ws5): the mass_audit table is a declared exception
+        # (it gains appended columns), but its PREFIX — the columns the T8
+        # binary wrote — must stay bitwise.
+        if not mass_audit_prefix_check(output, label, args, prefix_doc):
+            ok = False
         if args.record:
             argv = ["hash", str(output), "--case", label, "--out", str(reference)]
             if h5_bitwise.main_from(argv) != 0:
@@ -3718,11 +3725,61 @@ def gate_default_bitwise(args: argparse.Namespace) -> int:
             if code == 77:
                 return 77
             ok = ok and (code == 0)
+    save_mass_audit_prefix_doc(args, prefix_doc)
     if args.record:
         print(f"default-bitwise: reference recorded -> {reference}")
         return 0
+    if args.record_massaudit:
+        return 0
     print("default-bitwise:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
+
+
+# Stage-3 T9 (plan §12A ws5): the mass_audit PREFIX pin. The T8 binary's
+# table hashes (and widths) per case live in stage3-T8-massaudit.json,
+# recorded once with --record-massaudit on the frozen T8 binary; a T9 run
+# must reproduce those columns bitwise (only appended columns may differ).
+MASS_AUDIT_PREFIX = HERE / "reference-hashes" / "stage3-T8-massaudit.json"
+
+
+def load_mass_audit_prefix_doc(args) -> dict:
+    if getattr(args, "record_massaudit", False):
+        return {"cases": {}}
+    if MASS_AUDIT_PREFIX.exists():
+        return json.loads(MASS_AUDIT_PREFIX.read_text())
+    return {"cases": {}}
+
+
+def save_mass_audit_prefix_doc(args, doc: dict) -> None:
+    if getattr(args, "record_massaudit", False):
+        sys.path.insert(0, str(HERE.parent.parent / "tools"))
+        import h5_bitwise  # noqa: E402
+        doc["toolchain"] = h5_bitwise.toolchain_fingerprint()
+        MASS_AUDIT_PREFIX.write_text(json.dumps(doc, indent=1, sort_keys=True))
+        print(f"mass_audit prefix reference recorded -> {MASS_AUDIT_PREFIX}")
+
+
+def mass_audit_prefix_check(output: Path, label: str, args, doc: dict) -> bool:
+    import hashlib
+    with h5py.File(output, "r") as handle:
+        if "/monitor/mass_audit" not in handle:
+            return True
+        table = handle["/monitor/mass_audit"][()]
+    if getattr(args, "record_massaudit", False):
+        doc["cases"][label] = {
+            "ncols": int(table.shape[1]),
+            "sha256": hashlib.sha256(np.ascontiguousarray(table).tobytes()).hexdigest()}
+        return True
+    ref = doc.get("cases", {}).get(label)
+    if ref is None:
+        print(f"  mass_audit prefix [{label}]: no T8 reference — FAIL")
+        return False
+    n = ref["ncols"]
+    digest = hashlib.sha256(np.ascontiguousarray(table[:, :n]).tobytes()).hexdigest()
+    same = digest == ref["sha256"]
+    print(f"  mass_audit prefix [{label}]: first {n} of {table.shape[1]} columns "
+          f"{'bitwise' if same else 'DIFFER'} vs the T8 binary")
+    return same
 
 
 
@@ -5575,7 +5632,7 @@ def gate_et9(args: argparse.Namespace) -> int:
         result = subprocess.run(
             [sys.executable, str(args.repo / "tools" / "h5_bitwise.py"),
              "compare", str(outputs["noet"]), str(pin), "--case", "et9-noet",
-             "--require-toolchain"],
+             "--require-toolchain", "--allow", "monitor/mass_audit"],
             capture_output=True, text=True)
         good = result.returncode == 0
         tail = (result.stdout or result.stderr).strip().splitlines()
@@ -5585,6 +5642,11 @@ def gate_et9(args: argparse.Namespace) -> int:
         if result.returncode == 77:
             print("  (off-toolchain skip accepted)")
             good = True
+        elif good:
+            # Stage-3 T9 (ws5): the mass_audit table gains appended columns
+            # (declared exception) — its T8 prefix must stay bitwise.
+            good = mass_audit_prefix_check(outputs["noet"], "et9-noet", args,
+                                           load_mass_audit_prefix_doc(args))
         ok = ok and good
     print("et9 gate:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
@@ -6048,6 +6110,831 @@ def gate_et10(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------------
+# Stage-3 T9 paired water–salt store gates (plan §12A, S3-A12/O15): ws1
+# (per-PR source bound on the compressed S3-A12 seepage face), ws1n (the
+# owner's repro, nightly), ws2 (the water/salt ledgers, asserted inside the
+# lanes), ws3 (rain/evaporation invariance and the pond closed forms), ws4
+# (path coverage), ws-rank and ws-restart. ws5 (the pins) lives in
+# default-bitwise and the et9 noET lane. Pure checks: gate_ws.py.
+# ---------------------------------------------------------------------------
+import gate_ws  # noqa: E402
+
+CAPABILITY_ABSENT_S3WS = ("capability absent: the schema rejects the T9 target "
+                          "keys (output surface: water_store / film_removal_rate)")
+
+
+def ws_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-ws.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def ws_strict() -> list[str]:
+    return STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW
+
+
+def ws_store_frames(handle) -> tuple[np.ndarray, np.ndarray]:
+    times = output_times(handle, "/surface/water_store")
+    vs = np.array([handle[f"/surface/water_store/{t}"][:].ravel() for t in times])
+    ms = np.array([handle[f"/transport/salt_store/{t}"][:].ravel() for t in times])
+    return np.nan_to_num(vs), np.nan_to_num(ms)
+
+
+def ws_source_bound_lane(args, case_dir: Path, config: Path, tol: dict,
+                         label: str, strict: bool = True) -> bool:
+    """The ws1/ws1n assertions on one store lane plus its discard twin:
+    (1) the source bound on every frame and monitor row; (2) no clip, CFL
+    within the S3-A13 cap; (3) I2 per cell; anti-vacuity; ws2 ledgers."""
+    ok = True
+    extra = ws_strict() if strict else None
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks, extra)
+    log = (case_dir / f"run_n{args.ranks}.log").read_text()
+    out = case_dir / "out" / "output.h5"
+    with open(case_dir / "out" / "run-record.yaml", encoding="utf-8") as h:
+        record = yaml.safe_load(h)
+    with h5py.File(out, "r") as handle:
+        surf_max = [float(np.nanmax(handle[f"/transport/concentration_surface/{t}"][:]))
+                    for t in output_times(handle, "/transport/concentration_surface")]
+        subs_max = [float(np.nanmax(handle[f"/transport/concentration/{t}"][:]))
+                    for t in output_times(handle, "/transport/concentration")]
+        mon_max = []
+        with open(config, encoding="utf-8") as h:
+            monitors = yaml.safe_load(h)["output"].get("monitors", [])
+        for mon in monitors:
+            if "concentration_surface" in mon["variables"]:
+                col = 1 + mon["variables"].index("concentration_surface")
+                mon_max.append(float(np.nanmax(handle[f"/monitor/{mon['name']}"][:, col])))
+        vs, ms = ws_store_frames(handle)
+        ma = handle["/monitor/mass_audit"][:]
+        ta = handle["/monitor/transport_audit"][:]
+    for what, series in (("surface", surf_max), ("subsurface", subs_max),
+                         ("monitor rows", mon_max)):
+        good, msg = gate_ws.check_source_bound(series, tol["c_max"], tol["bound_rel"],
+                                               f"{label} {what}")
+        print(f"  {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+    cfl = [float(x) for x in re.findall(r"CFL = ([0-9.eE+-]+) exceeds 1", log)]
+    clips = len(re.findall(r"clip", log, re.I))
+    good = (max(cfl) if cfl else 0.0) <= tol["cfl_max"] and clips <= tol["clip_warnings"]
+    print(f"  {label} CFL warnings {len(cfl)} (max {max(cfl) if cfl else 0.0:.4f} <= "
+          f"{tol['cfl_max']}), clip warnings {clips}{'' if good else ' FAIL'}")
+    ok = ok and good
+    worst_excess = 0.0
+    unpaired = 0.0
+    for v, m in zip(vs, ms):
+        good_f, msg = gate_ws.check_store_bound(m, v, tol["c_max"], tol["bound_rel"])
+        worst_excess = max(worst_excess, float(np.max(m - tol["c_max"] * v)))
+        unpaired = max(unpaired, float(np.max(np.abs(np.where(v == 0.0, m, 0.0)))))
+        ok = ok and good_f
+    good = worst_excess <= tol["c_max"] * float(vs.max(initial=0.0)) * 1.0e-12 and unpaired == 0.0
+    print(f"  {label} I2: max (M_s - {tol['c_max']} V_s) = {worst_excess:.3e}, salt on "
+          f"empty stores {unpaired:.3e} (== 0){'' if good else ' FAIL'}")
+    ok = ok and good
+    parked = float(vs.sum(axis=1).max(initial=0.0))
+    cols = gate_ws.audit_columns(coupled=True, store=True)
+    releases = int(np.sum(np.diff(ma[:, cols["store_release"]]) > 0.0))
+    good = parked >= tol["parked_floor_m3"] and releases >= tol["release_rows_floor"]
+    print(f"  {label} anti-vacuity: max Sigma V_s {parked:.3e} m^3 (>= "
+          f"{tol['parked_floor_m3']:.1e}), release rows {releases} (>= "
+          f"{tol['release_rows_floor']}){'' if good else ' FAIL'}")
+    ok = ok and good
+    surf = record.get("closure", {}).get("surface", {})
+    gwc = record.get("closure", {}).get("groundwater", {})
+    if "vent_thin_floor_m3" in tol:
+        p1 = float(surf.get("film_removed_isolated_m3", 0.0))
+        p4 = float(gwc.get("vent_thin_m3", 0.0))
+        good = p4 >= tol["vent_thin_floor_m3"]
+        print(f"  {label} path coverage: P1 isolated {p1:.3e} m^3 (recorded), P4 thin "
+              f"vents {p4:.3e} m^3 (>= {tol['vent_thin_floor_m3']:.1e})"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+    tw = ws_tolerances("ws2")
+    good, msg = gate_ws.check_water_identity(ma, cols, True, tw["water_rel"], tw["water_abs_m3"])
+    print(f"  {label} ws2 {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good, msg = gate_ws.check_salt_identity(ta, True, tw["salt_rel"])
+    print(f"  {label} ws2 {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    return ok
+
+
+def ws_discard_twin(args, case: str, config_name: str, workdir: Path,
+                    label: str, strict: bool = True) -> bool:
+    """ws2 on the discard twin: the discard identity at every row, and the
+    real negative — the identity without film_removed fails."""
+    case_dir = stage_case(args.repo, case, workdir)
+    config = case_dir / config_name
+
+    def to_discard(doc):
+        doc["transport"]["surface_dryout"] = "discard"
+        doc["output"]["variables"]["surface"] = [
+            v for v in doc["output"]["variables"]["surface"] if v != "water_store"]
+        doc["output"]["variables"]["transport"] = [
+            v for v in doc["output"]["variables"]["transport"] if v != "salt_store"]
+        doc["simulation"]["id"] += "-discard"
+
+    rewrite_config(config, to_discard)
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks,
+             ws_strict() if strict else None)
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        ma = handle["/monitor/mass_audit"][:]
+        ta = handle["/monitor/transport_audit"][:]
+    tw = ws_tolerances("ws2")
+    cols = gate_ws.audit_columns(coupled=True, store=False)
+    good, msg = gate_ws.check_water_identity(ma, cols, False, tw["water_rel"], tw["water_abs_m3"])
+    print(f"  {label} discard ws2 {msg}{'' if good else ' FAIL'}")
+    ok = good
+    bad = ma.copy()
+    bad[:, cols["film_removed"]] = 0.0
+    neg, msg = gate_ws.check_water_identity(bad, cols, False, tw["water_rel"], tw["water_abs_m3"])
+    good = not neg
+    print(f"  {label} discard negative (film_removed dropped): "
+          f"{'fails as required' if good else 'STILL CLOSES — vacuous FAIL'}")
+    ok = ok and good
+    good, msg = gate_ws.check_salt_identity(ta, False, tw["salt_rel"])
+    print(f"  {label} discard ws2 {msg}{'' if good else ' FAIL'}")
+    return ok and good
+
+
+def gate_ws1(args: argparse.Namespace) -> int:
+    tol = ws_tolerances("ws1")
+    case_dir = stage_case(args.repo, "ws-water-salt-store", args.work / "store")
+    config = case_dir / "ws1-source-bound.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"ws1 gate: {CAPABILITY_ABSENT_S3WS}")
+        print("ws1 gate: FAIL")
+        return 1
+    ok = ws_source_bound_lane(args, case_dir, config, tol, "ws1")
+    ok = ws_discard_twin(args, "ws-water-salt-store", "ws1-source-bound.yaml",
+                         args.work / "discard", "ws1") and ok
+    print("ws1 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_ws1n(args: argparse.Namespace) -> int:
+    tol = ws_tolerances("ws1n")
+    case_dir = stage_case(args.repo, "ws-water-salt-store/ws1n", args.work / "store")
+    config = case_dir / "ws1n-h2-beach.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"ws1n gate: {CAPABILITY_ABSENT_S3WS}")
+        print("ws1n gate: FAIL")
+        return 1
+    # The owner's repro runs on the production (default) solver, as packaged.
+    ok = ws_source_bound_lane(args, case_dir, config, tol, "ws1n", strict=False)
+    print("ws1n gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def ws_run_lane(args, config_name: str, workdir: Path, mutate=None,
+                strict: bool = False) -> tuple[Path, dict]:
+    case_dir = stage_case(args.repo, "ws-water-salt-store", workdir)
+    config = case_dir / config_name
+    if mutate is not None:
+        rewrite_config(config, mutate)
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks,
+             ws_strict() if strict else None)
+    with open(case_dir / "out" / "run-record.yaml", encoding="utf-8") as h:
+        record = yaml.safe_load(h)
+    return case_dir / "out" / "output.h5", record
+
+
+def gate_ws3(args: argparse.Namespace) -> int:
+    tol = ws_tolerances("ws3")
+    ok = True
+    probe = stage_case(args.repo, "ws-water-salt-store", args.work / "probe")
+    if not validate_config(args.frehg, probe / "ws3bc-pond.yaml"):
+        print(f"ws3 gate: {CAPABILITY_ABSENT_S3WS}")
+        print("ws3 gate: FAIL")
+        return 1
+    sys.path.insert(0, str(HERE.parent.parent / "tools"))
+    import h5_bitwise  # noqa: E402
+
+    # (a) the never-drying rain/evaporation basin: store == discard bitwise
+    # on every field (the audit tables: the shared prefix bitwise, the store
+    # lane's appended columns aside).
+    out_s, _ = ws_run_lane(args, "ws3a-basin.yaml", args.work / "a-store")
+
+    def discard(doc):
+        doc["transport"]["surface_dryout"] = "discard"
+        doc["simulation"]["id"] += "-discard"
+
+    out_d, _ = ws_run_lane(args, "ws3a-basin.yaml", args.work / "a-discard", discard)
+    hs, hd = h5_bitwise.dataset_hashes(out_s), h5_bitwise.dataset_hashes(out_d)
+    fields = sorted(k for k in hd if not k.startswith("monitor/"))
+    same = all(hs.get(k) == hd[k] for k in fields)
+    with h5py.File(out_s, "r") as a, h5py.File(out_d, "r") as b:
+        prefix_ok = True
+        for tab in ("monitor/mass_audit", "monitor/transport_audit"):
+            ta, tb = a[tab][()], b[tab][()]
+            prefix_ok = prefix_ok and np.array_equal(ta[:, :tb.shape[1]], tb)
+        ts = output_times(a, "/transport/concentration_surface")
+        c = [float(np.nanmean(a[f"/transport/concentration_surface/{t}"][:])) for t in ts]
+        dmin = min(float(np.nanmin(a[f"/surface/depth/{t}"][:])) for t in ts)
+    good = same and prefix_ok and (max(c) - min(c)) > tol["move_floor_psu"] and dmin > 0.0
+    print(f"  (a) store vs discard: {len(fields)} field datasets "
+          f"{'bitwise' if same else 'DIFFER'}, audit prefixes "
+          f"{'bitwise' if prefix_ok else 'DIFFER'}; salinity moves "
+          f"{max(c) - min(c):.3f} psu (> {tol['move_floor_psu']}), never dries "
+          f"(min depth {dmin:.4f} m){'' if good else ' FAIL'}")
+    ok = ok and good
+
+    # (a-ET) the ET open-water basin plus rain: bitwise against its T8 hash.
+    out_e, _ = ws_run_lane(args, "ws3aet-basin.yaml", args.work / "a-et")
+    ref = HERE / "reference-hashes" / "stage3-ws3aet-T8.json"
+    code = h5_bitwise.main_from(["compare", str(out_e), str(ref), "--case", "ws3aet",
+                                 "--require-toolchain", "--allow", "monitor/mass_audit",
+                                 "--allow", "monitor/transport_audit"])
+    good = code in (0, 77)
+    print(f"  (a-ET) vs the T8-binary hash: {'skipped off-toolchain' if code == 77 else ('PASS' if code == 0 else 'FAIL')}")
+    ok = ok and good
+
+    # (b)+(c) the ET pond: dry-out books, then the rewet closed form.
+    out_b, _ = ws_run_lane(args, "ws3bc-pond.yaml", args.work / "bc")
+    a_cell = 1.0
+    v0, m0 = 0.005 * a_cell, 35.0 * 0.005 * a_cell
+    with h5py.File(out_b, "r") as h:
+        ts = output_times(h, "/surface/water_store")
+        vs = np.array([float(h[f"/surface/water_store/{t}"][:].ravel()[0]) for t in ts])
+        msx = np.array([float(h[f"/transport/salt_store/{t}"][:].ravel()[0]) for t in ts])
+        dp = np.array([float(h[f"/surface/depth/{t}"][:].ravel()[0]) for t in ts])
+        ma = h["/monitor/mass_audit"][:]
+        ta = h["/monitor/transport_audit"][:]
+        mon = h["/monitor/pond"][:]
+    cols = gate_ws.audit_columns(coupled=False, store=True)
+    k = max(i for i, t in enumerate(ts) if t < 7200)
+    row = int(np.searchsorted(ma[:, 0], ts[k]))
+    evap = float(ma[row, cols["evaporation"]] - ma[0, cols["evaporation"]])
+    good = (dp[k] == 0.0 and abs(evap + vs[k] - v0) <= tol["exact_rel"] * v0
+            and vs[k] <= 1.0e-5 * a_cell and abs(msx[k] - m0) <= tol["exact_rel"] * m0)
+    print(f"  (b) dry at {ts[k]} s: Sigma E + V_s - V0 = {evap + vs[k] - v0:.2e}, V_s "
+          f"{vs[k]:.3e} (<= min_depth A), M_s - M0 = {msx[k] - m0:.2e}"
+          f"{'' if good else ' FAIL'}")
+    ok = ok and good
+    good, msg = gate_ws.check_monotone_while_dry(vs[:, None], (dp == 0.0)[:, None])
+    print(f"  (b) {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    # (c) S3-A13: the ET channel keeps evaporating during the rain step, so
+    # the rewet closed form carries that step's E dt: c = M0 / (V_s +
+    # (h_r - E dt) A) (the plan's form assumed no concurrent evaporation).
+    i = next(i for i in range(len(mon)) if mon[i, 0] > 7200.0 and mon[i, 1] > 0.0)
+    h_r, e_dt = 1.0e-5 * 10.0, 1.5e-6 * 10.0
+    expect = m0 / (vs[k] + (h_r - e_dt) * a_cell)
+    tot = ta[:, 1] + ta[:, 11]
+    good = (abs(mon[i, 2] - expect) <= tol["exact_rel"] * expect
+            and float(np.max(np.abs(tot - tot[0]))) <= tol["exact_rel"] * tot[0])
+    print(f"  (c) first wet step t = {mon[i, 0]:.0f} s: c = {mon[i, 2]:.10f} vs "
+          f"M0/(V_s + (h_r - E dt) A) = {expect:.10f}; total salt drift "
+          f"{float(np.max(np.abs(tot - tot[0]))) / tot[0]:.2e}{'' if good else ' FAIL'}")
+    ok = ok and good
+
+    # (d) legacy prescribed evaporation (no ET) to dryness.
+    out_d4, _ = ws_run_lane(args, "ws3d-pond.yaml", args.work / "d")
+    with h5py.File(out_d4, "r") as h:
+        ts = output_times(h, "/surface/water_store")
+        vs = np.array([float(h[f"/surface/water_store/{t}"][:].ravel()[0]) for t in ts])
+        msx = np.array([float(h[f"/transport/salt_store/{t}"][:].ravel()[0]) for t in ts])
+        dp = np.array([float(h[f"/surface/depth/{t}"][:].ravel()[0]) for t in ts])
+        ma = h["/monitor/mass_audit"][:]
+    evap = float(ma[-1, cols["evaporation"]] - ma[0, cols["evaporation"]])
+    clamp = float(ma[-1, cols["clamped"]] - ma[0, cols["clamped"]])
+    good = (dp[-1] == 0.0 and abs((evap - clamp) + vs[-1] - v0) <= tol["exact_rel"] * v0
+            and vs[-1] <= 1.0e-5 * a_cell and abs(msx[-1] - m0) <= tol["exact_rel"] * m0)
+    print(f"  (d) legacy evaporation: Sigma (E - clamped) + V_s - V0 = "
+          f"{(evap - clamp) + vs[-1] - v0:.2e}, V_s {vs[-1]:.3e}, M_s - M0 = "
+          f"{msx[-1] - m0:.2e}{'' if good else ' FAIL'}")
+    ok = ok and good
+    good, msg = gate_ws.check_monotone_while_dry(vs[:, None], (dp == 0.0)[:, None])
+    print(f"  (d) {msg}{'' if good else ' FAIL'}")
+    ok = ok and good
+    print("ws3 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_ws4(args: argparse.Namespace) -> int:
+    tol = ws_tolerances("ws4")
+    ok = True
+    probe = stage_case(args.repo, "ws-water-salt-store", args.work / "probe")
+    if not validate_config(args.frehg, probe / "ws4-p2-ebb.yaml"):
+        print(f"ws4 gate: {CAPABILITY_ABSENT_S3WS}")
+        print("ws4 gate: FAIL")
+        return 1
+    for name, path_key, c0, pair_tol, temp in (
+            ("ws4-p2-ebb", "film_removed_small_m3", 35.0, tol["pair_slope_rel"], False),
+            ("ws4-p2t-ebb", "film_removed_small_m3", 35.0, tol["pair_slope_rel"], True),
+            ("ws4-p3-evap", "film_removed_clamp_m3", None, tol["pair_exact_rel"], False),
+            ("ws4-p3t-evap", "film_removed_clamp_m3", None, tol["pair_exact_rel"], True)):
+        out, record = ws_run_lane(args, f"{name}.yaml", args.work / name)
+        surf = record["closure"]["surface"]
+        with h5py.File(out, "r") as h:
+            vs, ms = ws_store_frames(h)
+            heat = h["/monitor/temperature_audit"][-1, 12] if temp else None
+            t0 = h["/transport/concentration_surface/0"][:].ravel()
+            ma = h["/monitor/mass_audit"][:]
+        # The double-precision books (the run record prints 11 digits):
+        # film_removed (every path, cumulative), store_volume (instant),
+        # store_release (cumulative).
+        cols = gate_ws.audit_columns(coupled=False, store=True)
+        removed = float(ma[-1, cols["film_removed"]])
+        released = float(ma[-1, cols["store_release"]])
+        held = float(ma[-1, cols["store_volume"]])
+        own = float(surf[path_key])
+        good = abs(removed - held - released) <= tol["books_rel"] * max(removed, 1.0e-30) \
+            and own >= tol["path_floor_m3"]
+        print(f"  [{name}] own path {path_key} = {own:.3e} m^3 (>= "
+              f"{tol['path_floor_m3']:.0e}); removed {removed:.6e} = held {held:.6e} + "
+              f"released {released:.3e} (res {removed - held - released:.1e})"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+        mask = vs[-1] > 0.0
+        if c0 is not None:
+            good, msg = gate_ws.check_paired(ms[-1], vs[-1], c0, pair_tol)
+        else:
+            # P3 under evaporation: the salt crust (R4a) — the store holds the
+            # whole M0; the paired part is c V_s at the concentrated value.
+            m0 = float(np.nansum(t0)) * 0.005
+            err = abs(float(ms[-1].sum()) - m0) / m0
+            good = err <= pair_tol
+            msg = f"crust + paired M_s = M0 (rel {err:.2e} <= {pair_tol:.0e})"
+        print(f"  [{name}] {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+        if temp:
+            # R9: heat parks with its water at 20 C (P3: exact; P2: within
+            # the slope lane's uniformity class), no crust (R4 is salinity-only).
+            ratio = float(heat) / (20.0 * held)
+            bound = pair_tol if c0 is None else 1.0e-2
+            good = abs(ratio - 1.0) <= bound
+            print(f"  [{name}] R9 parked heat / (20 V_s) - 1 = {ratio - 1.0:.2e} "
+                  f"(<= {bound:.0e}){'' if good else ' FAIL'}")
+            ok = ok and good
+    print("ws4 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_ws_restart(args: argparse.Namespace) -> int:
+    """ws-x restart: ws1 checkpointed while >= 10 cells hold parked water;
+    the continuation is bitwise on every field including water_store."""
+    base = "ws1-source-bound.yaml"
+    full_dir = stage_case(args.repo, "ws-water-salt-store", args.work / "full")
+    config = full_dir / base
+    if not validate_config(args.frehg, config):
+        print(f"ws restart gate: {CAPABILITY_ABSENT_S3WS}")
+        print("ws restart determinism: FAIL")
+        return 1
+    run_case(args.frehg, config, full_dir, args.mpiexec, args.ranks, ws_strict())
+    full_out = full_dir / "out" / "output.h5"
+    with h5py.File(full_out, "r") as h:
+        cands = [t for t in output_times(h, "/surface/water_store")
+                 if t % 1800 == 0 and 0 < t < 7200
+                 and int(np.sum(h[f"/surface/water_store/{t}"][:] > 0.0)) >= 10]
+    if not cands:
+        print("  no checkpoint with >= 10 parked cells (vacuous) FAIL")
+        print("ws restart determinism: FAIL")
+        return 1
+    ckpt = cands[0]
+    re_dir = stage_case(args.repo, "ws-water-salt-store", args.work / "restart")
+    re_cfg = re_dir / base
+
+    def add_restart(doc):
+        doc["restart"] = {"enabled": True, "file": str(full_out.resolve()), "time": ckpt}
+        doc["output"]["filename"] = "out/restarted.h5"
+
+    rewrite_config(re_cfg, add_restart)
+    run_case(args.frehg, re_cfg, re_dir, args.mpiexec, args.ranks, ws_strict())
+    ok = True
+    with h5py.File(full_out, "r") as full, \
+            h5py.File(re_dir / "out" / "restarted.h5", "r") as part:
+        nparked = int(np.sum(full[f"/surface/water_store/{ckpt}"][:] > 0.0))
+        print(f"  checkpoint t = {ckpt} s with {nparked} parked cells")
+        for group in ("/surface/eta", "/surface/depth", "/surface/water_store",
+                      "/transport/concentration_surface", "/transport/salt_store",
+                      "/transport/concentration"):
+            worst_same = True
+            for t in output_times(part, group):
+                if t <= ckpt:
+                    continue
+                same = np.array_equal(np.nan_to_num(full[f"{group}/{t}"][:], nan=-9e99),
+                                      np.nan_to_num(part[f"{group}/{t}"][:], nan=-9e99))
+                worst_same = worst_same and same
+            print(f"  restart {group.rsplit('/', 1)[-1]}: "
+                  f"{'bitwise' if worst_same else 'DIFFERS'}")
+            ok = ok and worst_same
+    print("ws restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_ws_rank(args: argparse.Namespace) -> int:
+    """ws-x rank (S3-A13). ws1 is trajectory-chaotic in BOTH modes (a 1e-12
+    bed twin moves eta 6.8e-4 and flips a cell's surface salinity by 35 psu;
+    the discard twin is as rank-sensitive), so the field-identity classes
+    gate on the trajectory-stable paired-store base — the ws4 P2 slope —
+    and ws1 gates the rank-INVARIANT guarantees at n = 2/4: the source
+    bound, I2 and both ws2 ledgers. Per cell the parked volume inherits
+    eta's rank class (V_s = A h_parked): A * rank_surface_abs (water) and
+    c_max A rank_surface_abs (salt). The store TOTALS gate at
+    store_sum_rel = 1e-9 relative: the plan's 1e-12 is below the strict
+    solve's rounding at the slope's ~1e-5 m^3 scale (measured 5.4e-11)."""
+    tol = pd_tolerances("pd3")
+    tws = ws_tolerances("ws1")
+    ok = True
+    # (A) identity classes on the stable slope base, plus its chaos control.
+    outs = {}
+    for tag, n, twin in (("n1", 1, False), ("twin", 1, True), ("n2", 2, False),
+                         ("n4", 4, False)):
+        case_dir = stage_case(args.repo, "ws-water-salt-store", args.work / f"slope-{tag}")
+        config = case_dir / "ws4-p2-ebb.yaml"
+
+        def setup(doc, n=n):
+            doc["time"]["output_interval"] = 60.0
+            if n > 1:
+                doc["domain"]["decomposition"] = {"mpi_nx": 1, "mpi_ny": n}
+
+        rewrite_config(config, setup)
+        if not validate_config(args.frehg, config):
+            print(f"ws rank gate: {CAPABILITY_ABSENT_S3WS}")
+            print("ws rank gate: FAIL")
+            return 1
+        if twin:
+            bed = case_dir / "input" / "ws4_slope.dat"
+            lines = bed.read_text().splitlines()
+            k = next(i for i, l in enumerate(lines) if l.strip() and not l.startswith("#")) + 4
+            lines[k] = repr(float(lines[k]) + 1.0e-12)
+            bed.write_text("\n".join(lines) + "\n")
+        run_case(args.frehg, config, case_dir, args.mpiexec, n, STRICT_PETSC_OPTIONS)
+        outs[tag] = case_dir / "out" / "output.h5"
+    area = 1.0
+    with h5py.File(outs["n1"], "r") as base:
+        times = output_times(base, "/surface/eta")
+        for tag in ("twin", "n2", "n4"):
+            with h5py.File(outs[tag], "r") as other:
+                for group, bound in (
+                        ("/surface/eta", 1.0e-10 if tag == "twin" else tol["rank_surface_abs"]),
+                        ("/transport/concentration_surface",
+                         1.0e-10 if tag == "twin" else tol["rank_tracer_abs"]),
+                        ("/surface/water_store",
+                         area * (1.0e-10 if tag == "twin" else tol["rank_surface_abs"])),
+                        ("/transport/salt_store",
+                         tws["c_max"] * area * (1.0e-10 if tag == "twin" else tol["rank_surface_abs"]))):
+                    worst = max(float(np.nanmax(np.abs(base[f"{group}/{t}"][:] -
+                                                       other[f"{group}/{t}"][:])))
+                                for t in times)
+                    good = worst <= bound
+                    what = "1e-12 bed twin (stability control)" if tag == "twin" else f"n={tag[1:]}"
+                    print(f"  slope n=1 vs {what}: {group.rsplit('/', 1)[-1]} max |d| = "
+                          f"{worst:.3e} (<= {bound:.0e}){'' if good else ' FAIL'}")
+                    ok = ok and good
+                for group in ("/surface/water_store", "/transport/salt_store"):
+                    worst = 0.0
+                    for t in times:
+                        a = float(np.nansum(base[f"{group}/{t}"][:]))
+                        b = float(np.nansum(other[f"{group}/{t}"][:]))
+                        if a > 0.0:
+                            worst = max(worst, abs(a - b) / a)
+                    good = worst <= tws["store_sum_rel"]
+                    print(f"  slope n=1 vs {tag}: Sigma {group.rsplit('/', 1)[-1]} rel "
+                          f"{worst:.3e} (<= {tws['store_sum_rel']:.0e}){'' if good else ' FAIL'}")
+                    ok = ok and good
+                flips = 0
+                for t in times:
+                    a = base[f"/surface/water_store/{t}"][:] > 0.0
+                    b = other[f"/surface/water_store/{t}"][:] > 0.0
+                    flips += int(np.sum(a != b))
+                good = flips == 0
+                print(f"  slope n=1 vs {tag}: parking-timing flips {flips} (== 0)"
+                      f"{'' if good else ' FAIL'}")
+                ok = ok and good
+    # (B) the rank-invariant guarantees on the chaotic ws1 at n = 2 and 4.
+    for n in (2, 4):
+        case_dir = stage_case(args.repo, "ws-water-salt-store", args.work / f"ws1-n{n}")
+        config = case_dir / "ws1-source-bound.yaml"
+
+        def decomp(doc, n=n):
+            doc["domain"]["decomposition"] = {"mpi_nx": 1, "mpi_ny": n}
+
+        rewrite_config(config, decomp)
+        saved = args.ranks
+        args.ranks = n
+        try:
+            good = ws_source_bound_lane(args, case_dir, config, tws, f"ws1 n={n}")
+        finally:
+            args.ranks = saved
+        ok = ok and good
+    print("ws rank gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T10 solve-consistent surface transport gates (plan §12B, O16/
+# S3-A14): sx1 (uniform scalar through wetting/drying + the anchor), sx2
+# (drying-face salt on the T5 et8d strip), sx3 (the ws1n anchor, nightly),
+# sx4 (a tracer front), sx5 (temperature), sx-restart/sx-rank/sx-seam.
+# Pure checks: gate_sx.py.
+# ---------------------------------------------------------------------------
+import gate_sx  # noqa: E402
+
+CAPABILITY_ABSENT_S3SX = ("capability absent: the schema rejects the T10 "
+                          "target token (transport.surface_update: "
+                          "conservative)")
+
+
+def sx_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-sx.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def sx_frames(handle, group: str):
+    """Concentration frames with their wet masks (depth > 0)."""
+    times = output_times(handle, group)
+    frames, wet = [], []
+    for t in times:
+        frames.append(np.nan_to_num(handle[f"{group}/{t}"][:].ravel()))
+        wet.append(handle[f"/surface/depth/{t}"][:].ravel() > 0.0)
+    return times, frames, wet
+
+
+def gate_sx1(args: argparse.Namespace, case: str = "sx1-uniform-beach.yaml",
+             label: str = "sx1") -> int:
+    tol = sx_tolerances("sx1")
+    case_dir = stage_case(args.repo, "sx-solve-consistent", args.work)
+    config = case_dir / case
+    if not validate_config(args.frehg, config):
+        print(f"{label} gate: {CAPABILITY_ABSENT_S3SX}")
+        print(f"{label} gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks, ws_strict())
+    ok = True
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        times, frames, wet = sx_frames(handle, "/transport/concentration_surface")
+        good, msg = gate_sx.check_uniform(frames, wet, tol["c0"],
+                                          tol["uniform_abs"], "surface")
+        print(f"  {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+        subs, swet = [], []
+        for t in output_times(handle, "/transport/concentration"):
+            c = handle[f"/transport/concentration/{t}"][:].ravel()
+            m = np.isfinite(c)
+            subs.append(np.nan_to_num(c))
+            swet.append(m)
+        good, msg = gate_sx.check_uniform(subs, swet, tol["c0"],
+                                          tol["uniform_abs"], "subsurface")
+        print(f"  {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+        ta = handle["/monitor/transport_audit"][:]
+        m_scale = float(ta[0, 1] + ta[0, 2] + (ta[0, 11] if ta.shape[1] > 11 else 0.0))
+        good, msg = gate_sx.check_anchor(float(ta[-1, 7]), m_scale,
+                                         tol["anchor_rel"], "J2 anchor")
+        print(f"  {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+        adj = abs(float(ta[-1, 6]))
+        good = adj <= tol["adjust_rel"] * m_scale
+        print(f"  C4 booked surf_adjust = {adj:.3e} (<= {tol['adjust_rel']:.0e} M)"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+        # Anti-vacuity: the beach wets and dries (parking + release events).
+        ma = handle["/monitor/mass_audit"][:]
+        cols = gate_ws.audit_columns(coupled=True, store=True)
+        film = float(ma[-1, cols["film_removed"]])
+        good = film > 0.0
+        print(f"  anti-vacuity: film_removed = {film:.3e} m^3 (> 0)"
+              f"{'' if good else ' FAIL'}")
+        ok = ok and good
+        # Temperature instance (sx5 rides this body).
+        if "/monitor/temperature_audit" in handle:
+            tol5 = sx_tolerances("sx5")
+            tt, tf, twet = sx_frames(handle, "/temperature/temperature_surface")
+            good, msg = gate_sx.check_uniform(tf, twet, tol5["t0"],
+                                              tol5["uniform_abs"], "temperature")
+            print(f"  {msg}{'' if good else ' FAIL'}")
+            ok = ok and good
+            taT = handle["/monitor/temperature_audit"][:]
+            h_scale = float(taT[0, 1] + taT[0, 2] + (taT[0, 12] if taT.shape[1] > 12 else 0.0))
+            good, msg = gate_sx.check_anchor(float(taT[-1, 7]), h_scale,
+                                             tol5["anchor_rel"], "heat anchor")
+            print(f"  {msg}{'' if good else ' FAIL'}")
+            ok = ok and good
+    print(f"{label} gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_sx2(args: argparse.Namespace) -> int:
+    tol = sx_tolerances("sx2")
+    case_dir = stage_case(args.repo, "sx-solve-consistent", args.work)
+    config = case_dir / "sx2-drying-strip.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"sx2 gate: {CAPABILITY_ABSENT_S3SX}")
+        print("sx2 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+    ok = True
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        ta = handle["/monitor/transport_audit"][:]
+        # The ledger identity, not raw constancy: the bottom head BC feeds
+        # 10-psu groundwater in (subs_boundary books it), so total salt
+        # legitimately grows. total − Σ(booked cumulative terms) is the
+        # unbooked residual J2/J4 guard.
+        total = ta[:, 1] + ta[:, 2] + ta[:, 11]
+        booked = (ta[:, 4] + ta[:, 5] + ta[:, 6] + ta[:, 7] + ta[:, 8] +
+                  ta[:, 9] + ta[:, 10])
+        resid = (total - total[0]) - (booked - booked[0])
+        m_scale = float(total[0])
+        worst = float(np.abs(resid).max())
+        good = worst <= tol["total_rel"] * m_scale
+        print(f"  ledger identity: worst unbooked residual {worst:.3e} of "
+              f"{m_scale:.4e} (<= {tol['total_rel']:.0e}){'' if good else ' FAIL'}")
+        ok = ok and good
+        adj = abs(float(ta[-1, 6]))
+        good = adj <= tol["adjust_rel"] * m_scale
+        print(f"  J4 stranded salt: surf_adjust = {adj:.3e} (<= "
+              f"{tol['adjust_rel']:.0e} M = {tol['adjust_rel'] * m_scale:.1e}; "
+              f"red on T9: 1.09e-1){'' if good else ' FAIL'}")
+        ok = ok and good
+        # Anti-vacuity: the salt actually crossed the drying face — the
+        # pit column banked real salt (its water parks below min_depth, so
+        # the store, not the concentration field, carries the evidence).
+        times = output_times(handle, "/transport/salt_store")
+        peak = max(float(np.nan_to_num(handle[f"/transport/salt_store/{t}"][:]).ravel()[1])
+                   for t in times)
+        good = peak > tol["neighbor_floor_salt"]
+        print(f"  anti-vacuity: pit-cell peak salt store {peak:.4f} psu m^3 "
+              f"(> {tol['neighbor_floor_salt']}){'' if good else ' FAIL'}")
+        ok = ok and good
+    print("sx2 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_sx3(args: argparse.Namespace) -> int:
+    """ws1n (the owner's repro) under `conservative`, production solver."""
+    tol = sx_tolerances("sx3")
+    case_dir = stage_case(args.repo, "ws-water-salt-store/ws1n", args.work)
+    config = case_dir / "ws1n-h2-beach.yaml"
+
+    def to_conservative(doc):
+        doc["transport"]["surface_update"] = "conservative"
+        doc["simulation"]["id"] += "-conservative"
+
+    rewrite_config(config, to_conservative)
+    if not validate_config(args.frehg, config):
+        print(f"sx3 gate: {CAPABILITY_ABSENT_S3SX}")
+        print("sx3 gate: FAIL")
+        return 1
+    tws = ws_tolerances("ws1n")
+    ok = ws_source_bound_lane(args, case_dir, config, tws, "sx3", strict=False)
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        ta = handle["/monitor/transport_audit"][:]
+        m_scale = float(ta[0, 1] + ta[0, 2] + ta[0, 11])
+        good, msg = gate_sx.check_anchor(float(ta[-1, 7]), m_scale,
+                                         tol["anchor_rel"],
+                                         "J2 anchor (red on T9: +28.4 = 2.4e-2 M)")
+        print(f"  {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+    print("sx3 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_sx4(args: argparse.Namespace) -> int:
+    tol = sx_tolerances("sx4")
+    case_dir = stage_case(args.repo, "sx-solve-consistent", args.work)
+    config = case_dir / "sx4-front-slope.yaml"
+    if not validate_config(args.frehg, config):
+        print(f"sx4 gate: {CAPABILITY_ABSENT_S3SX}")
+        print("sx4 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks,
+             STRICT_PETSC_OPTIONS)
+    ok = True
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        times, frames, wet = sx_frames(handle, "/transport/concentration_surface")
+        ta = handle["/monitor/transport_audit"][:]
+        # Ledger identity (boundary/adjust/anchor are booked columns — the
+        # slope's walls keep boundary at zero, but the overdraft pairing's
+        # negative-residual path books into surf_adjust by design).
+        total = ta[:, 1] + ta[:, 11]
+        booked = ta[:, 4] + ta[:, 5] + ta[:, 6] + ta[:, 7]
+        resid = (total - total[0]) - (booked - booked[0])
+        m_scale = float(total[0])
+        worst = float(np.abs(resid).max())
+        good = worst <= tol["total_rel"] * m_scale
+        print(f"  ledger identity: worst unbooked residual {worst:.3e} of "
+              f"{m_scale:.4e} (<= {tol['total_rel']:.0e}){'' if good else ' FAIL'}")
+        ok = ok and good
+        adj = abs(float(ta[-1, 6]))
+        good = adj <= tol["adjust_rel"] * m_scale
+        print(f"  C4 booked surf_adjust = {adj:.3e} (<= "
+              f"{tol['adjust_rel']:.0e} M){'' if good else ' FAIL'}")
+        ok = ok and good
+        good, msg = gate_sx.check_extrema(frames, wet, 5.0, 35.0,
+                                          tol["extrema_tol"])
+        print(f"  {msg}{'' if good else ' FAIL'}")
+        ok = ok and good
+        # Anti-vacuity: the front moves — a below-front cell rises.
+        rise = max(float(f[6]) for f, w in zip(frames, wet) if w[6]) \
+            if any(w[6] for w in wet) else 0.0
+        good = rise > 5.0 + tol["front_floor_psu"]
+        print(f"  anti-vacuity: cell 6 (initially 5 psu) peaks at {rise:.3f} "
+              f"(> {5.0 + tol['front_floor_psu']}){'' if good else ' FAIL'}")
+        ok = ok and good
+    print("sx4 gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_sx_restart(args: argparse.Namespace) -> int:
+    """sx1 checkpointed mid-run; the continuation bitwise on every field."""
+    base = "sx1-uniform-beach.yaml"
+    full_dir = stage_case(args.repo, "sx-solve-consistent", args.work / "full")
+    config = full_dir / base
+    if not validate_config(args.frehg, config):
+        print(f"sx restart gate: {CAPABILITY_ABSENT_S3SX}")
+        print("sx restart determinism: FAIL")
+        return 1
+    run_case(args.frehg, config, full_dir, args.mpiexec, args.ranks, ws_strict())
+    full_out = full_dir / "out" / "output.h5"
+    ckpt = 1800
+    re_dir = stage_case(args.repo, "sx-solve-consistent", args.work / "restart")
+    re_cfg = re_dir / base
+
+    def add_restart(doc):
+        doc["restart"] = {"enabled": True, "file": str(full_out.resolve()),
+                          "time": ckpt}
+        doc["output"]["filename"] = "out/restarted.h5"
+
+    rewrite_config(re_cfg, add_restart)
+    run_case(args.frehg, re_cfg, re_dir, args.mpiexec, args.ranks, ws_strict())
+    ok = True
+    with h5py.File(full_out, "r") as full, \
+            h5py.File(re_dir / "out" / "restarted.h5", "r") as part:
+        for group in ("/surface/eta", "/surface/depth", "/surface/water_store",
+                      "/transport/concentration_surface", "/transport/salt_store",
+                      "/transport/concentration"):
+            same = all(np.array_equal(
+                np.nan_to_num(full[f"{group}/{t}"][:], nan=-9e99),
+                np.nan_to_num(part[f"{group}/{t}"][:], nan=-9e99))
+                for t in output_times(part, group) if t > ckpt)
+            print(f"  restart {group.rsplit('/', 1)[-1]}: "
+                  f"{'bitwise' if same else 'DIFFERS'}")
+            ok = ok and same
+    print("sx restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_sx_rank(args: argparse.Namespace) -> int:
+    """sx4 (trajectory-stable slope, S3-A13 doctrine) at mpi_ny = 1/2/4
+    strict, plus a 1e-12 bed twin as the stability control."""
+    tol = pd_tolerances("pd3")
+    outs = {}
+    for tag, n, twin in (("n1", 1, False), ("twin", 1, True), ("n2", 2, False),
+                         ("n4", 4, False)):
+        case_dir = stage_case(args.repo, "sx-solve-consistent",
+                              args.work / f"slope-{tag}")
+        config = case_dir / "sx4-front-slope.yaml"
+
+        def setup(doc, n=n):
+            if n > 1:
+                doc["domain"]["decomposition"] = {"mpi_nx": 1, "mpi_ny": n}
+
+        rewrite_config(config, setup)
+        if not validate_config(args.frehg, config):
+            print(f"sx rank gate: {CAPABILITY_ABSENT_S3SX}")
+            print("sx rank gate: FAIL")
+            return 1
+        if twin:
+            bed = case_dir / "input" / "ws4_slope.dat"
+            lines = bed.read_text().splitlines()
+            k = next(i for i, l in enumerate(lines)
+                     if l.strip() and not l.startswith("#")) + 4
+            lines[k] = repr(float(lines[k]) + 1.0e-12)
+            bed.write_text("\n".join(lines) + "\n")
+        run_case(args.frehg, config, case_dir, args.mpiexec, n, STRICT_PETSC_OPTIONS)
+        outs[tag] = case_dir / "out" / "output.h5"
+    ok = True
+    with h5py.File(outs["n1"], "r") as base:
+        times = output_times(base, "/surface/eta")
+        for tag in ("twin", "n2", "n4"):
+            with h5py.File(outs[tag], "r") as other:
+                # Twin bounds: eta/water respond linearly to the 1e-12 bed
+                # perturbation; the scalar's superbee weights amplify it
+                # ~1e3 through the drying front (measured 1.28e-9 at first
+                # green, S3-A15) — still trajectory-stable (a chaotic lane
+                # is O(1)), so the scalar control binds at 1e-7.
+                for group, bound in (
+                        ("/surface/eta",
+                         1.0e-10 if tag == "twin" else tol["rank_surface_abs"]),
+                        ("/transport/concentration_surface",
+                         1.0e-7 if tag == "twin" else tol["rank_tracer_abs"]),
+                        ("/surface/water_store",
+                         1.0e-10 if tag == "twin" else tol["rank_surface_abs"])):
+                    worst = max(float(np.nanmax(np.abs(
+                        base[f"{group}/{t}"][:] - other[f"{group}/{t}"][:])))
+                        for t in times)
+                    good = worst <= bound
+                    what = ("1e-12 bed twin (stability control)"
+                            if tag == "twin" else f"n={tag[1:]}")
+                    print(f"  slope n=1 vs {what}: {group.rsplit('/', 1)[-1]} "
+                          f"max |d| = {worst:.3e} (<= {bound:.0e})"
+                          f"{'' if good else ' FAIL'}")
+                    ok = ok and good
+    print("sx rank gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def gate_et7t(args: argparse.Namespace) -> int:
     ok = True
     # (a) a column entirely below h4: T_act == 0, unrealised = demand,
@@ -6351,7 +7238,11 @@ def main() -> int:
                                          "et8", "et9", "et-orient", "et-rank",
                                          "et-restart",
                                          "et4-t", "et5", "et6", "et7-t",
-                                         "et8-t", "et9-veg", "et-veg-restart", "et10"])
+                                         "et8-t", "et9-veg", "et-veg-restart", "et10",
+                                         "ws1", "ws1n", "ws3", "ws4", "ws-restart",
+                                         "ws-rank",
+                                         "sx1", "sx2", "sx3", "sx4", "sx5",
+                                         "sx-restart", "sx-rank"])
     parser.add_argument("--frehg", type=Path, required=True)
     parser.add_argument("--mpiexec", type=Path, required=True)
     parser.add_argument("--repo", type=Path, required=True)
@@ -6387,6 +7278,10 @@ def main() -> int:
                         help="default-bitwise gate: dataset glob exempt from the "
                              "bitwise comparison (Stage-3 plan §2.6 declared "
                              "exceptions)")
+    parser.add_argument("--record-massaudit", action="store_true",
+                        help="default-bitwise (Stage-3 T9 ws5): record the T8 "
+                             "mass_audit prefix reference instead of comparing; "
+                             "run once with the frozen T8 binary")
     parser.add_argument("--pd2-lane", choices=["surface", "gw", "coupled"],
                         default=None,
                         help="pd2: run only this lane (Stage-3 T8 W8.4: the "
@@ -6574,6 +7469,32 @@ def main() -> int:
         return gate_et_veg_restart(args)
     if args.gate == "et10":
         return gate_et10(args)
+    if args.gate == "ws1":
+        return gate_ws1(args)
+    if args.gate == "ws1n":
+        return gate_ws1n(args)
+    if args.gate == "ws3":
+        return gate_ws3(args)
+    if args.gate == "ws4":
+        return gate_ws4(args)
+    if args.gate == "ws-restart":
+        return gate_ws_restart(args)
+    if args.gate == "ws-rank":
+        return gate_ws_rank(args)
+    if args.gate == "sx1":
+        return gate_sx1(args)
+    if args.gate == "sx2":
+        return gate_sx2(args)
+    if args.gate == "sx3":
+        return gate_sx3(args)
+    if args.gate == "sx4":
+        return gate_sx4(args)
+    if args.gate == "sx5":
+        return gate_sx1(args, case="sx5-uniform-heat.yaml", label="sx5")
+    if args.gate == "sx-restart":
+        return gate_sx_restart(args)
+    if args.gate == "sx-rank":
+        return gate_sx_rank(args)
     return gate_rank_invariance(args)
 
 

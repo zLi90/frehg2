@@ -1,0 +1,76 @@
+# ws3(b)+(c) — the et8b geometry under the paired store (Stage-3 plan §12A,
+# O15): a 1 x 1 pond, 5 mm at 35 psu, the ET open-water channel (prescribed
+# potential 1.5e-6 m/s) evaporates it to dryness (~3 330 s); a 2 mm rain pulse
+# (1e-5 m/s, 7 200-7 400 s) rewets it. (b): Sigma evaporation + V_s = V0
+# (1e-12 V0), V_s <= min_depth A, M_s = M0 (1e-12), V_s never decreases
+# while dry (R2/R7). (c): the first wet step has c = M0 / (V_s + h_r A) with
+# h_r = 1e-4 m (one 10-s rain step), total salt constant.
+simulation:
+  id: ws3-bc-pond
+  title: Stage-3 ws3(b)/(c) ET pond dry-out and rain rewet
+domain:
+  nx: 1
+  ny: 1
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation:
+    constant: 0.0
+time:
+  dt: 10.0
+  t_end: 9000.0
+  output_interval: 100.0
+modules:
+  surface_water: true
+  transport: true
+surface_water:
+  friction:
+    law: manning
+    coefficient:
+      constant: 0.03
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+  rainfall:
+    series:
+      file: input/ws3_rain_pulse.dat
+transport:
+  scheme:
+    advection: superbee
+  dispersion:
+    longitudinal: 0.0
+    transverse: 0.0
+    molecular: 0.0
+  surface_update: consistent
+  surface_dryout: store
+initial_conditions:
+  surface:
+    eta:
+      constant: 0.005
+  transport:
+    surface:
+      constant: 35.0
+output:
+  filename: out/output.h5
+  monitor_interval: 0
+  variables:
+    surface:
+    - eta
+    - depth
+    - water_store
+    transport:
+    - concentration_surface
+    - salt_store
+  monitors:
+  - name: pond
+    i: 0
+    j: 0
+    variables:
+    - depth
+    - concentration_surface
+evapotranspiration:
+  potential: prescribed
+  prescribed:
+    constant: 1.5e-06
+  open_water: true

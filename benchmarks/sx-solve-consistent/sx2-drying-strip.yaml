@@ -1,0 +1,133 @@
+# sx2 — drying-face salt (Stage-3 plan §12B, J4): the T5 et8d regime
+# (bulk-ET pond over exfiltrating sand, sync, paired store) on a 1 x 2
+# strip, REDESIGNED from the flat split-pond (whose exfiltration never
+# cleared min_depth: the surface stayed dry for the whole horizon and the
+# gate was vacuous — no face ever flowed): the shelf cell starts with an
+# 8 mm, 10 psu pond 4 mm above the pit cell's bed, drains through the
+# connecting face while ET and the min_depth park dry it, and the
+# exfiltration (10 psu groundwater, bottom head 1.2) keeps the et8d held-
+# seepage flavor underneath. Under `consistent` the limiter zeroes the
+# connecting face AFTER the solve moved the water, so the pit's water
+# arrives salt-free and the stranded salt is capped into surf_adjust (the
+# same mechanism measured at -0.109 psu m^3 = 24 % of the exfiltrated salt
+# on the T9 binary's flat strip; S3-A13, the owner item). Under
+# `conservative` the salt moves with the solve's face volume: surf_adjust
+# stays at the booked-terms class and total salt is exact (J4).
+simulation:
+  id: sx2-drying-strip
+  title: Stage-3 sx2 drying-face salt (the T5 et8d 1 x 2 strip, solve-consistent)
+domain:
+  nx: 2
+  ny: 1
+  nz: 10
+  dx: 1.0
+  dy: 1.0
+  dz: 0.1
+  bottom_elevation:
+    file: input/sx2_bed.dat
+time:
+  dt: 2.0
+  t_end: 7200.0
+  output_interval: 600.0
+modules:
+  surface_water: true
+  groundwater: true
+  transport: true
+surface_water:
+  friction:
+    law: manning
+    coefficient:
+      constant: 0.03
+    thin_layer_depth: 0.1
+  min_depth: 0.005
+  wetting_face_depth: 0.001
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 2.0
+    dt_min: 2.0
+    dt_max: 2.0
+  specific_storage: 1.0e-05
+  reallocation: disabled
+soil:
+  types:
+  - name: sand
+    ksx: 1.0e-06
+    ksy: 1.0e-06
+    ksz: 1.0e-06
+    theta_s: 0.41
+    theta_r: 0.05
+    vg_alpha: 4.0
+    vg_n: 2.5
+  map:
+    constant: sand
+coupling:
+  mode: sync
+atmosphere:
+  air_temperature:
+    constant: 20.0
+  surface_temperature:
+    constant: 20.0
+  pressure:
+    constant: 101.3
+  relative_humidity:
+    constant: 0.6
+  wind_speed:
+    constant: 2.0
+  wind_speed_floor: 0.5
+evapotranspiration:
+  potential: bulk
+  open_water: true
+transport:
+  scheme:
+    advection: superbee
+  dispersion:
+    longitudinal: 0.0
+    transverse: 0.0
+    molecular: 0.0
+  surface_update: conservative
+  subsurface_update: consistent
+  surface_dryout: store
+boundary_conditions:
+- name: bottom-head
+  region:
+    polygon:
+    - - -0.5
+      - -0.5
+    - - 2.5
+      - -0.5
+    - - 2.5
+      - 1.5
+    - - -0.5
+      - 1.5
+  target: groundwater_bottom
+  kind: head
+  value:
+    constant: 1.2
+initial_conditions:
+  surface:
+    eta:
+      file: input/sx2_eta.dat
+  groundwater:
+    water_table:
+      constant: 0.0
+  transport:
+    surface:
+      file: input/sx2_salt.dat
+    groundwater:
+      constant: 10.0
+output:
+  filename: out/output.h5
+  variables:
+    surface:
+    - eta
+    - depth
+    - water_store
+    groundwater:
+    - hydraulic_head
+    - water_content
+    transport:
+    - concentration_surface
+    - salt_store
+    - concentration

@@ -45,6 +45,8 @@ Notation:
 | O12 | Keep per-PR / nightly tiering | §2.5. |
 | O13 | Feddes h₃/h₄ required per vegetation type, no physiology defaults | Schema-required. h₁/h₂ are optional, and omitting both disables the anaerobic reduction. |
 | O14 | Study reruns | Out of this plan. T8 delivers a case-migration note for the study. |
+| O15 (2026-10-31, revises O4) | Thin-layer removals park their **water together with its salt** in a per-cell store, released together at rewetting. Rain and evaporation (their additions, removals, dilution and concentration) are not affected by the store. Parked water is **inert**: it does not flow, infiltrate or evaporate, ET included. A new phase with its own gates implements it. | Phase T9 (§12A), amendment S3-A12. The salt-only store of O4 becomes the special case V_s = 0 (salt left by complete evaporative dry-out). The interim default of `transport.surface_dryout` is an open owner item (§17-6). |
+| O16 (2026-10-31) | Surface salt (and heat) moves **with the water the free-surface solve moved**: the transport's face volumes are the solve's own continuity face volumes, not velocities rebuilt afterwards from the new depths and then limited. | Phase T10 (§12B), amendment S3-A14. |
 
 ---
 
@@ -61,8 +63,10 @@ Notation:
 | **T6** | Vegetation and transpiration (Feddes sink, root fractions, Beer–Lambert split, salt exclusion) | T5 | 2–3 |
 | **T7** | Penman–Monteith closure (the r_a laws ship in T5), incoming-shortwave input, FAO-56 verification | T6 | 1.5–2 |
 | **T8** | Default-flip evaluation (reallocation, salt store), full pipeline, coverage tables, sanitizer, docs, records | all | 1.5–2 |
+| **T9** (added by S3-A12) | Paired water–salt store for thin-layer removals (O15): booking of every surface thin-layer removal, the paired store and its release, coupled sub-`min_depth` vents, re-adjudication of the store-resolving gates, DF re-evaluation of the `store` default | T8 | 2.5–3.5 |
+| **T10** (added by S3-A14) | Solve-consistent surface transport (O16): the transport advects with the free-surface solve's continuity face volumes, so salt and heat move with the water; post-solve manipulations (limiters, removals, sources, exchange) keep their own explicit books | T9 | 1.5–2.5 |
 
-Execution order: T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8. The total is ≈ 14–19 agent-days.
+Execution order: T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8. The total is ≈ 14–19 agent-days. T9 follows the closed T8 (S3-A12, 2026-10-31); T10 follows the closed T9 (S3-A14, 2026-10-31).
 
 ---
 
@@ -641,6 +645,211 @@ Soil limiter: `beta_lee_pielke` or `none` (alpha_barton is rejected with PM).
 
 ---
 
+## 12A. T9 — Paired water–salt store for thin-layer removals (added by S3-A12, O15)
+
+Status: awaiting owner approval (2026-10-31). §2 applies unchanged: gate-first, records under `stage3/records/T9/`, snapshot `T9`, no commits. The section is numbered 12A so that the existing §13–§18 references (some quoted in source comments) stay valid.
+
+**Removal-path inventory** (grep the quoted code; line numbers drift):
+
+| Path | Where | What it removes | Audit at T8 |
+|---|---|---|---|
+| P1 | `swe/WetDry.cpp` `cflLimiter`, isolated-cell rule `eta(j, i) = bottom(j, i); cflActive(j, i) = 1.0;` | water the solve put on a dry cell that has no wet neighbour | none |
+| P2 | `swe/WetDry.cpp` `cflLimiter`, `if (diff > 0.0 && diff < minDepth)` | films thinner than `min_depth` after the solve | none |
+| P3 | `swe/SurfaceSources.cpp` `swe_evaprain_clamp`, `if (diff < minDepth)` | the sub-`min_depth` remainder after rain and evaporation (positive part) | `clamped` (signed, mixed with the below-bed lift) |
+| P4 | `gw/Reallocate.cpp` vent branch, the else of `if (cplDept(j, i) > 0.0 \|\| d > minDepth)` | sub-`min_depth` vents onto a dry cell (the water never reaches η) | gw ledger (`realloc_dropped`) |
+
+Not a removal: `updateDepth`'s `if (d <= minDepth) d = 0.0;` keeps the film in η but reports `dept` = 0, so the transport sees the cell dry while P2 removes the film only at the next solve (the R8 mismatch). Not thin-layer removals, unchanged by T9: the below-bed lift `swe_eta_clamp` (`FreeSurface.cpp`, creates volume, `clamped`), the infiltration remainder cut in `Coupler::applySeepage` (`discarded`), and the IC clamp.
+
+**Design rules (binding).** Per-cell store state: water V_s [m³] and salt M_s [psu·m³] (the existing `sStore_`). The paired store is active iff the salinity store is active (surface water + transport + `surface_dryout: store`). Otherwise every T9 code path is inert, so runs without transport (the b5 class) are untouched.
+
+- **R1 — rain and evaporation act first and are untouched.** The following are applied and booked exactly as at T8:
+  - rain, evaporation (the ET open-water channel or the legacy `surface_water.evaporation` keys) and condensation;
+  - their dilution or concentration of the cell's salt.
+
+  The store receives only the positive leftover that a removal path P1–P4 takes after those sources have acted. A cell that never reaches a removal path is bitwise unchanged from T8.
+- **R2 — the store never funds evaporation.** Evaporative demand beyond the water present stays in its existing audited path (`clamped`, the ET supply cap). Evaporation never debits V_s.
+- **R3 — water and salt park together.** Every positive removal ΔV (P1–P4) moves into V_s in the same step as its salt c_park·ΔV moves into M_s.
+  - c_park is the cell's limited post-source concentration (W9.3 fixes the transport basis), never above the cell's limiter-window maximum.
+  - Dry-branch mass above c_park·ΔV is booked in `surf_adjust`, as `discard` books all of it at T8.
+- **R4 — salt without water.** Salt that reaches a dry cell with no paired water in the step is kept in M_s only when:
+  - (a) evaporation removed water from that cell in that step (the O4 crust of complete evaporative dry-out); or
+  - (b) it is W5.9 held-seepage salt, paired with the coupler's held volume (`seepAccum`, positive part).
+
+  Any other unpaired salt follows the `discard` path (`surf_adjust`, audited).
+- **R5 — release is mixing.** At the first step the cell holds surface water, V_s returns to η and M_s returns to the water in the same step. The transport divides by vBasis + V_rel, so c = (M + M_s)/(V + V_s), and the anchor term stays the existing basis-lag correction rather than becoming a salt source. Without evaporation, c is a convex combination of source concentrations.
+- **R6 — return without rewetting.** A dry cell whose V_s/A ≥ `surface_water.wetting_face_depth` returns its store at the next surface step, where its faces can carry the water. Below that depth, parked water stays parked.
+- **R7 — parked water is inert (O15).** It does not flow, infiltrate, exchange heat or evaporate. Under ET it is outside the open-water channel and `wet_time`; the soil channel sees the cell as exposed, so complementarity is unchanged.
+- **R8 — one predicate.** The transport's store-in predicate is "no surface water on the cell after the surface step" (η = z_b after the W9.2 sweep). It replaces T8's `!wet` (`vflux ≤ 0 || dept ≤ 0`). A cell holding water but no flux volume (wetted from dry by a vent, seepage or rain) keeps its salt in that water.
+- **R9 — temperature.** With `modules.temperature`, the parked water's heat parks with it under R3/R5: the shared `ScalarSolver` store is enabled for the temperature instance, without R4. Returned water therefore does not dilute heat.
+
+**Invariants (asserted by the gates).**
+- **I1 (pairing):** R8 and R3 hold at every transport step.
+- **I2 (source bound):** without evaporation, M_s/(V_s + held) never exceeds the maximum source concentration the cell has seen, so no released film exceeds it either.
+- **I3 (conservation):** the identities below close to rounding at every audit row.
+- **I4 (invariance):** lanes driven only by rain/evaporation, and lanes that never dry, are bitwise equal to T8.
+
+**Identities (W9.1/W9.2).**
+- **`discard`** (and every default-bitwise pin):
+  Δvolume = rain − evaporation − boundary_outflow + bc_inflow + seepage + clamped − stage_deposit − film_removed,
+  with film_removed = P1 + P2. P3 stays inside `clamped`, so that existing column remains bitwise.
+- **`store`:**
+  Δ(volume + store_volume) = rain − evaporation − boundary_outflow + bc_inflow + seepage + clamped − stage_deposit,
+  with Δstore_volume = film_removed − store_release. Here film_removed counts P1, P2, the positive part of P3, and the W9.2 sweep (which parks the P4 vents); `clamped` keeps only the created below-bed part.
+- **Salt (both modes):** Δ(surf_mass + surf_store + subs_mass) closes on the T5 ledger right-hand side as today.
+
+### Work items
+
+| W | File(s) | Exact change |
+|---|---|---|
+| W9.0 | records | Copy the S3-A12 repro (inputs, YAMLs, `analyze.py`, `vent_check.py`) from `/Users/zhili/Documents/Work/个人/论文/2026Frehg2/outputs/bugreport_dryout_store_v1/repro` into `stage3/evidence/dryout-store/`. Register every T9 gate (cases, `tolerances/stage3-ws.yaml`, harness subcommand `ws`, ctest entries, `scripts/test_ws_gates.py`), run them on the T8 binary, and save red logs to `records/T9/red/`. |
+| W9.1 | `swe/WetDry.cpp`, `swe/SurfaceSources.cpp`, `swe/SurfaceSolver.hpp/.cpp`, `driver/Simulation.cpp`, `io/RunRecord.cpp` | Book every positive thin-layer removal per cell and per path, in all modes. A per-step Field2 `filmRemoved_` [m³] is filled by P1 and P2 (and, in store mode, by the positive part of P3 and the W9.2 sweep). New appended `mass_audit` column `film_removed` (cumulative). Run-record closure lines `film_removed_isolated_m3`, `film_removed_small_m3`, `film_removed_clamp_m3` (positive part of P3; informational under `discard`) and `film_removed_sweep_m3`. η arithmetic is unchanged outside store mode: fields stay bitwise, and `default_bitwise` differs only by the appended column. Attribute the S3-A12 vanished volume (1.1e-3 m³ in zoom A) to its path and record it in `report-T9.md`. |
+| W9.2 | `swe/SurfaceSolver.*`, `swe/WetDry.cpp`, `swe/SurfaceSources.cpp`, `coupling/Coupler.*` | Store mode only. New Field2 `waterStore_` (V_s, m³) and per-step `parkedVol_`. P1, P2 and the positive part of P3 move their volume into `waterStore_` instead of deleting it. **End-of-step sweep**, after the last η change of the surface step (after `applySeepage`): every cell with 0 < η − z_b ≤ `min_depth` is set to η = z_b and its volume parked, which makes R8's predicate exact. Release (R5/R6) happens at the same point: a cell with η − z_b > `min_depth` and V_s > 0, or a dry cell with V_s/A ≥ `wetting_face_depth`, gets η += V_s/A, booked as `store_release`. `mass_audit` appends `store_volume` (instantaneous, Σ V_s) and `store_release` (cumulative). New output `surface: water_store` [m³]; checkpoint field `swe_water_store`. |
+| W9.3 | `transport/SurfaceTransport.cpp`, `ScalarSolver.hpp/.cpp` | Store mode only. Store-in predicate R8 (reads `parkedVol_` and η − z_b). Dry-branch salt per R3 (c_park on the limited post-dilution basis, excess to `surf_adjust`) and R4 (evaporation crust and W5.9 held salt kept; other unpaired salt to `surf_adjust`). Release per R5, dividing by vBasis + V_rel. Consistent-exchange vent salt is credited only together with its water: the vent lands in η and is either wet or parked by W9.2 in the same step. Temperature instance (R9): the same paired store without R4. The W5.9 held path is unchanged. |
+| W9.4 | `gw/Reallocate.cpp` | Store mode only. The vent branch deposits every dry-cell vent (the `d > minDepth` condition is dropped) and records it in the vent window, so its salt leaves the top soil cell through the existing vent path. The W9.2 sweep then parks the vent with its salt in the same surface step. Under `discard`/legacy nothing changes: `realloc_dropped` keeps the discard and the gw ledger stays bitwise. |
+| W9.5 | `Config*`, `ConfigSchema.cpp`, docs | No new key: `surface_dryout: store` now means the paired store. New schema rule for the `water_store` output (§13.C). Docs: `theory/transport.md` (paired store, R1–R9, I1–I4); `theory/surface-water.md` (removal paths P1–P4, `film_removed`); `parameters.md`; `output.md` (columns, identities); `agents/case-setup.md` (replaces the no-ET store caveat); `feature-coverage.md` rows for store × {no ET, legacy evaporation, ET, rain, coupled, surface-only, periodic, temperature, restart, rank}; `stage3/records/T9/study-migration-addendum.md` (the v30 matrix can drop its explicit `discard` once W9.7 keeps `store`). |
+| W9.6 | T5–T8 gates that resolve `store` | Re-run all of them and adjudicate every change by amendment with data: et8b's closed form gains V_r (S3-A12); et8d, et9, et9-veg and et-x are re-measured; b6 ss/td are run under `store`. No tolerance edit without an amendment. |
+| W9.7 | `build-s3`, plus `build-s3-df` for the comparison | §2.7 re-evaluation of `store` as the shipped default under the paired semantics: unit, mpi, Tier N, `stage3` and `stage3_nightly`, with tolerances unchanged; b6 ss/td and ws1n are decisive. All green → `store` stays the default. Any failure → the default constant becomes `discard`, `stage3/df/store-T9-report.md` is written per §2.7-3, and the owner decides. |
+| W9.8 | records | `dod-T9.md`; `report-T9.md` (gate inventory with measured values, the W9.1 path attribution, timings); mkdocs nav; snapshot `T9`; `records/T9/phase.patch`. |
+
+### Gates (authored first) — `benchmarks/ws-water-salt-store/`, `tolerances/stage3-ws.yaml`
+
+| Gate | Configuration | Reference / asserts | Tolerance | Budget | Negative / anti-vacuity |
+|---|---|---|---|---|---|
+| **ws0** unit (`test_transport.cpp`, `test_swe.cpp`) | `TransportStore.PairedReleaseMixesExactly`; `TransportStore.ParkedConcentrationWithinLimiterWindow`; `TransportStore.UnpairedSaltToAdjustWithoutEvaporation`; `TransportStore.UnpairedSaltKeptAfterEvaporativeDryout`; `TransportStore.NegativeResidualNeverStored`; `TransportStore.TemperatureParksWithItsWater`; `SweModule.ThinLayerRemovalsBookedPerPath` (P1, P2, P3 on constructed fields); `SweModule.StoreReturnsAtWettingFaceDepth` | Closed forms: c = (M + M_s)/(V + V_s); booked volume = removed volume | 1e-14 | < 0.1 s | `unit.ws_gates.negative` mirrors each closed form. A release that divides by vBasis alone fails. |
+| **ws1** source bound (per-PR) | Small coupled section, authored at W9.0, with the S3-A12 ingredients: a dry seepage face fed by reallocation vents, a heterogeneous window, tidal stage with `external` closure, consistent updates, density coupling, no ET | (1) Max surface and subsurface salinity ≤ c_max·(1 + 1e-12) at every frame and monitor row, with c_max = 35. (2) Zero CFL warnings and zero clip warnings. (3) I2 on the store: M_s ≤ c_max·V_s per cell. | as stated (measured at authoring; any relaxation by amendment) | ≤ 30 s | **Red required:** the T8 binary must exceed c_max; otherwise the case is redesigned, and if no ≤ 30 s case reproduces it, C-WS applies. Anti-vacuity: Σ parked volume and the number of release events stay above floors set at authoring (1/10 of the measured value, by amendment). |
+| **ws1n** source bound (nightly, `stage3_nightly`) | The S3-A12 repro `store.yaml`: 2-D H2 beach, 0 → 28 800 s | As ws1 | As ws1 | ≈ 10 min | Red: 72 850 psu and CFL 81 on the T8 binary. Anti-vacuity: parked volume ≥ 1e-4 m³ and ≥ 100 release events (re-set at authoring). |
+| **ws2** ledgers | Asserted on the ws1, ws1n, ws3 and ws4 lanes, plus a `discard` lane of ws1 | Water: the mode's identity (above) at **every** audit row, not only at MSL-stage instants. Salt: the Δ(surf_mass + surf_store + subs_mass) identity. | 1e-10 of (cumulative \|stage exchange\| + rain + evaporation) | (inside the lanes) | Red: `film_removed` is absent on the T8 binary; the S3-A12 gap (1.2–3.2 % of the exchange) is the documented size. Negative: dropping `film_removed` from the identity fails on the `discard` lane. |
+| **ws3** rain/evaporation invariance (O15) | **(a)** 4×4 closed basin, 0.2 m of water at 35 psu, prescribed rain series plus legacy prescribed evaporation, never dries; lanes `store` and `discard`. **(a-ET)** The same basin with the ET open-water channel plus rain, under `store`. **(b)** 1×1 pond, 5 mm at 35 psu, ET open water to dryness (et8b geometry). **(c)** Rain h_r after (b). **(d)** As (b) with legacy prescribed evaporation (no ET). | (a): `store` ≡ `discard` bitwise. (a-ET): bitwise against its T8-binary hash (I4). (b) and (d): Σ evaporation + V_s,final = V₀ (1e-12·V₀); V_s,final ≤ `min_depth`·A; M_s = M₀ (1e-12); V_s never decreases while the cell is dry (R2, R7; read from `water_store`). (c): first wet step c = M₀/(V_s + h_r·A) (1e-12); total salt constant. | as stated | ≈ 5 s | Anti-vacuity: in (a), salinity moves by > 1 psu through dilution and concentration; in (b), the cell dries. Negative: a store debited by evaporation fails (b). |
+| **ws4** path coverage | One small lane per path: P1 (isolated solve-wetted cell), P2 (ebbing film on a slope), P3 (evaporation leaving a sub-`min_depth` film), P4 (sub-`min_depth` vent on a dry coupled seepage face); P2 repeated with `modules.temperature` (R9) | Per lane: the path's parked volume = its removed volume (1e-12); salt is paired at the cell's concentration (1e-12); the release mixes (R5); heat parks with the water (R9). | as stated | ≈ 10 s | Anti-vacuity: each lane's own path fires (above a floor). A lane whose path parks nothing fails. |
+| **ws-x** rank and restart | `regression.s3.ws_rank`: ws1 at `mpi_ny` = 1/2/4, strict (`stage3_nightly`). `s3-restart` lane ws1: checkpoint taken while ≥ 10 cells hold V_s > 0. | Rank: the S3-A6 field classes, with Σ V_s and Σ M_s to 1e-12 relative. Restart: the S3-A6 restart standard, with `water_store` bitwise. | as stated | ≈ 90 s nightly / ≈ 4 s | r1 `--expect` |
+| **ws5** pins | `regression.s3.default_bitwise` and the et9 noET pin lane (both pin `discard`) | Bitwise, except the appended `film_removed` column (§2.6 exception 1) | exact | (existing) | — |
+
+**DoD T9:**
+- [ ] red evidence for ws1n, ws1 (or C-WS) and ws2 in `records/T9/red/`;
+- [ ] ws0–ws5 and ws-x green;
+- [ ] W9.1 path attribution of the S3-A12 volume recorded;
+- [ ] W9.6 adjudications recorded by amendment;
+- [ ] W9.7 DF outcome recorded (kept or reported);
+- [ ] docs and coverage rows;
+- [ ] Tier N green;
+- [ ] snapshot `T9`.
+
+---
+
+## 12B. T10 — Solve-consistent surface transport (added by S3-A14, O16)
+
+Status: awaiting owner approval (2026-10-31). §2 applies unchanged: gate-first, records under `stage3/records/T10/`, snapshot `T10`, no commits.
+
+**Diagnosis (code order, measured at T9).** In one surface step:
+
+1. `solveFreeSurface` moves water across every face. The face volume is
+   Q_x(j, i) = dt·Asx·Ex − Sxp·(η_{i+1} − η_i)^{n+1}. It is built from the
+   **start-of-step** face areas and the new η, and is the same expression
+   `accumulateBoundaryFluxes` already uses for the stage and edge faces.
+   That is the water that actually moved.
+2. `cflLimiter` and `evapRain` (P1–P3), then (coupled) the groundwater
+   substeps, `applySeepage`, the stage routing and the T9 sweep/release.
+3. `updateVelocity` recomputes depths and face areas from the **new** η,
+   rebuilds u = (Ex − g·dt·effh_new·Δη)·Dx, and `applyVelocityLimiters`
+   zeroes faces (a sender below `wetting_face_depth`, vanished faces,
+   wetting-limited cells). Then Fu = u·Asx_new.
+4. The transport advects salt with that Fu (`surface_update: consistent`
+   also builds its flux volume from it).
+
+So the transport's face volumes are not the ones that moved the water.
+Reordering steps 3 and 4 would not fix this, because Fu is rebuilt on the
+new geometry whether or not the limiter runs. The mismatch shows up in two
+books:
+
+- `surf_anchor`, the re-anchoring of the concentration from the transport's
+  volume onto the real depth, creates or destroys salt. On ws1n (the
+  owner's repro) it reaches **+28.4 psu·m³ = 2.4 % of the surface salt
+  after 0.64 T**, the same in both modes (store +28.39, discard +28.23).
+- At drying faces, water the solve moved arrives salt-free, and its salt is
+  stranded in the drying cell, where it is discarded or capped into
+  `surf_adjust`: −0.077 psu·m³ on ws1n, and 0.109 psu·m³ = 24 % of the
+  exfiltrated salt on the T5 1 × 2 et8d strip (S3-A13).
+
+**Design rules (binding).** Active under the new token
+`transport.surface_update: conservative`. `legacy` and `consistent` stay
+bitwise, so every existing gate and the default-bitwise lanes are untouched.
+W10.6 then evaluates whether `consistent` should resolve to it.
+
+- **C1 — record the solve's face volumes.** Right after `fillAndSolve`,
+  before `cflLimiter`, store Q_x and Q_y [m³ per step] for every face from
+  the assembled continuity: interior faces, open edges, stage faces and
+  periodic seams. The face slots match Fu/Fv, and the west/south interface
+  slots are halo-exchanged like Fu. One face, one number: the volume cell i
+  sends east is exactly what cell i + 1 receives from the west.
+- **C2 — salt moves with that water.** The advective mass increment is
+  Σ Q·c_face, with the upwind or superbee face value chosen by the sign of
+  Q and the far-neighbour guards unchanged. The flux volume is
+  vflux = vsn + Σ Q, which is the post-solve, pre-manipulation water
+  volume. Diffusion keeps its face areas.
+- **C3 — every post-solve change keeps its own explicit book.** P1/P2/P3
+  removals (T9: parked with their salt under store, `surf_adjust` under
+  discard), rain and evaporation (the dilution volumes), seepage, vents and
+  the held exchange (the exchange term), stage routing (`stage_deposit`, at
+  the cell's concentration), and the T9 sweep and release. The velocity
+  limiters then act only on the **next** step's momentum and never remove
+  salt from this step's transport.
+- **C4 — overdrawn cells.** Where the solve drains a cell below its bed
+  (the below-bed lift `swe_eta_clamp`, booked in `clamped`), the lifted
+  water is salt-free. The donor's outflow salt is capped at its available
+  mass, and any negative remainder follows the existing negative-residual
+  path (`surf_adjust`). Its size is measured and recorded.
+- **C5 — the anchor becomes a basis check.** With C1–C3, vflux plus the
+  booked post-solve volumes equals dept·A after the step, so `surf_anchor`
+  must fall to rounding. A residual anchor is a defect, not a correction.
+- **C6 — temperature.** The temperature instance reads the same Q (its own
+  dilution rule unchanged).
+
+**Invariants.**
+- **J1:** a uniform scalar stays uniform to rounding through wetting,
+  drying and limiter events.
+- **J2:** `surf_anchor` ≤ 1e-12·M, and `surf_adjust` contains only the
+  booked P1–P3/R4/C4 terms.
+- **J3:** the boundary salt flux equals c_face times the very volumes in
+  `mass_audit.boundary_outflow`, face by face.
+- **J4:** salt that leaves a drying cell with its water arrives in the
+  neighbour.
+
+### Work items
+
+| W | File(s) | Exact change |
+|---|---|---|
+| W10.0 | records, cases | Gate-first: author the sx cases and tolerances (`benchmarks/sx-solve-consistent/`, `tolerances/stage3-sx.yaml`), the harness subcommands `sx*`, the ctest entries and `scripts/test_sx_gates.py`; red logs on the T9 binary to `records/T10/red/` |
+| W10.1 | `swe/FreeSurface.cpp`, `SurfaceSolver.*` | C1: a post-solve pass that fills `Qx_`/`Qy_` from the assembled continuity (read-only beside the pinned solve; exchanged; inert unless the token is `conservative`). Unit: telescoping, and Δη·A = −ΣQ on a source-free step |
+| W10.2 | `transport/SurfaceTransport.cpp`, `ScalarSolver.*`, `driver/Simulation.cpp` (wiring) | C2/C3/C4/C6 behind the new token; the legacy and consistent expression trees unchanged (separate branch / kernel per the S3-A8.1/A9.7 fma rule) |
+| W10.3 | `Config*`, `ConfigSchema.cpp`, docs | `transport.surface_update: conservative` (§13.C); resolved echo; `theory/transport.md` (solve-consistent update, J1–J4), `theory/surface-water.md` (the step order), `parameters.md`, `agents/case-setup.md` |
+| W10.4 | gates | Re-run the T5–T9 store/ET/ws lanes under `conservative` (they keep `consistent` in their files): adjudicate every change by amendment with data |
+| W10.5 | records | The anchor/adjust before–after table on ws1n, the et8d 1 × 2 strip, b6 ss/td and the v30 H0/H2 smokes in `report-T10.md` |
+| W10.6 | DF | §2.7-style evaluation of making `consistent` resolve to `conservative` (owner decides: the v30 matrix uses `consistent`) — every tier, tolerances unchanged; b6 ss/td and ws1n decisive |
+| W10.7 | records | `dod-T10.md`, `report-T10.md`, mkdocs nav, snapshot `T10`, `records/T10/phase.patch` |
+
+### Gates (authored first) — `benchmarks/sx-solve-consistent/`, `tolerances/stage3-sx.yaml`
+
+| Gate | Configuration | Asserts | Tolerance | Negative / anti-vacuity |
+|---|---|---|---|---|
+| **sx0** unit | `SweModule.SolveFaceVolumesTelescope` (interior faces cancel; Σ Q = −Δη·A per cell on a source-free step); `TransportModule.SolveConsistentUniformStaysUniform`; `TransportModule.SolveConsistentDryingFaceCarriesSalt` | closed forms | 1e-14 | a transport using Fu instead of Q fails the drying-face test |
+| **sx1** uniform scalar through drying | ws1's coupled beach at uniform 35 psu (surface, soil, sea BC) under `conservative` | J1: c ≡ 35 at every frame and monitor row; J2: anchor and unbooked adjust ≤ 1e-12·M | as stated | red on T9 (`consistent`): anchor/adjust measured nonzero; anti-vacuity: drying-face and limiter events counted above a floor |
+| **sx2** drying-face salt | the T5 et8d 1 × 2 strip (`min_depth` 5 mm) under `conservative` | J4: `surf_adjust` == 0 (no stranded salt), total salt exact, the neighbour receives the salt the solve's water carried | 1e-12 | red on T9: −0.109 psu·m³ |
+| **sx3** ws1n anchor | the owner's repro under `conservative` | J2 on a production run: anchor ≤ ε·M (set at authoring by amendment); the ws1 source bound, I2 and ws2 ledgers still hold | as stated | red on T9: anchor +28.4 psu·m³ |
+| **sx4** non-uniform advection across a front | a tracer step crossing a wetting/drying front on a slope | mass exact, no new extrema, J3 boundary salt = c × boundary volumes | 1e-12 | — |
+| **sx5** temperature | sx1 with `modules.temperature` | uniform T stays uniform; heat ledger closes without an anchor | 1e-12 | — |
+| **sx-x** | rank (mpi_ny 1/2/4, on a trajectory-stable base per S3-A13), restart (bitwise), periodic seam (pd2-coupled under `conservative`) | the S3-A6 classes; restart bitwise | as stated | — |
+
+**DoD T10:**
+- [ ] red evidence (sx1–sx3) in `records/T10/red/`;
+- [ ] sx0–sx5 and sx-x green;
+- [ ] W10.4 adjudications recorded by amendment;
+- [ ] W10.6 outcome recorded (kept or reported);
+- [ ] docs and coverage rows;
+- [ ] Tier N green;
+- [ ] snapshot `T10`.
+
+---
+
 ## 13. Schema specification (all phases)
 
 ### 13.A Feature A (T2)
@@ -732,11 +941,13 @@ soil:
 
 transport:
   surface_dryout: store          # NEW (T5): delete (v2.0) | store (O4)
+  surface_update: conservative   # NEW token (T10, O16): legacy | consistent | conservative
+                                 # T9 (S3-A12, O15): store = the paired water–salt store
 
 output:
   monitor_interval: 60           # NEW (T4) [s]; absent/0 = every step
   variables:
-    surface: [seepage_rate]                        # NEW (T4)
+    surface: [seepage_rate, water_store]           # NEW (T4; water_store T9)
     groundwater: [realloc_created, realloc_dropped, vloss, root_uptake]   # NEW (T1, T6)
     transport: [salt_store]                        # NEW (T5)
     atmosphere: [evaporation_rate, soil_evaporation_rate, soil_evaporation_unrealised_rate,
@@ -762,6 +973,7 @@ output:
 | ET + salinity with `surface_dryout: delete` | `evapotranspiration with salinity transport requires transport.surface_dryout: store (salt left by evaporating water must be kept)` |
 | `surface_dryout: store` without a surface module or transport | `transport.surface_dryout: store needs modules.surface_water and modules.transport` |
 | `surface_dryout: store` with `transport.bounds.max` (warning) | `transport.bounds.max clips concentrations above <max>; salt released from the store into thin films may be clipped (booked in surf_adjust)` |
+| `output.variables.surface: water_store` without the store (T9) | `output.variables.surface: water_store needs transport.surface_dryout: store (with modules.surface_water and modules.transport)` |
 | `vegetation` without the ET block or without `modules.groundwater` | `vegetation: has no effect without evapotranspiration` / `vegetation: transpiration needs modules.groundwater` |
 | Feddes ordering | `vegetation.types[i].feddes: needs h1 >= h2 >= h3 > h4 (h1, h2 optional, given together)` |
 | Map id without a type (setup fatal) | `vegetation.map: id <k> at cell (<j>, <i>) has no type (ids are 1..<n>, 0 = bare)` |
@@ -778,13 +990,15 @@ Predicted serial costs (1 rank unless the gate is a rank test, `OMP_NUM_THREADS=
 
 | Family | ctest tests (label `stage3` unless noted) | Predicted wall |
 |---|---|---|
-| shared | `regression.s3.default_bitwise` (`stage3_local`), `regression.s3.restart` (lanes from T3–T6) | 40 s + 14 s |
+| shared | `regression.s3.default_bitwise` (`stage3_local`), `regression.s3.restart` (lanes from T3–T6, T9) | 40 s + 18 s |
 | rl | `unit` (rl1), `regression.s3.rl2`, `.rl3`, `.rl4`, `.rl5.gw_orient_off`, `.rl5.coupled_salt_rank_off`, `unit.rl_gates.negative` | 17 s |
 | ob | `unit` (ob2, ob4, ob7), `regression.s3.ob1`, `.ob3`, `.ob5`, `unit.ob_gates.negative`; `regression.s3.ob8.b6_{ss,td}` (`stage3_nightly`) | 35 s (nightly ≈ 35 min) |
 | pd | `regression.s3.pd1`, `.pd2`, `.pd3`, `.pd4`, `.pd5`, `.pd6`, `.pd8`, `mpi.halo` periodic case, `unit.pd_gates.negative` | 50 s |
 | dg | `regression.s3.dg1`, `.dg2`, `unit.dg_gates.negative` | 5 s |
 | et | `unit` (et0 parts 1–3, et6), `regression.s3.et1`…`et10`, `.et_x`, `.et_rank`, `unit.et_gates.negative` (incl. FAO transcription) | 85 s |
-| **Stage-3 per-PR total** | | **≈ 4.1 min serial** (< 5 min); ≈ 1.5 min at ctest `-j8` |
+| ws (T9) | `unit` (ws0), `regression.s3.ws1`, `.ws3`, `.ws4`, `unit.ws_gates.negative` (ws2 and ws5 assert inside these lanes and the existing pins); `regression.s3.ws1n`, `.ws_rank` (`stage3_nightly`) | 45 s (nightly ≈ 12 min) |
+| sx (T10) | `unit` (sx0), `regression.s3.sx1`, `.sx2`, `.sx4`, `.sx5`, `unit.sx_gates.negative`; `regression.s3.sx3`, `.sx_rank` (`stage3_nightly`) | ≈ 40 s (nightly ≈ 12 min) |
+| **Stage-3 per-PR total** | | **≈ 4.9 min serial** with T9 (< 5 min; ≈ 4.1 min through T8); ≈ 1.7 min at ctest `-j8` |
 | Existing per-PR tier (measured, T0 re-measures) | 93 tests | ≈ 23 min wall |
 | Existing nightly tier (measured, partial) | 7-test batch | ≈ 56 min + b6 bjacobi ss/td + b5 24 h (T0 measures) |
 
@@ -801,6 +1015,8 @@ Predicted serial costs (1 rank unless the gate is a rank test, `OMP_NUM_THREADS=
 | T4 | `output.md`, `adding-an-output-variable.md`, `agents/postprocessing.md`, `parameters.md` |
 | T5–T7 | new `theory/evapotranspiration.md`, `theory/atmosphere.md`, `theory/transport.md`, `parameters.md`, `configuration.md`, `input-data.md`, `output.md`, `agents/case-setup.md`, `agents/postprocessing.md`, coverage |
 | T8 | `report-T8.md`, `parameters.md` defaults (if flipped), `AGENTS.md` (v2.0 → Stage-3 feature list), `README.md` feature list, `CITATION.cff` untouched (the owner versions) |
+| T9 | `theory/transport.md` (paired store), `theory/surface-water.md` (removal paths, `film_removed`), `parameters.md`, `output.md`, `agents/case-setup.md`, coverage, `report-T9.md`, study-migration addendum |
+| T10 | `theory/transport.md` (solve-consistent update, J1–J4), `theory/surface-water.md` (step order, face volumes), `parameters.md`, `agents/case-setup.md`, coverage, `report-T10.md` |
 
 Every phase also writes `dod-T<n>.md` and `report-T<n>.md`.
 
@@ -813,7 +1029,10 @@ Every phase also writes `dod-T<n>.md` and `report-T<n>.md`.
 | C-RL | rl2 under `off` shows \|vloss\| > ε_v·T (the corrector overshoots θs or θr without reallocation) | Measure where (output `vloss`). If it is the over-saturation excess of saturated cells, report to the owner before changing anything: options are a smaller `dt_max`, or an `off`-mode excess-to-neighbour rule (a new design, owner decision). The DF evaluation then reports it. |
 | C-OB5 | ob5 cannot show a ≥ 10× contrast in ≤ 30 s | Use the nightly D1 record (§6 ob5 row) |
 | C-PD | pd2 roll invariance fails only under the default solver | Gates run strict (as designed). Record the default-solver measurement; do not loosen strict bounds. |
-| C-ST | et8/et9 show solver failure or non-physical density feedback when the store releases into thin films | Report with data. Candidate (owner decision, O4 refinement): release proportional to depth up to a release depth. |
+| C-ST | et8/et9 show solver failure or non-physical density feedback when the store releases into thin films | Report with data. Candidate (owner decision, O4 refinement): release proportional to depth up to a release depth. **Triggered 2026-10-30 outside the gates (S3-A12); the candidate is insufficient (406 psu, S3-A12) and is superseded by T9 (O15).** |
+| C-WS | ws1 cannot reproduce the T8 red (salinity above c_max) in ≤ 30 s | ws1 becomes a nightly-only lane beside ws1n (amendment); the per-PR tier keeps ws0 and ws2–ws4 |
+| C-INERT | R7 (inert parked water under ET) moves an ET gate beyond its W9.6 closed-form adjustment | Report with data. The owner's alternative (an O15 refinement) lets parked water evaporate, booked as evaporation |
+| C-SX | A post-solve change cannot be given an explicit salt book under C3 (an unbooked η change found by J2), or C4's capped outflow grows beyond film scale on a gate | Report with data; the change is booked (new audit term) or the cap is redesigned before T10 closes |
 | C-FAO | FAO-56 PDF not retrievable | Owner supplies the PDF; et0 part 4 and et10 (2) wait; et10 (1) proceeds |
 | C-BIT | `default_bitwise` differs by ≤ 1e-14 only in an edited kernel | §2.6 caveat procedure |
 | C-TIME | Any Stage-3 case > 60 s, or the suite > 5 min | Coarsen or shorten the case with a refinement note; else reclassify it to `stage3_nightly` by amendment (the g5 precedent) |
@@ -827,6 +1046,8 @@ Every phase also writes `dod-T<n>.md` and `report-T<n>.md`.
 3. **Decisions on demand:** any contingency in §16; any DF failure report (T8); any tolerance amendment.
 4. **FAO-56 PDF** if C-FAO triggers.
 5. **Final commit** of the tree after T8 (`records/T8/stage3-full.patch` and the snapshot refs provided). Optionally delete the `refs/stage3/*` refs afterwards (§2.2).
+6. **T9 (S3-A12), open:** (a) approve phase T9 (§12A); (b) the interim default of `transport.surface_dryout` until W9.7 passes — the agent recommends reverting it to `discard` through §2.7, because the shipped `store` default blows up coupled tidal runs without ET. Decided 2026-10-31 (O15): the paired water–salt store, rain and evaporation untouched, parked water inert under ET.
+7. **T10 (S3-A14), open:** (a) approve phase T10 (§12B); (b) at W10.6, whether `transport.surface_update: consistent` should resolve to the solve-consistent update (the v30 matrix uses `consistent`; until then it opts in with `conservative`).
 
 ---
 
@@ -928,6 +1149,342 @@ execution); six adjudications at first green, each with its measured datum in
    (MAE 0.0381 m vs the golden's own 0.0430 m). No zero_gradient tolerance
    changed.
 6. `check_bc_matrix.py` canonical cells extended with the eta-inflow axis.
+
+### S3-A15 (T10, 2026-10-31) — first-green adjudications of the conservative update
+
+**W10.2 — the fma rule's third measurement.** The first implementation
+used runtime ternaries (`qvol ? Q : Fu`) with value-identical false
+branches. `regression.s3.et9` (noET pin, consistent + superbee +
+subcycled) FAILED bitwise while `default_bitwise` passed — the ternary
+perturbed the compiler's contraction choices on the trajectory-chaotic
+lane, exactly the S3-A8.1/A9.7 class. Cure (same as T2 Momentum `Ext`):
+`stepSurfaceImpl<bool QVOL>` with `if constexpr`, so QVOL=false folds to
+the original expression trees. Both pins 2/2 green after the fix. Rule
+confirmed a third time: runtime flags do not enter golden-pinned kernels,
+even value-identical ones.
+
+**C3 adjudications (measured on sx1, each change moving a measured
+residual class):**
+1. *Coupled deposits* enter the flux volume as the coupler's applied
+   `gain` field (post-clamp/post-hold), not the qss re-derivation, whose
+   clamp/hold approximation the anchor used to absorb (no-tide sx1
+   variant: uniform to 7.4e-9 with gain, 2.1e-1 with qss). A new
+   `bounce` share field pairs the Corrector's direct deposits with
+   top-cell salt.
+2. *Prescribed-stage cells*: flux volume = dept·A (identity row, not a
+   face balance; the reservoir's routing is otherwise unbooked —
+   anchor 2.6 psu·m³ → 1.3e-9 on sx1) and the stencil limiter is
+   skipped there (it minted salt onto the reservoir's fresh volume:
+   adjust 2.5 → 3.2e-2).
+3. *Pass-through fronts*: a start-of-step-dry cell the solve fills AND
+   drains in one step hands its stale-zero upwind faces the same-axis
+   far-upwind value, and infiltrates at its inflow-mix concentration
+   (the J1-breaking seed: raw 60.3 psu at the swash front → 35.00005;
+   subsurface uniformity 2.2e-3 → 1.9e-4).
+
+**C4 — the donor cap is REJECTED; the overdraft parks paired.** The plan's
+C4 (donor outflow capped at available mass) was implemented and measured:
+it starves the real receiving cells of their water's salt — sx1's J1
+breach grew from 6.5e-2 to 8.2 psu. This is the C-SX contingency firing:
+redesigned. An overdrawn cell (solve drained it below bed; the below-bed
+lift restored dept from minted, salt-free volume; its face volumes net
+negative at park time) parks its lifted water PAIRED at its own limited
+concentration; the ledger difference stays on the negative-residual path
+into `surf_adjust` — now a BOOKED C4 column, not an unbooked class.
+Measured on sx1: 4.3e-2 psu·m³ = 3.2e-5 of M over 2 h; the sx1/sx4 gates
+bound it at 1e-4·M.
+
+**Gate reworks at first green (all recorded in `stage3-sx.yaml` with
+measurements):**
+- sx2's flat split-pond was VACUOUS — the exfiltration never cleared
+  min_depth, the surface stayed dry for the whole horizon and no face
+  ever flowed. Redesigned: 4 mm shelf/pit tilt, an 8 mm 10-psu pond
+  draining through the connecting face over the et8d exfiltration
+  (dt 2 s: the pond's gravity-wave CFL at dt 60 was 17 and the run blew
+  up — the et8d original was surface-dry and never felt it). Anti-vacuity
+  moved to the pit's salt_store (its water parks below min_depth before
+  it can read as concentration; measured 0.049 psu·m³).
+- Total-salt checks are LEDGER-IDENTITY checks (total − Σ booked
+  cumulative columns), not raw constancy: sx2's bottom head feeds 10-psu
+  groundwater in through `subs_boundary` (3.6e-2 psu·m³, booked;
+  identity residual 6.4e-14 of M).
+- sx5 needed a `tide-temperature` stage BC (salinity had `tide-salt`;
+  without it the stage cells sink the heat toward 0 — max |T−20| = 20).
+- J1 tolerance: 1e-6 abs (measured 1.9e-7 — overdraft pairing +
+  production-rtol residuals on swash films; strict-solve no-tide variant
+  7.4e-9).
+- sx3's anchor bound is 1e-7·M (measured 4.7e-9·M: the production-solver
+  residual accumulated over 14 400 steps — C5's solve-residual class;
+  the strict-solver sx1 measures 9.2e-13·M). The sx-rank 1e-12-bed twin's
+  scalar control binds at 1e-7 (measured 1.28e-9: superbee amplifies the
+  bed perturbation ~1e3 through the drying front; a chaotic lane is O(1),
+  so the control still discriminates).
+
+**W10.4/W10.5 adjudications.** Under the conservative override the T5–T9
+lanes pass except the two BITWISE sub-checks pinned to `consistent`
+trajectories (ws3's a-ET hash, et9's noET 1 271-dataset pin) — they fail
+by design under a scheme-changing override and stay green without it.
+Decisive before→after: ws1n anchor 2.4e-2·M → 4.7e-9·M; et8d-strip
+stranding 24 % → 0 exactly; b6 ss/td PASS with tolerances unchanged
+(td tidal salt mass +9.89 % vs the 10 % cap — moved 1.1 points toward
+the cap, recorded); the v30 H2 one-cycle smoke holds 35.000 psu
+everywhere (surface and subsurface) with anchor 5.2e-9·M.
+
+**W10.6 (measured; owner item 7b).** With `consistent` resolving to
+`conservative` in a comparison build: 12/13 `default_bitwise` lanes stay
+bitwise — only `coupled-salt` (the one lane whose config uses
+`consistent`) changes — and the et9 noET pin breaks, as it must. The
+flip is clean for default-token cases but re-pins every
+`consistent`-using golden lane, and the v30 matrix runs `consistent`:
+reported, owner decides.
+
+### S3-A14 (post-T9, 2026-10-31) — new phase T10: the surface transport moves salt with the water the solve moved (O16)
+
+**Finding (T9 W9.6, S3-A13 owner item, extended).** The surface transport
+does not advect with the face volumes the free-surface solve used. The
+solve moves Q = dt·Asx·Ex − Sxp·Δη^{n+1} on the start-of-step face areas.
+The transport instead uses Fu = u·Asx rebuilt by `updateVelocity` from the
+new depths and face areas, after `applyVelocityLimiters` has zeroed some
+faces (§12B diagnosis). This is a sequencing defect, as the owner put it:
+the water is moved first, then the faces are limited, then the salt is
+moved. Reordering alone would not cure it, because the rebuilt flow rates
+also differ in geometry.
+
+Measured on T9: `surf_anchor` +28.4 psu·m³ on ws1n, which is 2.4 % of the
+surface salt by 0.64 T and identical in store and discard. At drying faces
+the salt is stranded: −0.077 psu·m³ on ws1n, and 24 % of the exfiltrated
+salt on the T5 1 × 2 et8d strip. Every Stage-3 mode carries it, as did
+v2.0's `consistent` update.
+
+**Decision (owner, 2026-10-31) → O16.** Salt and heat move with the water
+the solve moved. This is implemented as phase T10 rather than an amendment
+to T9, because it changes the surface transport scheme. It needs its own
+red evidence, gates and a §2.7-style decision on whether `consistent`
+should resolve to it. It ships behind a new token,
+`transport.surface_update: conservative`, so every existing gate and the
+default-bitwise lanes stay bitwise until that decision.
+
+### S3-A13 (T9, 2026-10-31) — §12A: first-green adjudications of the ws gates, two identity columns, and the et8d redesign
+
+**W9.1 — the per-row identity needs two more instantaneous columns.**
+The plan's identities hold only at mean-stage instants as written (S3-A12's
+"misses 1.2–3.2 % at MSL-stage instants"). Closing them at EVERY row (ws2)
+needs:
+1. `stage_volume` — the water on prescribed-stage cells. `boundary_outflow`
+   books the flux INTO those cells (external reservoirs), so their storage is
+   outside the identity's domain; on et9-noet it rides the tide by 3.8–13.4
+   m³ and, unbooked, misses the per-row identity by 3.2× the exchange scale.
+2. `film_pending` — films 0 < η − z_b ≤ `min_depth` still in η (reported
+   dry by `updateDepth`, removed by P2 at the next solve: the R8 mismatch).
+   Identically 0 under the paired store after the sweep.
+With both columns (and `film_removed`), the et9-noet discard identity
+closes at all 5 401 rows to 7.1e-12 of the exchange scale (strict solve);
+without the film terms it misses by 5.5e-3. Prescribed-stage cells are
+never booked as film removals (the reservoir).
+
+**W9.1 attribution.** The S3-A12 zoom-A volume (1.118e-3 m³ exchanged onto
+dry-to-dry cells) is P2's: the vents land as 1.0–1.7e-5 m films after the
+solve, `updateDepth` reports them dry, and P2 deletes them at the next
+solve. 88 % of that volume is removed within the same 1-s interval or the
+next, and the rest leaves laterally through faces. P1 is 1.2e-11 m³
+(solver-noise films) and P3 is 0 (`records/T9/attribution.md`).
+
+**ws1 authored** (`benchmarks/ws-water-salt-store/ws1-source-bound.yaml`, 64
+× 16, 7 200 s, generator `input/gen_inputs.py`). The S3-A12 ingredients are
+compressed: a 12.5 % beach, the H2 log-K window, the external-closure tide,
+density coupling, no ET. Red on the T8 binary: surface 494.4 psu,
+subsurface 35.006 psu, 36 of 121 frames over 35 (the discard control holds
+35.000). C-WS is not needed. ws1n is the owner's repro verbatim (inputs in
+`ws1n/input`); red 72 854 psu surface, 9 039 psu subsurface, 47 CFL warnings
+(max 80.95). Green on T9: both lanes at 35.000 psu everywhere (surface,
+subsurface, monitors).
+
+**ws1/ws1n criterion (2): "zero CFL warnings" becomes a cap of 1.5.** R6
+returns a store of ≥ `wetting_face_depth` onto a dry slope cell. Its first
+step runs on the lagged point-implicit drag of a dry cell, the same one-step
+wetting burst any dry-cell wetting produces: the b5 rain record logs 23 884
+such warnings (max 83.8) from rain alone. Measured on T9: max 1.247 (ws1,
+36 warnings) and 1.248 (ws1n, 55 warnings). The first event was traced at
+1-s resolution (t = 592 s: V_s 2.48e-4 m³ returned, face velocity 1.24 m/s
+for one step). The T8 red's 47 warnings reached 81. "Zero clip warnings" is
+kept, but the model has no clip-warning class (no `log::warn` on clipping);
+the bound itself is asserted by criterion (1).
+
+**ws1 anti-vacuity floors** are 1/10 of the authoring measurement: max ΣV_s
+8.80e-4 m³, 44 release rows, 1.83e-3 m³ of P4 thin vents (the vent path
+fires). P1 is recorded (8.6e-11 m³). ws1n keeps the plan's floors (1e-4 m³
+parked, measured 1.09e-3; 100 release rows, measured 158).
+
+**ws2 tolerances.** Water: `max(1e-10 X, 5e-11 m³)`. The absolute floor is
+the coupled lanes' solve-residual class: the ws1 store and discard twins
+jump by the same ~2e-11 m³ at the same rows (worst 3.5e-11 m³), which
+exceeds 1e-10 of ws1's small exchange scale (0.25 m³). Measured ws1n
+8.9e-13 relative. Salt: 1e-7 of M, the et9 reduced-sum class (ws1 2.0e-9,
+ws1n 5.6e-10). The film_removed-dropped negative fails on the discard twin,
+as required.
+
+**ws3(a) bitwise** is read as "every field dataset bitwise and every audit
+table's shared columns bitwise". The store lane's audits append
+`store_volume`/`store_release`/`surf_store`. (a-ET) is bitwise against its
+T8-binary hash (`reference-hashes/stage3-ws3aet-T8.json`), with the
+mass_audit table excepted per ws5.
+
+**ws3(c) closed form gains the concurrent evaporation step.** The ET
+channel keeps evaporating during the rain step, so the first wet step has
+c = M0 / (V_s + (h_r − E dt) A). The plan's form assumed none. Measured
+exact to 1e-15.
+
+**ws4 lanes.** P1 rides ws1's books (a solve wetting an isolated cell needs
+flow) and P4 rides ws1's dry seepage face. The P2 lanes (a draining 10 %
+slope) pair at the consistent update's uniformity class: M_s/(35 V_s) is
+within 1.3e-9 (bound 1e-8). The P3 lanes are 1 × 1: on a 3 × 1 flat basin,
+evaporation drives the legacy ghost-stage edge velocity, booked in
+`surf_boundary`, which blurs the 1e-12 forms (measured 6.7e-10, identical
+on the T8 binary). R9 on P3T is exact (parked heat = 20 V_s). On the P2T
+slope it is within 0.87 %, because the temperature instance's draining film
+carries the legacy lagged-update concentration (20.11 °C in a wet cell);
+bound 1e-2.
+
+**ws-rank adjudicated (S3-A6 doctrine).** ws1 is trajectory-chaotic in BOTH
+modes. A 1e-12 bed perturbation moves η by 6.8e-4 and flips a cell's
+surface salinity by 35 psu, and the discard twin is as rank-sensitive (n=1
+vs n=2: 6.5e-5, 35 psu). So:
+- (A) the identity classes gate on the trajectory-stable ws4 P2 slope at
+  mpi_ny = 1/2/4, with its 1e-12 twin as the stability control (1e-12
+  class). Results: η 7.3e-15, concentration 1.1e-13, per-cell water_store
+  1.4e-15 m³, zero parking-timing flips. The store totals agree to 5.4e-11
+  relative. The plan's 1e-12 is below the strict solve's rounding at the
+  ~1e-5 m³ parked scale, so `store_sum_rel` is 1e-9.
+- (B) ws1 at n = 2 and 4 gates the rank-invariant guarantees (source bound,
+  I2, both ws2 ledgers). All green.
+
+**ws5.** `default_bitwise` allows `monitor/mass_audit`, and its T8 prefix is
+pinned bitwise per case. `reference-hashes/stage3-T8-massaudit.json` (12
+cases including et9-noet) was recorded with `--record-massaudit` on the
+frozen T8 binary. The et9 noET lane compares the same prefix.
+
+**R4 bounded (found by W9.6 on et8d).** The first implementation kept the
+whole unpaired remainder whenever evaporation had taken any water that
+step. On et8d's 1 × 2 strip, a superbee/limiter dry-front remainder then
+became a 21 psu store (source 10 psu) and re-released at 11.6 psu, which the
+limiters clipped. R4 now keeps (a) at most the salt the evaporated water
+carried, c V_evap at the limited concentration, and (b) at most this step's
+held-exchange credit while the coupler holds the water. Everything else
+follows the discard path, as R3 states. In a true evaporative dry-out
+c V_evap equals the whole remainder, so the ws3 closed forms are unchanged.
+
+**et8d redesigned to 1 × 1 (W9.6).** On the T5 1 × 2 strip the applied
+pond split across both cells below `min_depth` (5 mm). At T8 the wetting
+limiter deleted it every step, unbooked: surface salt appeared in 0 of 241
+frames, the store grew to 0.449 psu·m³ salt-only (the S3-A12 class), and
+the lane passed `surf_adjust == 0` vacuously. On one column the D9 lane is
+exercised: the pond persists in 220 of 241 frames, the store releases into
+it, `surf_adjust` == 0 exactly and `subs_adjust` 5.9e-15, identically on the
+T8 and T9 binaries. et8b's s·h = 35 h0 identity is unchanged: its first wet
+step mixes the parked V_r = 1.79e-6 m³ (S3-A12's predicted closed-form
+change shows in the concentration, not in the asserted product).
+
+**Owner item — a transport/solve mismatch at drying faces (pre-existing,
+exposed by T9).** When the sending cell of a face ends the step dry, the
+velocity limiter zeroes that face's flow rate after the free-surface solve
+has already moved water across it (`dept < wetting_face_depth`). The
+transport's advective flux is then zero, so the moved water arrives
+salt-free and its salt stays in the drying cell, where R3's cap books the
+excess as `surf_adjust` (the discard path). On the 1 × 2 et8d strip with
+`min_depth` 5 mm that is 0.109 psu·m³ (24 % of the exfiltrated salt), plus
+1.4e-2 of downstream `subs_adjust` from the salt-free water infiltrating.
+At the study's 1e-5 m `min_depth` it is film-scale: ws1n's final
+`surf_adjust` is −0.077 psu·m³ against −0.46 under discard. T8 had the
+identical mismatch but deleted (discard) or banked salt-only (store) every
+film it touched. A fix routes the transport's face volumes from the solve's
+continuity, which is a scheme change outside T9's scope.
+
+### S3-A12 (post-T8, 2026-10-31) — §9 W5.7 / O4 / §16 C-ST: the salt-only store breaks coupled tidal runs without ET; paired water–salt store, new phase T9
+
+**Finding (outside the gates; the 2026Frehg2 v30 study, 2026-10-30).** A coupled
+2-D tidal beach without ET (1 × 160 × 40, 12.5 % beach plus 1 % terrace, stage BC
+`closure: external`, M2 tide 1 m, 35 psu, consistent updates, density coupling
+with the `density` gradient, `reallocation: legacy` + `redistribute`, subcycled
+0.5 s / ≤ 5 s, `min_depth` 1e-5 m, 25-type heterogeneous K) runs clean under
+`discard` and blows up under the shipped default `store`. The two lanes differ
+in that one key only; the packaged lanes reproduce the original study runs
+bitwise. Repro and analysis scripts:
+`/Users/zhili/Documents/Work/个人/论文/2026Frehg2/outputs/bugreport_dryout_store_v1/` (read-only here; W9.0 copies the
+inputs into `stage3/evidence/dryout-store/`).
+
+| 0 → 28 800 s (0.64 T) | `store` (T8 default) | `discard` |
+|---|---|---|
+| CFL warnings (first / max) | 47 (26 300 s / 81) | 0 |
+| max surface / subsurface salinity | **72 850 / 9 039 psu** | 35.00 / 35.00 psu |
+| first surface value > 35 psu | 24 060 s (film 1e-5 m) | never |
+| `surf_anchor` / `surf_adjust` at the end | −1.57e7 / +1.58e7 psu·m³ | +28.2 / −0.46 psu·m³ |
+
+The homogeneous-K variant does not blow up, but its films reach 70.6 psu (no
+wind) and 92.7 psu (onshore wind). With Manning 0.060 instead of 0.025 the H2
+case still reaches 4 390 psu.
+
+**Mechanism (measured at 1 s, cell y = 31.75 m, 23 400–24 600 s).**
+1. The cell is dry in 91 % of frames (176 wet↔dry switches). Its salt store
+   grows 57× (3.1e-4 → 1.76e-2 psu·m³; a 35-psu film at `min_depth` on the
+   0.5 m² cell holds 1.75e-4) in 69 increments, all while η − z_b = 0 exactly
+   at both ends of the 1-s interval, with no decrement.
+2. The growth equals the top-cell salinity (19–21 psu) times the coupled
+   exchange booked on the cell (`seepage_rate`, which includes vent deposits):
+   8.777e-3 vs 8.771e-3 psu·m³, per-interval correlation 1.000. The exchange
+   arrives as reallocation vents onto the dry seepage-face cell,
+   1.0–1.7e-5 m each, just above `min_depth`.
+3. The vented water leaves η through a removal **no audit column books**:
+   1.1e-3 m³ booked onto cells that read dry before and after vanished over
+   the 1 200 s, while `mass_audit.clamped` moved 1.1e-11 m³. The two
+   `cflLimiter` rules (`WetDry.cpp`: the isolated-cell rule
+   `eta(j, i) = bottom(j, i); cflActive(j, i) = 1.0;` and the small-depth rule
+   `if (diff > 0.0 && diff < minDepth)`) are the surface removals with no
+   audit term. Code reading gives two ways the salt is kept without its water,
+   both left for W9.1 to attribute:
+   - the consistent exchange credits vent salt with no depth guard
+     (`rate += vent(j, i) / (cellArea * dt) * sKp(j, i);`);
+   - the store-in predicate `!wet` (`vflux ≤ 0 || dept ≤ 0`) can fire on a
+     cell whose water is still in η.
+4. Each rewetting releases the whole store into the first film:
+   - zoom A: films of 1.0–1.9e-5 m at 3 200–3 430 psu;
+   - zoom B (26 100–26 700 s): 5 900–13 700 psu, and 727 000 psu at
+     y = 33.25 m, t = 26 301 s. `surf_anchor` jumps +150 psu·m³ in one step at
+     26 301.5 s, and the first CFL warning is at 26 300 s.
+5. Density coupling then carries the salt into the soil.
+
+**Why the §16 C-ST candidate is not enough.** Releasing in proportion to depth
+up to a release depth spreads the release in time, but the store still holds
+salt without water. The zoom-B store (0.101 psu·m³ on 0.5 m²) released into
+h = `wetting_face_depth` (5e-4 m) gives 406 psu, still 11.6 × the source. The
+defect is the missing water, not the release rate.
+
+**Independent ledger defect (all modes).** The coupled surface identity of the
+v30 one-cycle smokes misses 1.2 % (H0) to 3.2 % (H2) of the exchanged volume at
+MSL-stage instants. This is consistent with item 3 and affects `discard` as
+well: T9 W9.1 books it.
+
+**Why T8 did not see it.** The W8.2 lanes (b6 ss/td, the et gates) have no
+reallocation vents onto a dry seepage face, and no lane bounds surface salinity
+by the source maximum without ET.
+
+**Owner decisions (2026-10-31) → O15.**
+- Thin-layer removals park water and salt together, cell by cell.
+- Rain and evaporation must not be affected by the store.
+- Parked water is inert, under ET too.
+- Implemented as a new phase with its own gates: T9, §12A.
+
+O4's salt-only store survives as the V_s = 0 case: the salt left by complete
+evaporative dry-out.
+
+**Consequences for existing gates (adjudicated in T9, W9.6, by amendment with data):**
+- et8b's first-wet-step closed form gains the parked sub-`min_depth` remainder:
+  s = 35·h₀·A/(V_r + h_rain·A), with V_r ≤ `min_depth`·A.
+- et8d, et9 and et-x are re-measured.
+- `default_bitwise` and the et9 noET pin lane pin `discard` and change only by
+  the appended `mass_audit` column (§2.6 exception 1).
+
+**Open (owner, §17-6).** Whether the shipped default reverts to `discard`
+through §2.7 until W9.7 passes. The study's v30 matrix pins `discard` meanwhile.
 
 ### S3-A11 (T8, 2026-10-30) — §2.7/§12: the default-flip evaluations, and the flip-survival defects they caught
 

@@ -58,10 +58,16 @@ as `seepage_rate`: `sum(rate · area · Δt_out)` recovers the audited
 volumes exactly) plus the cumulative complementarity clocks `wet_time`
 and `soil_evaporation_time` [s] (per cell, `wet_time +
 soil_evaporation_time ≤ t` always). Transport adds `salt_store`
-[psu·m³] — the per-cell surface salt store under
+[psu·m³] — the salt half of the per-cell paired store under
 `transport.surface_dryout: store`; the transport audit's instantaneous
 `surf_store` column is its global total, and
-`Δ(surf_mass + surf_store)` closes on the unchanged ledger RHS.
+`Δ(surf_mass + surf_store + subs_mass)` closes on the unchanged ledger
+RHS. Stage-3 T9 adds two surface variables: `water_store` [m³], the water
+half of the paired store (requires `surface_dryout: store`), and
+`film_removal_rate` [m/s], the interval-mean thin-layer removal per cell
+(every mode: the cflLimiter rules P1 + P2; under the store also the clamp
+film P3 and the end-of-step sweep). With `modules.temperature` under the
+store, `temperature_audit` appends `surf_store`, the parked heat.
 
 **Monitors.** `/monitor/<name>` is a growing table with one row per time
 step. Its `columns` attribute is the CSV header, e.g. `time,depth,vv`, and
@@ -76,7 +82,7 @@ Default 0 = one row per step, the v2.0 behavior.
 
 **Mass audits.** `/monitor/mass_audit` (surface) is written whenever the
 SWE module runs. Its columns (`columns` attribute:
-`time,volume,rain,evaporation,boundary_outflow,bc_inflow[,seepage],clamped[,stage_deposit]`
+`time,volume,rain,evaporation,boundary_outflow,bc_inflow[,seepage],clamped[,stage_deposit],film_removed,film_pending,stage_volume[,store_volume,store_release]`
 — `seepage` and `stage_deposit` only in coupled runs; `stage_deposit`
 (Stage-3 T2) is the cumulative coupled deposit on prescribed-stage cells,
 removed through the reservoir under `inflow: {closure: external}` or
@@ -85,9 +91,32 @@ closes with stage conditions present) are the running water-volume budget,
 reduced across all ranks. `clamped` measures the volume the legacy
 below-bed clamp creates (a scheme defect reported as data; ~1.6 % of rain
 in the b5 regime, effectively zero elsewhere) plus, since v2 Q4, the
-signed volume of the rain/evaporation dry clamp — so the surface identity
-`Δvolume = rain − evaporation − boundary_outflow + bc_inflow + clamped`
-closes to rounding through evaporative dry-out (the g4(d) gate). The table is the
+signed volume of the rain/evaporation dry clamp (under the paired store
+only the created part: the positive remainder parks instead).
+
+Stage-3 T9 appends: `film_removed`, the cumulative counted thin-layer
+removal (`theory/surface-water.md`, paths P1–P4); `film_pending`, the
+instantaneous volume of sub-`min_depth` films still in η (reported dry by
+the depth field, so outside `volume`; identically 0 under the store);
+`stage_volume`, the instantaneous water on prescribed-stage cells (the
+reservoir, outside the identity's domain); and under
+`transport.surface_dryout: store`, `store_volume` (instantaneous ΣV_s) and
+`store_release` (cumulative). The identity closes at **every** row:
+
+    discard:  Δ(volume − stage_volume + film_pending) = rain − evaporation
+              − boundary_outflow + bc_inflow [+ seepage] + clamped
+              [− stage_deposit] − film_removed
+    store:    Δ(volume − stage_volume + store_volume) = rain − evaporation
+              − boundary_outflow + bc_inflow [+ seepage] + clamped
+              [− stage_deposit]
+
+(surface-only runs without stage conditions have `stage_volume` = 0, and
+the T5 form `Δvolume = rain − evaporation − boundary_outflow + bc_inflow +
+clamped` still closes when no film is ever removed — the g4(d) gate). The
+run record's surface closure carries the per-path books
+`film_removed_{isolated,small,clamp,sweep}_m3`, `film_pending_m3` and
+under the store `store_volume_m3` / `store_release_m3`; the groundwater
+closure adds `vent_thin_m3` (the P4 vents deposited under the store). The table is the
 mass-consistent source of boundary discharge — prefer it over
 `uu·depth` when you need conserved outflow, because stored velocities carry a
 legacy scaling that under-reads instantaneous flux.

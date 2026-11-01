@@ -1456,3 +1456,42 @@ TEST_F(ConfigTest, SurfaceDryoutDefaultIsStoreAfterTheT8Flip) {
   EXPECT_NE(frehg::resolvedConfigYaml(pinned).find("surface_dryout: discard"),
             std::string::npos);
 }
+
+
+TEST_F(ConfigTest, WaterStoreOutputNeedsThePairedStore) {
+  // Stage-3 T9 (plan §13.C): water_store exists only with the paired store
+  // (surface water + transport + surface_dryout: store, the default);
+  // film_removal_rate is valid in every surface run.
+  std::string base = kGwTransportConfig;
+  const std::string mods = "modules: {groundwater: true, transport: true}";
+  base.replace(base.find(mods), mods.size(),
+               "modules: {surface_water: true, groundwater: true, transport: true}");
+  const std::string ic = "initial_conditions:";
+  base.replace(base.find(ic), ic.size(),
+               "surface_water:\n"
+               "  friction: {coefficient: {constant: 0.02}}\n"
+               "  min_depth: 1.0e-6\n"
+               "  wetting_face_depth: 1.0e-6\n"
+               "initial_conditions:\n"
+               "  surface: {eta: {constant: 0.1}}");
+  const std::string icTr = "  transport: {groundwater: {constant: 25.0}}";
+  base.replace(base.find(icTr), icTr.size(),
+               "  transport:\n"
+               "    groundwater: {constant: 25.0}\n"
+               "    surface: {constant: 25.0}");
+  const std::string out = "output: {filename: out/output.h5}";
+  std::string text = base;
+  text.replace(text.find(out), out.size(),
+               "output:\n  filename: out/output.h5\n"
+               "  variables: {surface: [water_store, film_removal_rate]}");
+  const ValidationResult ok = validate(text);
+  EXPECT_TRUE(ok.ok()) << joined(ok);
+  const std::string needle = "transport:\n  scheme: {advection: upwind}";
+  std::string discard = text;
+  discard.replace(discard.find(needle), needle.size(),
+                  "transport:\n  surface_dryout: discard\n  scheme: {advection: upwind}");
+  const ValidationResult bad = validate(discard);
+  ASSERT_FALSE(bad.ok());
+  EXPECT_TRUE(hasError(bad, "water_store needs transport.surface_dryout: store"))
+      << joined(bad);
+}

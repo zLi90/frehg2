@@ -561,8 +561,13 @@ TransportConfig extractTransport(const YAML::Node& node) {
                             ? TransportConfig::SurfaceDryout::Store
                             : TransportConfig::SurfaceDryout::Delete;
   }
-  out.consistentSurfaceUpdate =
-      valueOr<std::string>(node["surface_update"], "legacy") == "consistent";
+  {
+    // Stage-3 T10: `conservative` implies the consistent semantics (one
+    // more change on top: the solve's face volumes drive the advection).
+    const std::string su = valueOr<std::string>(node["surface_update"], "legacy");
+    out.consistentSurfaceUpdate = su == "consistent" || su == "conservative";
+    out.conservativeSurfaceUpdate = su == "conservative";
+  }
   out.consistentSubsurfaceUpdate =
       valueOr<std::string>(node["subsurface_update"], "legacy") == "consistent";
   return out;
@@ -889,6 +894,10 @@ std::string describeConfig(const FrehgConfig& cfg) {
         << (cfg.transport.surfaceDryout == TransportConfig::SurfaceDryout::Store
                 ? "store"
                 : "discard")
+        << ", surface_update = "
+        << (cfg.transport.conservativeSurfaceUpdate ? "conservative"
+            : cfg.transport.consistentSurfaceUpdate ? "consistent"
+                                                    : "legacy")
         << "\n";
   }
   if (cfg.modules.temperature) {
@@ -1376,7 +1385,9 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
       node["bounds"]["max"] = tr.boundMax;
     }
     node["legacy_evap_allowance"] = tr.legacyEvapAllowance;
-    node["surface_update"] = tr.consistentSurfaceUpdate ? "consistent" : "legacy";
+    node["surface_update"] = tr.conservativeSurfaceUpdate ? "conservative"
+                             : tr.consistentSurfaceUpdate ? "consistent"
+                                                          : "legacy";
     node["subsurface_update"] = tr.consistentSubsurfaceUpdate ? "consistent" : "legacy";
     node["surface_dryout"] =
         tr.surfaceDryout == TransportConfig::SurfaceDryout::Store ? "store" : "discard";

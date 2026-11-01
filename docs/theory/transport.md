@@ -73,7 +73,10 @@ window volumes (below).
    tidal-marsh run: 55 % of the surface salt in 3 days). The opt-in
    `transport.surface_update: consistent` divides by the current step's
    flux volume and clamps every wet cell; `legacy` stays the default for
-   golden fidelity.
+   golden fidelity. `consistent` still reads the post-limit velocities,
+   so water the solve moved across a face the velocity limiter zeroes
+   afterwards arrives salt-free — corrected by
+   `transport.surface_update: conservative` (below).
 3. **The subsurface ledger re-anchors against the post-reallocation θ**:
    Vgflux predates the reallocation/clamp adjustments; the difference is
    the audited `subs_anchor` term. The post-allocation walks move water
@@ -108,6 +111,56 @@ window volumes (below).
    masked rain (the legacy global rate ignored its own exclusion rows — no
    gated case rains on transport).
 
+
+## Conservative surface update (`transport.surface_update: conservative`) — Stage-3 T10
+
+The free-surface step orders its manipulations as: implicit continuity
+solve → coupled deposits (seepage/bounce/vents) → stage routing → the
+store sweep → the velocity update with the wetting limiter. Both `legacy`
+and `consistent` advect the surface scalar with the POST-limit flow rates
+(`Fu`/`Fv`), so water that the solve moved across a face the limiter then
+zeroed — exactly the drying-face case — arrives without its salt: the
+drying cell concentrates, the receiver dilutes, and the discrepancy lands
+in `surf_adjust`/`surf_anchor` (measured at 24 % of the exfiltrated salt
+on a two-cell drying strip, and a +28.4 psu·m³ anchor on a tidal beach,
+both under `consistent`).
+
+`conservative` (opt-in; requires and implies `consistent`'s current-step
+volume basis) advects with the **solve's own continuity face volumes**
+
+    Q = dt·As·E − S·(η_nb − η)^{n+1},
+
+recorded immediately after the solve with the post-solve η and the
+start-of-step face geometry the matrix was assembled with — the same
+expression the boundary-flux audit books, so the telescoped Q sum IS the
+per-cell solve update. The upwind directions, superbee weights and the
+flux volume all derive from Q; each post-solve manipulation keeps an
+explicit salt book:
+
+- **coupled deposits** enter the flux volume as the coupler's applied
+  `gain` (post-clamp, post-hold — not a re-derivation from the rate), and
+  the bounce-back share carries top-cell salt with its water;
+- **prescribed-stage cells** take the actual water they hold as their
+  flux volume (their row is an identity, not a face balance) and skip the
+  stencil limiter: the Dirichlet reset is their one honest book
+  (`surf_source`);
+- **a start-of-step-dry pass-through cell** (the solve wets it and pushes
+  water onward in one step) hands the stale-zero upwind faces the same-
+  axis far-upwind value, and infiltrates at its inflow-mix concentration;
+- **an overdrawn cell** (drained below bed; the below-bed lift restores
+  the depth from minted, salt-free volume) parks its lifted water PAIRED
+  at its own limited concentration; the over-export stays on the
+  negative-residual path (`surf_adjust`). A donor-side outflow cap was
+  measured and rejected — it starves the real receivers (8.2 psu J1
+  breach on the tidal beach).
+
+Invariants gated per release (`benchmarks/sx-solve-consistent/`): a
+uniform scalar stays uniform through wetting/drying (J1), `surf_anchor`
+falls to the solve-residual class (J2), boundary salt pairs with the
+audited boundary volumes (J3), and salt crosses drying faces with its
+water (J4). The temperature instance advects with the same Q. `legacy`
+and `consistent` are bitwise-unchanged (the conservative path is a
+separate compile-time kernel instantiation).
 
 ## Consistent subsurface update (`transport.subsurface_update: consistent`)
 
@@ -257,23 +310,67 @@ scalar exchange through the seepage term — and the kind takes no `value`
 (Geng & Boufadel bare-soil salinization) boundary physics, landed complete
 and unit-gated ahead of the Q4 capability PRs per §3.4 caveat 4.
 
-## The surface salt store (Stage-3 T5, O4)
+## The paired water–salt store (Stage-3 T5 O4 → T9 O15)
 
-Under `transport.surface_dryout: store` — **the shipped default since the
-T8 default-flip evaluation** (every gate green with unchanged tolerances;
-the v2.0 `discard` remains available and stays pinned in the goldens and
-default-bitwise lanes) — a drying surface cell (salinity only) moves its
-remaining scalar mass into a per-cell store [psu·m³] instead
-of being discarded (the v2.0 `discard` mode books it into `surf_adjust` and
-loses it), and returns to the water at the cell's first wet step — after
-the limiter, bounds and dilution, so the released mass is never clipped.
-Only positive mass is storable; a negative dry-cell residual (an
-advective artifact against a dry front) stays in `surf_adjust` as in the
-legacy path. Held seepage (water exfiltrated below `min_depth`, carried
-in the exchange accumulator) moves its salt into the store as the water
-leaves the subsurface (D9), so the applied water later carries no second
-copy. The surface ledger identity becomes
-`Δ(surf_mass + surf_store) = exchange + surf_source + surf_boundary +
-surf_adjust + surf_anchor` — the store transfers are internal. See
-`theory/evapotranspiration.md` for the full T5 salt rules.
+`transport.surface_dryout: store` (the shipped default since T8; the v2.0
+`discard` stays available and is pinned in the goldens and default-bitwise
+lanes) keeps the water and the salt of every **thin-layer removal**
+together, cell by cell. The T5 store (O4) held only salt; on a coupled
+tidal beach without ET it filled from reallocation vents whose water the
+wetting limiter then deleted, and each rewetting released the whole store
+into a 1e-5 m film — 72 850 psu at sea-water 35 (S3-A12). T9 replaces it
+with a paired store: water V_s [m³] and salt M_s [psu·m³] per cell.
+
+**What parks.** The surface removal paths P1–P4 (`theory/surface-water.md`)
+move their positive volume into V_s in the same step as its salt moves
+into M_s: the isolated-cell and small-depth limiter rules (P1, P2), the
+sub-`min_depth` remainder of rain and evaporation (P3), sub-`min_depth`
+reallocation vents onto a dry cell (P4 — deposited, then parked), and an
+end-of-step sweep that parks every film 0 < η − z_b ≤ `min_depth` still in
+η after the last surface change (so "dry" means exactly `dept = 0`).
+
+**Rules** (plan §12A):
+
+- **R1/R2** — rain, evaporation and condensation act first and are
+  untouched, as are their dilution and concentration of the cell's salt.
+  The store receives only the positive leftover a removal path takes after
+  them, and evaporation never debits V_s (a dry cell's evaporative demand
+  stays in its audited path: `clamped`, the ET supply cap).
+- **R3** — parked salt is the parked volume times the cell's limited
+  post-source concentration, never above the cell's limiter-window maximum;
+  any excess the cap refuses is booked in `surf_adjust`.
+- **R4** — salt with no water is kept only as (a) the crust of complete
+  evaporative dry-out (the O4 store, V_s = 0) or (b) W5.9 held-seepage salt
+  paired with the coupler's held volume. Any other unpaired salt, and any
+  negative residual, follows the `discard` path into `surf_adjust`.
+- **R5** — release is mixing: when the cell holds water, V_s returns to η
+  and M_s to the water on the combined basis, c = (M + M_s)/(V + V_s).
+  Without evaporation the result is a convex combination of the sources.
+- **R6** — a dry cell returns its store once V_s/A reaches
+  `surface_water.wetting_face_depth`; below that the water stays parked.
+- **R7** — parked water is inert: it does not flow, infiltrate, exchange
+  heat or evaporate, and under ET it is outside the open-water channel and
+  `wet_time` (the soil channel sees the cell as exposed).
+- **R8** — the transport's store-in predicate is "no surface water after
+  the surface step". A cell holding water but no flux volume (wetted from
+  dry by rain, a vent or a release) keeps its salt in that water.
+- **R9** — with `modules.temperature` the parked water's heat parks with it
+  (without R4), so returned water neither dilutes nor heats the cell.
+
+**Invariants** (gated, `benchmarks/ws-water-salt-store`): I1 pairing at
+every transport step; I2 the source bound, M_s ≤ c_max V_s per cell and no
+released film above the maximum source concentration; I3 the identities
+below at every audit row; I4 runs driven only by rain and evaporation, and
+runs that never dry, are bitwise unchanged (`ws3`). On the owner's S3-A12
+repro the surface and subsurface stay at 35.000 psu (`ws1n`).
+
+**Ledgers.** The salt identity is unchanged:
+`Δ(surf_mass + surf_store + subs_mass)` closes on the T5 right-hand side —
+the store transfers are internal. The surface water identity gains the
+store: `Δ(volume − stage_volume + store_volume) = rain − evaporation −
+boundary_outflow + bc_inflow + seepage + clamped − stage_deposit`
+(`output.md` for the columns). Under `discard` the removals leave the
+domain and are booked in `film_removed`:
+`Δ(volume − stage_volume + film_pending) = … − film_removed`. See
+`theory/evapotranspiration.md` for the ET salt rules.
 

@@ -1,6 +1,6 @@
 # et8d — held-seepage salt, D9 (Stage-3 plan §9, T5; driver redesigned
 # under S3-A8 — the side-head authorings produced no measurable
-# exfiltration): a 1 x 2 coupled strip over a 1 m sand column whose
+# exfiltration): a 1 x 1 coupled column over a 1 m sand column whose
 # BOTTOM head (1.2 m pressure head at the 1 m-deep bottom face = 0.2 m
 # above hydrostatic under the surface water table, K = 1e-6) drives a gentle
 # upward Darcy flux (~1e-4 m per 60 s step) onto a DRY surface. With
@@ -13,12 +13,23 @@
 # (subsurface + store + surface) is constant to rounding and the
 # top-cell subs_adjust stays at rounding. Once the held depth crosses
 # min_depth the water applies and the store releases into the new pond.
+#
+# S3-A13 (T9 W9.6): the strip is now 1 x 1. On the T5 1 x 2 strip the
+# applied seepage pond split across both cells below min_depth (5 mm) and
+# at T8 the wetting limiter deleted it every step: the surface held salt in
+# 0 of 241 frames and the lane was vacuous on its release half. The paired
+# store keeps that water, which exposed a pre-existing transport/solve
+# mismatch at drying faces (the velocity limiter zeroes a face the solve
+# already moved water across, so the salt cannot follow; T9 report §5,
+# owner item). One column isolates the D9 observable: the pond forms and
+# persists (220/241 wet frames), the store releases into it, and
+# surf_adjust == 0 exactly on the T8 and T9 binaries alike.
 simulation:
   id: et8d-held-seepage
   title: Stage-3 et8d held-seepage salt store
 
 domain:
-  nx: 2
+  nx: 1
   ny: 1
   nz: 10
   dx: 1.0

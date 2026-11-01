@@ -77,6 +77,20 @@ struct SurfaceStepAudit {
   /// coupled ledger closes with stage conditions present (the b6
   /// "pre-existing unclosed audit term" of dod-Q7).
   real_t stageDeposit = 0.0;
+  /// \name Stage-3 T9 (W9.1, plan §12A): positive thin-layer removals of
+  /// the step [m^3], per path. P1 = cflLimiter's isolated-cell rule, P2 =
+  /// its small-depth rule (both booked in every mode — at T8 no audit
+  /// column held them, the S3-A12 ledger gap), P3 = the positive part of
+  /// the evaprain clamp (informational under discard, where it stays
+  /// inside clampVolume bitwise), sweep = the W9.2 end-of-step park.
+  /// Under the paired store (W9.2) every path parks instead of deleting.
+  ///@{
+  real_t filmIsolated = 0.0;  ///< P1 volume removed (or parked)
+  real_t filmSmall = 0.0;     ///< P2 volume removed (or parked)
+  real_t filmClamp = 0.0;     ///< P3 positive part (parked in store mode)
+  real_t filmSweep = 0.0;     ///< W9.2 sweep park (store mode only)
+  real_t storeRelease = 0.0;  ///< W9.2 water returned from the store
+  ///@}
 };
 
 /// The shallow-water module.
@@ -135,6 +149,58 @@ class SurfaceSolver {
   /// read the kick). The coupler calls it between the seepage application
   /// and the velocity update. No eta condition: a no-op.
   void routeStageDeposits(const Field2<real_t>& deposit);
+
+  /// \name Stage-3 T9 (W9.1/W9.2, plan §12A): thin-layer removals and the
+  /// paired water store
+  ///@{
+  /// This step's counted thin-layer removal per cell [m of depth]: P1 + P2
+  /// in every mode, plus P3's positive part and the sweep under the paired
+  /// store — the film_removed column's per-cell source.
+  const Field2<real_t>& filmRemovedDepth() const { return filmRemoved_; }
+  /// Instantaneous volume of films 0 < eta - bottom <= min_depth present in
+  /// eta [m^3, rank-local]: updateDepth reports them dry, so `volume` omits
+  /// them until P2 removes them at the next solve. Identically zero after
+  /// the W9.2 sweep (the R8 predicate made exact).
+  real_t pendingFilmVolume() const;
+  /// Instantaneous water on prescribed-stage cells, Sigma dept A [m^3,
+  /// rank-local]. boundary_outflow books the flux INTO those cells (they
+  /// are external reservoirs), so the surface identity's domain is
+  /// volume - stage_volume; at T8 the stage storage rode the tide unbooked
+  /// and the identity closed only at mean-stage instants (S3-A12/S3-A13).
+  real_t stageVolume() const;
+  /// True when the paired water–salt store is active (surface water +
+  /// transport + surface_dryout: store, plan §12A).
+  bool pairedStore() const { return pairedStore_; }
+  /// W9.2 end-of-step sweep and release, store mode only: park every film
+  /// 0 < eta - bottom <= min_depth, then return the store to cells holding
+  /// water (R5) or to dry cells whose store reaches wetting_face_depth
+  /// (R6). Called after the last eta change of the surface step (after the
+  /// coupler's seepage and stage routing; directly after the free-surface
+  /// phase when uncoupled). A no-op when the store is inactive.
+  void sweepAndRelease();
+  const Field2<real_t>& waterStore() const { return waterStore_; }      ///< V_s per cell [m^3]
+  Field2<real_t>& waterStoreMutable() { return waterStore_; }           ///< restart load
+  const Field2<real_t>& parkedVolume() const { return parkedVol_; }     ///< parked this step [m^3]
+  const Field2<real_t>& releasedVolume() const { return releasedVol_; } ///< released this step [m^3]
+  /// Water evaporation removed from each cell this step [m^3] (store mode;
+  /// the R4(a) crust predicate for every evaporation mode).
+  const Field2<real_t>& evaporatedVolume() const { return evapStep_; }
+  real_t ownedStoreVolume() const;  ///< Sigma V_s [m^3, rank-local]
+  ///@}
+
+  /// \name Stage-3 T10 (W10.1, plan §12B): the solve's continuity face
+  /// volumes. Recorded right after fillAndSolve (post-solve eta, the
+  /// start-of-step face geometry the solve assembled with), only under
+  /// transport.surface_update: conservative — the default path takes no
+  /// extra exchange and no extra kernel.
+  ///@{
+  bool solveVolumesActive() const { return recordSolveVolumes_; }
+  /// Eastward face volume of the step [m^3]; slot (j, i) is the face
+  /// between cells i and i+1, slot (j, 0) the west interface/edge face.
+  const Field2<real_t>& solveVolumeX() const { return Qx_; }
+  /// Northward face volume of the step [m^3]; slot layout as Fv.
+  const Field2<real_t>& solveVolumeY() const { return Qy_; }
+  ///@}
 
   /// \name Stage-3 T2 (W2.6): entrance-head diagnostics (rank-local)
   ///@{
@@ -310,6 +376,12 @@ class SurfaceSolver {
   void updateGeometry();
   /// Track the per-face CFL numbers of the step (feeds maxCfl()).
   void cflLimiter();
+  /// Stage-3 T9 (W9.1): book cflLimiter's removals per path from the eta
+  /// snapshot taken before it (P1 = cells it flagged isolated, P2 = the
+  /// rest). A separate read-only pass: the pinned limiter kernels stay
+  /// byte-identical (the S3-A8.1/A9.7 fma rule). Under the paired store
+  /// the booked depth also parks into waterStore_.
+  void bookLimiterRemovals();
   /// Clamp non-physical face velocities (the legacy limiter set; clamped
   /// volume is audited).
   void applyVelocityLimiters();
@@ -326,6 +398,10 @@ class SurfaceSolver {
     /// (found at P3; b1's north-edge tide row pins the skip).
     Refresh,
   };
+  /// Stage-3 T10 (W10.1): fill Qx_/Qy_ from the assembled continuity —
+  /// Q = dt As E - S (eta_nb - eta) on the post-solve eta — with the
+  /// edge folds, velocity-BC faces and outflow drops applied (§12B C1).
+  void recordSolveFaceVolumes();
   /// Velocity ghost fills, prescribed faces, and the mass-consistent
   /// stage-boundary face velocities per \p apply.
   void enforceVeloBc(VeloBcApply apply);
@@ -382,6 +458,24 @@ class SurfaceSolver {
   Field2<real_t> wetFrac_;           ///< wet fraction of this step [-]
   Field2<real_t> wetClock_;          ///< cumulative wet time [s] (checkpointed)
   Field2<real_t> wetClockStepStart_; ///< wetClock before this step's increment
+  /// \name Stage-3 T9 (W9.1/W9.2): thin-layer removal books and the
+  /// paired water store (plan §12A). etaPreLimit_ and filmRemoved_ exist in
+  /// every mode (W9.1 books P1/P2 always); the store fields only when
+  /// pairedStore_ (empty views otherwise — every store path is inert).
+  ///@{
+  Field2<real_t> etaPreLimit_;   ///< eta before cflLimiter (P1/P2 snapshot)
+  Field2<real_t> filmRemoved_;   ///< counted removal this step [m]
+  bool pairedStore_ = false;     ///< surface + transport + surface_dryout: store
+  Field2<real_t> waterStore_;    ///< V_s [m^3] (checkpointed: swe_water_store)
+  Field2<real_t> parkedVol_;     ///< volume parked this step [m^3]
+  Field2<real_t> releasedVol_;   ///< volume released this step [m^3]
+  Field2<real_t> etaPreEvap_;    ///< eta before the evaporation pass
+  /// Stage-3 T10 (W10.1): the solve's face volumes (empty unless
+  /// recordSolveVolumes_).
+  bool recordSolveVolumes_ = false;
+  Field2<real_t> Qx_, Qy_;
+  Field2<real_t> evapStep_;      ///< water evaporation removed this step [m^3]
+  ///@}
   real_t windSpeed_ = 0.0;   ///< |U10| of the step [m/s]
   real_t windOmega_ = 0.0;   ///< wind direction of the step, radians from +x
   real_t windCd_ = 0.0;      ///< Cd of the step under the configured law

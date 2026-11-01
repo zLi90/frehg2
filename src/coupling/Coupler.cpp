@@ -32,6 +32,14 @@ Coupler::Coupler(const Grid& grid, const FrehgConfig& config, swe::SurfaceSolver
   Kokkos::deep_copy(avail_, 0.0);
   Kokkos::deep_copy(gain_, 0.0);
   Kokkos::deep_copy(qss_, 0.0);
+  // Stage-3 T10 (plan §12B C3): the bounce-back share of gain, so the
+  // conservative surface update can pair its salt (top-cell concentration)
+  // with the volume the Corrector deposited. Allocated only under
+  // transport.surface_update: conservative.
+  if (config.modules.transport && config.transport.conservativeSurfaceUpdate) {
+    bounce_ = Field2<real_t>("cpl_bounce", ny2, nx2);
+    Kokkos::deep_copy(bounce_, 0.0);
+  }
 
   gw::GwCoupling coupling;
   coupling.active = true;
@@ -41,6 +49,7 @@ Coupler::Coupler(const Grid& grid, const FrehgConfig& config, swe::SurfaceSolver
   coupling.seepAccum = seepAccum_;
   coupling.avail = avail_;
   coupling.gain = gain_;
+  coupling.bounce = bounce_;  // empty unless conservative (T10)
   // Stage-3 T5 (W5.4): the soil channel's dry-fraction split reads the
   // surface channel's wet clock; empty views when ET is off (the kernel
   // guards on the solver's etActive flag).
@@ -48,6 +57,7 @@ Coupler::Coupler(const Grid& grid, const FrehgConfig& config, swe::SurfaceSolver
     coupling.wetClockStepStart = surface_.wetClockStepStart();
     coupling.wetFrac = surface_.wetFrac();
   }
+  coupling.ventAll = surface_.pairedStore();  // Stage-3 T9 (W9.4)
   gw_.attachCoupling(coupling);
 }
 
@@ -83,6 +93,7 @@ void Coupler::step(real_t t, real_t dt) {
     audit_.gw.cplExchanged += a.cplExchanged;
     audit_.gw.cplBounce += a.cplBounce;
     audit_.gw.cplVent += a.cplVent;
+    audit_.gw.cplVentThin += a.cplVentThin;
     audit_.gw.cplEvap += a.cplEvap;
     audit_.gw.evap += a.evap;
     audit_.gw.etDemand += a.etDemand;
@@ -112,6 +123,11 @@ void Coupler::step(real_t t, real_t dt) {
   // under closure external removed through the reservoir, before the
   // velocity update reads eta (SurfaceSolver::routeStageDeposits).
   surface_.routeStageDeposits(gain_);
+  // Stage-3 T9 (W9.2): after the last eta change of the surface step —
+  // the vents, the seepage and the stage routing are in — park every
+  // sub-min_depth film and return the store (no-op unless the paired
+  // store is on).
+  surface_.sweepAndRelease();
   surface_.updateVelocity();
   reduceAudit();
 }

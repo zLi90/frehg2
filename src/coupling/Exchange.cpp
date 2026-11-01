@@ -46,6 +46,9 @@ void Coupler::beginWindow() {
         avail(j, i) = dept(j, i);
         gain(j, i) = 0.0;
       });
+  if (bounce_.is_allocated()) {
+    Kokkos::deep_copy(bounce_, 0.0);
+  }
 }
 
 void Coupler::applySeepage(real_t dt) {

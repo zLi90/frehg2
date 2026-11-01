@@ -1,0 +1,80 @@
+# ws3(a-ET) — the ws3(a) basin with the ET open-water channel (prescribed
+# potential 5e-6 m/s) plus the same rain, under store: bitwise against its
+# T8-binary hash (I4, records/T9/red/ws3aet-T8.json; the appended mass_audit
+# columns excepted, their prefix gated by ws5's convention).
+simulation:
+  id: ws3-ws3aet
+  title: Stage-3 ws3aet rain/evaporation invariance
+domain:
+  nx: 4
+  ny: 4
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation:
+    constant: 0.0
+time:
+  dt: 10.0
+  t_end: 4000.0
+  output_interval: 200.0
+modules:
+  surface_water: true
+  transport: true
+surface_water:
+  friction:
+    law: manning
+    coefficient:
+      constant: 0.03
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+  rainfall:
+    series:
+      file: input/ws3_rain.dat
+transport:
+  scheme:
+    advection: superbee
+  dispersion:
+    longitudinal: 0.0
+    transverse: 0.0
+    molecular: 0.0
+  surface_update: consistent
+  surface_dryout: store
+boundary_conditions:
+- name: walls
+  region:
+    polygon:
+    - - -1
+      - -1
+    - - 5
+      - -1
+    - - 5
+      - 5
+    - - -1
+      - 5
+  target: surface
+  kind: velocity
+  value:
+    constant: 0.0
+initial_conditions:
+  surface:
+    eta:
+      constant: 0.2
+  transport:
+    surface:
+      constant: 35.0
+output:
+  filename: out/output.h5
+  monitor_interval: 0
+  variables:
+    surface:
+    - eta
+    - depth
+    transport:
+    - concentration_surface
+evapotranspiration:
+  potential: prescribed
+  prescribed:
+    constant: 5.0e-06
+  open_water: true

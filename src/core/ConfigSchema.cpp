@@ -178,7 +178,9 @@ Spec seriesOrConstant(bool required = false) {
 /// Allowed output variables per group (plan §7).
 const std::vector<std::string>& surfaceVariables() {
   static const std::vector<std::string> v = {"eta",     "depth",       "uu", "vv",
-                                             "seepage", "seepage_rate"};
+                                             "seepage", "seepage_rate",
+                                             // Stage-3 T9 (W9.1/W9.2).
+                                             "film_removal_rate", "water_store"};
   return v;
 }
 const std::vector<std::string>& groundwaterVariables() {
@@ -468,7 +470,9 @@ Spec buildRootSchema() {
                                 {"molecular", realNonNegative(false)}})},
             {"bounds", map({{"min", real(false)}, {"max", real(false)}})},
             {"legacy_evap_allowance", boolean(false)},
-            {"surface_update", enumeration(false, {"legacy", "consistent"})},
+            // Stage-3 T10 (§12B): conservative = the solve-consistent
+            // surface update (salt moves with the solve's face volumes).
+            {"surface_update", enumeration(false, {"legacy", "consistent", "conservative"})},
             {"subsurface_update", enumeration(false, {"legacy", "consistent"})},
             // Stage-3 T5 (O4): drying-cell scalar fate; the T8 DF constant.
             {"surface_dryout", enumeration(false, {"discard", "store"})}})},
@@ -1137,7 +1141,14 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
           return trans.IsDefined() && trans.IsMap() && trans[key].IsDefined() &&
                  trans[key].as<std::string>("") == std::string(want);
         };
-        if ((sw && !updateIs("surface_update", "consistent")) ||
+        const auto surfaceUpdateOk = [&trans]() {
+          if (!(trans.IsDefined() && trans.IsMap() && trans["surface_update"].IsDefined())) {
+            return false;
+          }
+          const std::string v = trans["surface_update"].as<std::string>("");
+          return v == "consistent" || v == "conservative";  // T10: either
+        };
+        if ((sw && !surfaceUpdateOk()) ||
             (gw && !updateIs("subsurface_update", "consistent"))) {
           ctx.addError("evapotranspiration",
                        "with salinity transport requires transport.surface_update: "
@@ -1225,6 +1236,28 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
         !gw) {
       ctx.addError("transport.subsurface_update",
                    "subsurface_update: consistent requires modules.groundwater: true");
+    }
+  }
+
+  // transport.surface_update: conservative advects with the solve face
+  // volumes, whose coupled-deposit book (T10 C3) reads the consistent-
+  // exchange machinery (applied gain, vent windows); with groundwater the
+  // subsurface update must therefore be consistent too (a legacy
+  // subsurface exchange would deliver the water's volume without its
+  // scalar — the sx5 heat-drain defect).
+  {
+    const YAML::Node update = sub(root, "transport", "surface_update");
+    const YAML::Node subUpdate = sub(root, "transport", "subsurface_update");
+    const bool conservative = update.IsDefined() && update.IsScalar() &&
+                              update.as<std::string>() == "conservative";
+    const bool subConsistent = subUpdate.IsDefined() && subUpdate.IsScalar() &&
+                               subUpdate.as<std::string>() == "consistent";
+    if (conservative && gw && !subConsistent) {
+      ctx.addError("transport.surface_update",
+                   "surface_update: conservative with modules.groundwater "
+                   "requires transport.subsurface_update: consistent (the "
+                   "coupled-deposit salt/heat books read the consistent "
+                   "exchange machinery)");
     }
   }
 
@@ -1613,6 +1646,23 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
           if (name == "seepage" || name == "seepage_rate") {
             ctx.addError("output.variables.surface",
                          "variable '" + name + "' requires modules.groundwater: true");
+          }
+        }
+      }
+      // Stage-3 T9 (plan §13.C): the paired water store exists only with
+      // the store (surface water + transport + surface_dryout: store; an
+      // absent key resolves to store since T8).
+      if (surfaceVars.IsDefined() && surfaceVars.IsSequence()) {
+        const YAML::Node trans = root["transport"];
+        const bool storeMode =
+            tr && !(trans.IsDefined() && trans.IsMap() && trans["surface_dryout"].IsDefined() &&
+                    trans["surface_dryout"].as<std::string>("") == "discard");
+        for (std::size_t n = 0; n < surfaceVars.size(); ++n) {
+          if (surfaceVars[n].IsScalar() &&
+              surfaceVars[n].as<std::string>() == "water_store" && !storeMode) {
+            ctx.addError("output.variables.surface",
+                         "water_store needs transport.surface_dryout: store "
+                         "(with modules.surface_water and modules.transport)");
           }
         }
       }

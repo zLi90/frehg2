@@ -1,0 +1,36 @@
+# stage3-sx.yaml — Stage-3 T10 solve-consistent transport gate tolerances
+# (plan §12B; every value cites its authoring measurement, taken on the
+# first green T10 binary, 2026-10-31; relaxations only by amendment —
+# S3-A15).
+sx1:
+  c0: 35.0
+  uniform_abs: 1.0e-6      # J1; measured 1.9e-7 psu (overdraft-pairing +
+                           # production-rtol residuals on the swash films)
+  anchor_rel: 1.0e-10      # J2 vs total salt M; measured 9.2e-13
+  adjust_rel: 1.0e-4       # C4's booked negative-residual path vs M;
+                           # measured 3.2e-5 (4.3e-2 of M 1364). NOT the
+                           # old unbooked class: the overdraft over-export
+                           # books here by design (S3-A15)
+sx2:
+  total_rel: 1.0e-12       # ledger-identity residual vs M; measured 6.4e-14
+  adjust_rel: 1.0e-10      # J4 stranding vs M; measured 0.0 exactly
+                           # (red on T9: 0.109 = 2.4e-2 of M)
+  neighbor_floor_salt: 0.01  # anti-vacuity: pit-cell peak salt store
+                             # [psu m^3]; measured 0.049
+sx3:
+  c_max: 35.0
+  bound_rel: 1.0e-12
+  anchor_rel: 1.0e-7       # red on T9 (consistent): +28.4 = 2.4e-2 of M;
+                           # measured green 5.4e-5 psu m^3 = 4.7e-9 of M —
+                           # the production-solver residual accumulated
+                           # over 14 400 steps (C5's solve-residual class;
+                           # strict-solver sx1 measures 9.2e-13) — S3-A15
+sx4:
+  total_rel: 1.0e-8        # ledger-identity residual vs M (authoring: TBD)
+  adjust_rel: 1.0e-4       # C4 booked path vs M (authoring: TBD)
+  extrema_tol: 1.0e-9
+  front_floor_psu: 1.0     # anti-vacuity: the front moves
+sx5:
+  t0: 20.0
+  uniform_abs: 1.0e-6      # measured alongside sx1 (same body)
+  anchor_rel: 1.0e-10      # the temperature ledger's anchor; measured 2.1e-14

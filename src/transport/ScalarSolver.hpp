@@ -93,6 +93,10 @@ struct ScalarSpec {
   real_t boundMax = 0.0;                ///< upper clamp when hasBoundMax
   bool legacyEvapAllowance = false;     ///< salinity only
   bool consistentSurfaceUpdate = false; ///< salinity only (transport.surface_update)
+  /// Stage-3 T10 (plan §12B, O16): advect with the free-surface solve's
+  /// continuity face volumes. BOTH instances (C6: heat moves with its
+  /// water); implies the consistent semantics inside this instance.
+  bool conservativeSurfaceUpdate = false;
   /// salinity only (transport.subsurface_update): the subsurface update on
   /// the groundwater module's window volumes (SubsurfaceTransport.cpp).
   bool consistentSubsurfaceUpdate = false;
@@ -130,6 +134,22 @@ struct SurfaceWiring {
   bool etActive = false;      ///< ET open-water channel on
   Field2<real_t> rainAdded;   ///< rain added this step [m] (masked)
   Field2<real_t> evapRemoved; ///< evaporation removed this step [m]
+  // Stage-3 T9 (W9.3, plan §12A): the paired water–salt store's per-step
+  // surface books (empty views when the store is off).
+  bool pairedStore = false;   ///< surface + transport + surface_dryout: store
+  /// Stage-3 T10 (W10.1/W10.2): the solve's continuity face volumes
+  /// [m^3 per step] (empty views unless surface_update: conservative).
+  bool solveVolumes = false;
+  Field2<real_t> qxSolve;     ///< eastward face volume (Fu slots)
+  Field2<real_t> qySolve;     ///< northward face volume (Fv slots)
+  /// 1.0 on prescribed-stage cells (SurfaceSolver::etaBcMask). A stage
+  /// cell's volume is prescribed, not solved, so the conservative flux
+  /// volume there is the actual post-manipulation water dept*A; the
+  /// Dirichlet reset + surf_source booking close its salt ledger.
+  Field2<real_t> isEtaBc;
+  Field2<real_t> parkedVol;   ///< water parked this step [m^3]
+  Field2<real_t> releasedVol; ///< water returned from the store this step [m^3]
+  Field2<real_t> evapStep;    ///< water evaporation took this step [m^3] (R4(a))
 };
 
 /// Subsurface-module state the transport reads (RichardsSolver /
@@ -182,6 +202,16 @@ struct SubsurfaceWiring {
 struct CouplingWiring {
   bool active = false;  ///< true when the coupler runs
   Field2<real_t> qss;   ///< surface-applied seepage rate of the step [m/s]
+  /// Stage-3 T10 (plan §12B C3): the coupler's applied-deposit field — the
+  /// actual eta change every coupled manipulation made this step [m]
+  /// (applied seepage post-clamp/post-hold, bounce-back, vents). Under
+  /// transport.surface_update: conservative the flux volume books this
+  /// exactly instead of re-deriving it from qss.
+  Field2<real_t> gain;
+  /// The bounce-back share of gain [m] (T10 C3): the Corrector's direct
+  /// eta deposits, whose salt arrives at the top-cell concentration under
+  /// the conservative update. Empty view otherwise.
+  Field2<real_t> bounce;
   /// Post-allocation vent volume per column since the last transport step
   /// [m^3] (RichardsSolver::windowVentVolume; consistent subsurface update
   /// only — empty otherwise).
@@ -193,6 +223,10 @@ struct CouplingWiring {
   // unless ET + store are active.
   bool heldSeepage = false;   ///< the W5.9 path is on
   Field2<real_t> exfNew;      ///< newly exfiltrated depth this step [m]
+  /// Stage-3 T9 (W9.3, R4(b)): the coupler's held (exchanged-not-applied)
+  /// depth [m] — held-seepage salt is kept in the store only while its
+  /// water is held here.
+  Field2<real_t> seepAccum;
 };
 
 /// This rank's scalar-mass budget contributions of one transport step
@@ -332,6 +366,13 @@ class ScalarSolver {
   /// Advance the surface scalar over \p dt: superbee advection on the
   /// pre-correction flow rates, rain/evap dilution, boundary sources.
   void stepSurface(real_t t, real_t dt, real_t rain, real_t evap);
+  /// Stage-3 T10 (W10.2): the surface step compiled once per update mode.
+  /// QVOL = false folds every T10 ternary back to the v2.0/T9 expression
+  /// trees at compile time (the S3-A8.1/A9.7 fma-contraction rule, third
+  /// measurement: a runtime ternary alone perturbed the superbee
+  /// subcycled trajectory — the et9 noET pin caught it).
+  template <bool QVOL>
+  void stepSurfaceImpl(real_t t, real_t dt, real_t rain, real_t evap);
 
   // SubsurfaceTransport.cpp (scalar_groundwater, scalar.c:303-498)
   /// Advance the subsurface scalar over \p dt on the completed gw step's
@@ -385,6 +426,7 @@ class ScalarSolver {
   /// current step's flow rates and the limiter in still wet cells (see
   /// SurfaceTransport.cpp); false keeps the golden-pinned legacy update.
   bool consistentSurface_ = false;
+  bool conservativeSurface_ = false;  ///< T10: advect with the solve volumes
   /// transport.subsurface_update: consistent — the subsurface update on the
   /// window volumes (see SubsurfaceTransport.cpp); false keeps the
   /// golden-pinned legacy update.
@@ -392,7 +434,10 @@ class ScalarSolver {
 
   // Surface fields (halo layout).
   Field2<real_t> sSurf_, smSurf_, sSurfKp_, sseepage_;
-  bool store_ = false;        ///< surface_dryout: store (salinity only)
+  /// surface_dryout: store — since T9 the paired water–salt store (both
+  /// scalar instances: the temperature instance parks heat with its water,
+  /// R9, without the salinity-only R4 exceptions).
+  bool store_ = false;
   Field2<real_t> sStore_;     ///< per-cell salt store [scalar m^3] (W5.7)
   Field2<real_t> vsn_, vflux_, fuOld_, fvOld_;
   Field2<real_t> sMinS_, sMaxS_;

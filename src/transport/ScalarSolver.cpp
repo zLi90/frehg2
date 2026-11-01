@@ -127,6 +127,7 @@ ScalarSpec ScalarSpec::salinity(const FrehgConfig& config) {
   spec.boundMax = tr.boundMax;
   spec.legacyEvapAllowance = tr.legacyEvapAllowance;
   spec.consistentSurfaceUpdate = tr.consistentSurfaceUpdate;
+  spec.conservativeSurfaceUpdate = tr.conservativeSurfaceUpdate;
   spec.consistentSubsurfaceUpdate = tr.consistentSubsurfaceUpdate;
   return spec;
 }
@@ -150,7 +151,19 @@ ScalarSpec ScalarSpec::temperature(const FrehgConfig& config) {
   spec.hasBoundMax = tp.hasBoundMax;
   spec.boundMax = tp.boundMax;
   spec.legacyEvapAllowance = false;
-  spec.consistentSurfaceUpdate = false;
+  // v2 Q5 pinned the temperature instance to the legacy surface update
+  // (its goldens); T10's conservative token moves BOTH scalars onto the
+  // solve volumes (C6) and brings the consistent semantics with it.
+  spec.consistentSurfaceUpdate = config.transport.conservativeSurfaceUpdate;
+  spec.conservativeSurfaceUpdate = config.transport.conservativeSurfaceUpdate;
+  // ... including the consistent EXCHANGE semantics: under the legacy
+  // branch the coupled deposits' volume enters the QVOL flux volume (C3)
+  // but their heat does not (exfiltration pays only wet cells, no vent
+  // term, diffusion only on qss != 0 steps), so the swash films dilute
+  // toward 0 C (measured on sx5: T 20 -> 0.7 on the ebbing beach). The
+  // schema requires subsurface_update: consistent alongside conservative
+  // + groundwater, so the window views this switches on are always wired.
+  spec.consistentSubsurfaceUpdate = config.transport.conservativeSurfaceUpdate;
   spec.kappaFactor = tp.heatCapacitySolid / tp.heatCapacityWater;
   spec.heatCapacityWater = tp.heatCapacityWater;
   spec.exchange = tp.surfaceExchange.mode;
@@ -181,6 +194,7 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
   boundMax_ = hasBoundMax_ ? spec_.boundMax : 1.0e30;
   legacyEvapAllowance_ = spec_.legacyEvapAllowance;
   consistentSurface_ = spec_.consistentSurfaceUpdate;
+  conservativeSurface_ = spec_.conservativeSurfaceUpdate && surf_.solveVolumes;
   consistentSubsurface_ = spec_.consistentSubsurfaceUpdate && subs_.active;
   if (spec_.exchange == SurfaceExchangeConfig::Mode::Bulk) {
     met_ = atm::MetForcing(config.atmosphere, config);
@@ -195,10 +209,11 @@ ScalarSolver::ScalarSolver(const Grid& grid, const FrehgConfig& config,
   // instance registers a parallel "t_*" set.
   const std::string p = spec_.prefix + "_";
   if (surf_.active) {
-    // Stage-3 T5 (W5.7/O4): the surface salt store — salinity only, under
-    // transport.surface_dryout: store. Halo-free (cell-local).
-    if (!spec_.isTemperature &&
-        config.transport.surfaceDryout == TransportConfig::SurfaceDryout::Store) {
+    // Stage-3 T5 (W5.7/O4) → T9 (W9.3, O15): the surface store, now the
+    // paired water–salt store — parked scalar mass moves with its water
+    // (the surface solver's waterStore). Salinity and, under R9, the
+    // temperature instance. Halo-free (cell-local).
+    if (surf_.pairedStore) {
       store_ = true;
       sStore_ = Field2<real_t>(p + "store", ny2, nx2);
       Kokkos::deep_copy(sStore_, 0.0);

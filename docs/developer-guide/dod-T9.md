@@ -1,0 +1,23 @@
+# DoD — Stage-3 phase T9 (paired water–salt store for thin-layer removals)
+
+Date: 2026-10-31. Plan: `FREHG2_STAGE3_DEVELOPMENT_PLAN.md` §12A (added by S3-A12, owner decision O15); amendment S3-A13. Companion: `report-T9.md`.
+
+| Check | State | Evidence |
+|---|---|---|
+| W9.0 repro copied (`stage3/evidence/dryout-store/`: inputs, YAMLs, `analyze.py`, `vent_check.py`, the original runs' logs/records); every T9 gate registered (cases, `tolerances/stage3-ws.yaml`, harness `ws1/ws1n/ws3/ws4/ws-restart/ws-rank`, 16 ctest entries, `scripts/test_ws_gates.py`) | done | `records/T9/` |
+| **Red** on the frozen T8 binary: ws1n 72 854 psu surface / 9 039 psu subsurface / 47 CFL warnings (max 80.95) — the S3-A12 table reproduced; ws1 494.4 psu surface / 35.006 psu subsurface (discard control 35.000); ws2 `film_removed` absent (the documented 5.5e-3 per-row gap); every ws gate fails on T8 (schema: capability absent) | done | `records/T9/red/` |
+| W9.1 per-path removal books (P1–P4) in every mode; `mass_audit` appends `film_removed`, `film_pending`, `stage_volume` (S3-A13: the per-row identity needs the latter two); run-record per-path lines + `vent_thin_m3`; the `film_removal_rate` output; **S3-A12 volume attributed to P2** (88 % removed within the interval or the next) | done | `records/T9/attribution.md` |
+| W9.2–W9.4 the paired store: limiter + clamp parks, the end-of-step sweep and the R5/R6 release, `water_store` output + `swe_water_store` checkpoint; transport R3/R4 (bounded, S3-A13)/R5/R8, the R9 temperature store (+ `t_store`, `temperature_audit.surf_store`); every dry-cell vent deposited under the store | done | source |
+| **ws0** (8 unit tests: `TransportStore.*` ×6, `SweModule.ThinLayerRemovalsBookedPerPath`, `SweModule.StoreReturnsAtWettingFaceDepth`) + `unit.ws_gates.negative` (incl. the vBasis-only-release negative) | done | 8/8; battery green |
+| **ws1** green: surface/subsurface/monitors ≤ 35 (1 + 1e-12) (measured 35.000), I2 (0 excess, no salt on empty stores), CFL ≤ 1.5 (S3-A13; 1.247), anti-vacuity (ΣV_s 8.8e-4 m³, 44 releases, P4 1.83e-3 m³), ws2 ledgers on the store lane and its discard twin (+ the film_removed-dropped negative) | done | `records/T9/green/ws1.log` |
+| **ws1n** green (the owner's repro): 35.000 psu everywhere, I2, CFL 1.248, ΣV_s 1.09e-3 m³, 158 releases, water 8.9e-13 / salt 5.6e-10 | done | `green/ws1n.log` |
+| **ws2** (in the lanes): the mode's identity at every row — store and discard — and the salt identity | done | ws1/ws1n/ws3/ws4 logs |
+| **ws3** green: (a) store ≡ discard on 64 field datasets + audit prefixes; (a-ET) bitwise vs the T8 hash; (b) Σ E + V_s = V0 (8.7e-19), V_s ≤ min_depth A, M_s = M0, monotone while dry; (c) rewet closed form with the concurrent E dt (S3-A13) exact; (d) legacy evaporation Σ(E − clamped) + V_s = V0 (−1.2e-17), M_s = M0 | done | `green/ws3.log` |
+| **ws4** green: P2/P2T/P3/P3T books exact (residual 0), pairing (P2 1.3e-9 ≤ 1e-8; P3 exact), R9 (P3T exact, P2T 8.7e-3 ≤ 1e-2), each lane's own path above its floor | done | `green/ws4.log` |
+| **ws-x** green: restart bitwise (checkpoint with 24 parked cells; water_store/salt_store/fields); rank — the stable slope base at mpi_ny 1/2/4 (η 7.3e-15, Σ stores 5.4e-11 ≤ 1e-9, 0 timing flips; 1e-12 twin as the stability control) + ws1 at n = 2/4 (bound, I2, ledgers) — S3-A13 | done | `green/ws-restart.log`, `green/ws-rank.log` |
+| **ws5** green: `default_bitwise` fields bitwise + the `mass_audit` T8 prefix bitwise on 11 cases; the et9 noET lane (1 271 datasets + prefix) | done | stage3 tier |
+| W9.6 re-adjudication (S3-A13): R4 bounded; **et8d redesigned to 1 × 1** (the T5 1 × 2 lane was vacuous: 0 of 241 salty frames, salt-only store growth); et8b's s·h identity unchanged (V_r 1.79e-6 m³ mixes in); et9, et9-veg, et-orient, et-restart and every other store-resolving gate green unchanged; the drying-face transport/solve mismatch recorded as an owner item | done | `w96-second.log`, S3-A13 |
+| W9.5 docs: `theory/transport.md` (paired store, R1–R9, I1–I4, ledgers), `theory/surface-water.md` (P1–P4, books, release onset), `output.md` (columns + both identities), `parameters.md`, `agents/case-setup.md`, coverage (137 rows), `water_store` schema rule + ConfigTest pin, study-migration addendum | done | checkers |
+| W9.7 §2.7 re-evaluation of `store` (paired) as the default: every tier green with unchanged tolerances (ws1n 35.000 psu; b6 ss/td in band, paired ≥ discard) ⇒ **`store` stays the default** | done | `records/T9/timings.md`, report §6 |
+| Tier P (60/60, g2, 153/153, perf) / S3-A1 Tier N (b6 ss/td, g5 ×2, g8, stage3_nightly 10/10, b5 24 h record) | done | `records/T9/timings.md` |
+| Snapshot `refs/stage3/T9`; `phase.patch` vs `refs/stage3/T9-start` | done | `records/T9/` |

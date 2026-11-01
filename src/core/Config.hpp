@@ -572,6 +572,12 @@ struct TransportConfig {
   /// and the moving-cell-only limiter are golden-pinned (docs/theory/
   /// transport.md quirk 2).
   bool consistentSurfaceUpdate = false;
+  /// Stage-3 T10 (plan §12B, O16): transport.surface_update: conservative —
+  /// the surface scalar advects with the free-surface solve's own
+  /// continuity face volumes (salt moves with the water the solve moved);
+  /// implies the consistent semantics everywhere else. Opt-in: legacy and
+  /// consistent stay bitwise.
+  bool conservativeSurfaceUpdate = false;
   /// transport.subsurface_update: consistent (post-v2.0 opt-in): the
   /// subsurface scalar moves with every volume the groundwater module moves
   /// over the surface step. The face volumes are accumulated over all

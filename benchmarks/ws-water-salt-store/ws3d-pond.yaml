@@ -1,0 +1,70 @@
+# ws3(d) — ws3(b) with LEGACY prescribed evaporation, no ET (Stage-3 plan
+# §12A): E = (5e-3 - 4e-6) / 2500 s leaves a 4e-6 m film after 250 steps,
+# which the evaprain clamp would delete (P3); it parks. Afterwards the dry
+# cell's unconditional evaporation is the clamp's below-bed overdraft — it
+# never debits the store (R2). Asserts: Sigma (evaporation - clamped) + V_s
+# = V0 (1e-12 V0), V_s <= min_depth A, M_s = M0 (crust + paired, 1e-12),
+# V_s never decreases while dry.
+simulation:
+  id: ws3-d-pond
+  title: Stage-3 ws3(d) legacy-evaporation pond dry-out
+domain:
+  nx: 1
+  ny: 1
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation:
+    constant: 0.0
+time:
+  dt: 10.0
+  t_end: 4000.0
+  output_interval: 100.0
+modules:
+  surface_water: true
+  transport: true
+surface_water:
+  friction:
+    law: manning
+    coefficient:
+      constant: 0.03
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 1.0e-05
+  evaporation:
+    constant: 1.9984000000000002e-06
+transport:
+  scheme:
+    advection: superbee
+  dispersion:
+    longitudinal: 0.0
+    transverse: 0.0
+    molecular: 0.0
+  surface_update: consistent
+  surface_dryout: store
+initial_conditions:
+  surface:
+    eta:
+      constant: 0.005
+  transport:
+    surface:
+      constant: 35.0
+output:
+  filename: out/output.h5
+  monitor_interval: 0
+  variables:
+    surface:
+    - eta
+    - depth
+    - water_store
+    transport:
+    - concentration_surface
+    - salt_store
+  monitors:
+  - name: pond
+    i: 0
+    j: 0
+    variables:
+    - depth
+    - concentration_surface

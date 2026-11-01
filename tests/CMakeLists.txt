@@ -247,6 +247,12 @@ set_tests_properties(unit.dg_gates.negative PROPERTIES LABELS "unit")
 # Stage-3 T5 et gate-logic battery (plan §6.3): the bulk potential chain
 # two independent ways, the FAO-56/log-profile hand values, t_d, the salt
 # closed forms; every et criterion provably able to fail.
+add_test(NAME unit.sx_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_sx_gates.py)
+set_tests_properties(unit.sx_gates.negative PROPERTIES LABELS "unit")
+add_test(NAME unit.ws_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_ws_gates.py)
+set_tests_properties(unit.ws_gates.negative PROPERTIES LABELS "unit")
 add_test(NAME unit.et_gates.negative
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_et_gates.py)
 set_tests_properties(unit.et_gates.negative PROPERTIES LABELS "unit")
@@ -294,6 +300,19 @@ foreach(case
     et-evapotranspiration/et5-canopy
     et-evapotranspiration/et6-roots
     et-evapotranspiration/et10-pm-grass
+    ws-water-salt-store/ws1-source-bound
+    ws-water-salt-store/ws3a-basin
+    ws-water-salt-store/ws3aet-basin
+    ws-water-salt-store/ws3bc-pond
+    ws-water-salt-store/ws3d-pond
+    ws-water-salt-store/ws4-p2-ebb
+    ws-water-salt-store/ws4-p2t-ebb
+    ws-water-salt-store/ws4-p3-evap
+    ws-water-salt-store/ws4-p3t-evap
+    sx-solve-consistent/sx1-uniform-beach
+    sx-solve-consistent/sx2-drying-strip
+    sx-solve-consistent/sx4-front-slope
+    sx-solve-consistent/sx5-uniform-heat
     g9-wind/g9a-setup
     g9-wind/g9b-linear
     g9-wind/g9c-slope
@@ -739,6 +758,59 @@ foreach(mt aij aijkokkos)
     ENVIRONMENT "FI_PROVIDER=tcp;UCX_TLS=tcp,self,sm;OMP_NUM_THREADS=4;OMP_PROC_BIND=false"
     PROCESSORS 4 TIMEOUT 7200)
 endforeach()
+
+# Stage-3 T9 paired water–salt store gates (plan §12A, S3-A12/O15;
+# authored FAILING per §2.3 — the T8 binary rejects the water_store /
+# film_removal_rate target keys, and its store lane breaks the source
+# bound: records/T9/red/). ws1n (the owner's 2-D H2 repro, ~10 min) and
+# ws-rank (n = 1/2/4) are nightly; ws-restart joins the s3 restart set.
+foreach(gate ws1 ws3 ws4 ws-restart)
+  add_test(NAME regression.s3.${gate}
+    COMMAND ${_regress} ${gate} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-${gate})
+  set_tests_properties(regression.s3.${gate} PROPERTIES LABELS "stage3"
+    ENVIRONMENT "${_regress_env}" TIMEOUT 3600)
+endforeach()
+# Stage-3 T10 solve-consistent transport gates (plan §12B, O16/S3-A14;
+# authored FAILING per §2.3 — the T9 binary rejects the `conservative`
+# token: records/T10/red/). sx3 (the owner's repro under conservative,
+# ~9 min), sx_rank and sx_seam (pd2's coupled roll lane under the
+# conservative override, r1-verified) are nightly.
+foreach(gate sx1 sx2 sx4 sx5 sx-restart)
+  add_test(NAME regression.s3.${gate}
+    COMMAND ${_regress} ${gate} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-${gate})
+  set_tests_properties(regression.s3.${gate} PROPERTIES LABELS "stage3"
+    ENVIRONMENT "${_regress_env}" TIMEOUT 3600)
+endforeach()
+add_test(NAME regression.s3.sx3
+  COMMAND ${_regress} sx3 ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-sx3)
+set_tests_properties(regression.s3.sx3 PROPERTIES LABELS "stage3_nightly"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 7200)
+add_test(NAME regression.s3.sx_rank
+  COMMAND ${_regress} sx-rank ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-sx-rank)
+set_tests_properties(regression.s3.sx_rank PROPERTIES LABELS "stage3_nightly;mpi"
+  ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 3600)
+add_test(NAME regression.s3.sx_seam
+  COMMAND ${_regress} pd2 --pd2-lane coupled ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-sx-seam)
+set_tests_properties(regression.s3.sx_seam PROPERTIES LABELS "stage3_nightly"
+  ENVIRONMENT
+  "${_regress_env};FREHG_STAGE3_OVERRIDES=transport.surface_update=conservative"
+  TIMEOUT 3600)
+
+add_test(NAME regression.s3.ws1n
+  COMMAND ${_regress} ws1n ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-ws1n)
+set_tests_properties(regression.s3.ws1n PROPERTIES LABELS "stage3_nightly"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 7200)
+add_test(NAME regression.s3.ws_rank
+  COMMAND ${_regress} ws-rank ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-ws-rank)
+set_tests_properties(regression.s3.ws_rank PROPERTIES LABELS "stage3_nightly;mpi"
+  ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 3600)
 
 add_test(NAME regression.s3.et-rank
   COMMAND ${_regress} et-rank ${_regress_args}

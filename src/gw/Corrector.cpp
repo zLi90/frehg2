@@ -422,6 +422,8 @@ void RichardsSolver::applyCoupledTopBookkeeping(real_t dtg) {
   Field2<real_t> topValue = topValue_;
   Field2<real_t> eta = cpl_.eta, dept = cpl_.dept, avail = cpl_.avail;
   Field2<real_t> seepAccum = cpl_.seepAccum, gain = cpl_.gain;
+  const bool bounceBook = cpl_.bounce.is_allocated();
+  Field2<real_t> bounce = bounceBook ? cpl_.bounce : Field2<real_t>();
   // Stage-3 T5 (W5.5): ET columns strip exactly the channel's flux —
   // any sign, no depth test (qVap != 0 only in mode 0 by construction).
   const bool et = etActive_;
@@ -456,6 +458,9 @@ void RichardsSolver::applyCoupledTopBookkeeping(real_t dtg) {
             dept(j, i) += d;
             avail(j, i) += d;
             gain(j, i) += d;
+            if (bounceBook) {
+              bounce(j, i) += d;
+            }
             sumB += d * az;
           }
         }

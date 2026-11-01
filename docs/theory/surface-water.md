@@ -21,6 +21,18 @@ Per step (legacy `solve.c:51` and `:97`; `driver::Simulation::run` →
 5. depth and face-geometry update, drag update, velocity update with
    wet/dry limiters, uy/vx interpolation.
 
+Under `transport.surface_update: conservative` (Stage-3 T10) the step
+additionally records the solve's continuity face volumes
+Q = Δt·As·E − S·(η_nb − η)^{n+1} immediately after step 3 (post-solve η,
+start-of-step face geometry — the same expression the boundary-flux
+audit books, so ΣQ per cell telescopes exactly to the solve's η update;
+velocity-BC faces carry Δt·As·u and outflow faces the S·drop release).
+The transport step advects the surface scalar with these volumes
+instead of the post-limit flow rates, so salt crosses the faces the
+wetting limiter closes after the solve — see
+[transport theory](transport.md). The recording is observation only:
+steps 1–5 are bitwise-unchanged in every mode.
+
 ## Equation provenance
 
 | Piece | Legacy provenance | Frehg2 implementation |
@@ -210,6 +222,45 @@ radiation BC kind, not to `kind: eta`). Gates: ob1 (the discrete-chain
 entrance head, all three lanes), ob2/ob4 unit, ob3 (ledger + tidal
 prism), ob5 (no-free-energy vs the zero-gradient contrast), ob8 (b6 under
 `external`, nightly record).
+
+## Thin-layer removals and their books (Stage-3 T9)
+
+The scheme removes water thinner than `min_depth` at four places (plan
+§12A, P1–P4). At T8 only P3 was booked; the others left the surface
+identity unbalanced by 1.2–3.2 % of the exchanged volume on coupled tidal
+runs (S3-A12; the T9 attribution in `stage3/records/T9/attribution.md`
+traces the vanished volume to P2).
+
+| Path | Where | What it removes | Booked as |
+|---|---|---|---|
+| P1 | `cflLimiter`, isolated-cell rule | water the solve put on a dry cell with no wet neighbour | `film_removed` (`film_removed_isolated_m3`) |
+| P2 | `cflLimiter`, small-depth rule | films thinner than `min_depth` after the solve | `film_removed` (`film_removed_small_m3`) |
+| P3 | `evapRain` clamp | the positive sub-`min_depth` remainder after rain and evaporation | inside `clamped` under `discard` (bitwise); `film_removed` under `store` (`film_removed_clamp_m3`) |
+| P4 | `Reallocate` vent branch | a sub-`min_depth` vent onto a dry cell | `realloc_dropped` under `discard`; under `store` deposited, then parked by the sweep (`vent_thin_m3`) |
+
+`updateDepth` reports any film with depth ≤ `min_depth` as dry while the
+film stays in η until P2 removes it at the next solve. The audit carries
+that volume as `film_pending` (instantaneous), so the identity closes at
+every row and not only at the instants a film happens to be absent.
+Prescribed-stage cells are the external reservoir: their storage is
+`stage_volume`, outside the identity's domain, and no film is booked on
+them.
+
+Under the paired store (`transport.surface_dryout: store`, the default)
+P1–P3 park instead of deleting, the vents of P4 are deposited, and an
+end-of-step sweep after the last η change parks any remaining
+0 < η − z_b ≤ `min_depth` film. That makes `film_pending` identically zero
+and "dry" exactly `dept = 0`. The parked water is returned at rewetting or
+once it reaches `wetting_face_depth` (`theory/transport.md`, R5/R6). The
+fields stay bitwise under `discard`: the bookings are read-only passes
+beside the pinned limiter kernels.
+
+**Release onset (S3-A13).** A store returned by R6 is a film of at least
+`wetting_face_depth` on a dry slope cell. Its first step runs on the lagged
+point-implicit drag of a dry cell, the same one-step wetting burst any
+dry-cell wetting produces. It logs CFL warnings up to about 1.25 (the gates
+cap them at 1.5); the b5 rain record logs 23 884 such warnings from rain
+alone, with a maximum of 83.8.
 
 ## Periodic lateral topology (Stage-3 T3)
 

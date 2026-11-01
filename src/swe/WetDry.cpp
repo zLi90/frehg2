@@ -198,6 +198,168 @@ void SurfaceSolver::cflLimiter() {
       });
 }
 
+void SurfaceSolver::bookLimiterRemovals() {
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const real_t cellArea = grid_.dx() * grid_.dy();
+  Field2<real_t> eta = eta_, pre = etaPreLimit_, flag = cflActive_, film = filmRemoved_;
+  Field2<real_t> isEtaBc = isEtaBc_;
+  // The limiter only lowers eta (onto the bed), so pre - eta >= 0; the
+  // isolated rule is the one that flags its cell (flags are consumed only
+  // later, in applyVelocityLimiters). Prescribed-stage cells are the
+  // reservoir, outside the identity's domain (boundary_outflow books the
+  // flux INTO them; stage_volume carries their storage): not booked here.
+  real_t isolated = 0.0;
+  real_t small = 0.0;
+  Kokkos::parallel_reduce(
+      "swe_book_limiter_removals",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i, real_t& iso, real_t& sml) {
+        const real_t removed = pre(j, i) - eta(j, i);
+        if (removed > 0.0 && isEtaBc(j, i) == 0.0) {
+          film(j, i) = removed;
+          if (flag(j, i) == 1.0) {
+            iso += removed * cellArea;
+          } else {
+            sml += removed * cellArea;
+          }
+        } else {
+          film(j, i) = 0.0;
+        }
+      },
+      isolated, small);
+  audit_.filmIsolated += isolated;
+  audit_.filmSmall += small;
+  if (pairedStore_) {
+    // W9.2 (R3): under the paired store the limiter's removals park — the
+    // water moves into V_s this step; the transport parks its salt with it.
+    Field2<real_t> store = waterStore_, parked = parkedVol_;
+    Kokkos::parallel_for(
+        "swe_park_limiter_removals",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {1, 1}, {nyl + 1, nxl + 1}),
+        KOKKOS_LAMBDA(const int j, const int i) {
+          const real_t v = film(j, i) * cellArea;
+          if (v > 0.0) {
+            store(j, i) += v;
+            parked(j, i) += v;
+          }
+        });
+  }
+}
+
+real_t SurfaceSolver::pendingFilmVolume() const {
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const real_t cellArea = grid_.dx() * grid_.dy();
+  const real_t minDepth = minDepth_;
+  Field2<real_t> eta = eta_, bottom = bottom_, isEtaBc = isEtaBc_;
+  real_t volume = 0.0;
+  Kokkos::parallel_reduce(
+      "swe_pending_film_volume",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i, real_t& sum) {
+        const real_t d = eta(j, i) - bottom(j, i);
+        if (d > 0.0 && d <= minDepth && isEtaBc(j, i) == 0.0) {
+          sum += d * cellArea;
+        }
+      },
+      volume);
+  return volume;
+}
+
+real_t SurfaceSolver::stageVolume() const {
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const real_t cellArea = grid_.dx() * grid_.dy();
+  Field2<real_t> dept = dept_, isEtaBc = isEtaBc_;
+  real_t volume = 0.0;
+  Kokkos::parallel_reduce(
+      "swe_stage_volume",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i, real_t& sum) {
+        if (isEtaBc(j, i) != 0.0) {
+          sum += dept(j, i) * cellArea;
+        }
+      },
+      volume);
+  return volume;
+}
+
+real_t SurfaceSolver::ownedStoreVolume() const {
+  if (!pairedStore_) {
+    return 0.0;
+  }
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  Field2<real_t> store = waterStore_;
+  real_t volume = 0.0;
+  Kokkos::parallel_reduce(
+      "swe_owned_store_volume",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i, real_t& sum) { sum += store(j, i); },
+      volume);
+  return volume;
+}
+
+void SurfaceSolver::sweepAndRelease() {
+  if (!pairedStore_) {
+    return;
+  }
+  // W9.2: after the last eta change of the surface step. (1) Park every
+  // film 0 < eta - bottom <= min_depth — updateDepth would report it dry,
+  // so after the sweep "water on the cell" is exactly dept > 0 (R8).
+  // (2) Release (R5): a cell holding water returns its whole store; (R6)
+  // a dry cell returns it once V_s / A reaches wetting_face_depth (and
+  // exceeds min_depth, so the returned water is not a pending film).
+  // Prescribed-stage cells are the reservoir: never parked, never fed.
+  const int nyl = grid_.nyLocal();
+  const int nxl = grid_.nxLocal();
+  const real_t cellArea = grid_.dx() * grid_.dy();
+  const real_t minDepth = minDepth_;
+  const real_t wtfh = wettingFaceDepth_;
+  Field2<real_t> eta = eta_, bottom = bottom_, isEtaBc = isEtaBc_, film = filmRemoved_;
+  Field2<real_t> store = waterStore_, parked = parkedVol_, released = releasedVol_;
+  real_t swept = 0.0;
+  real_t returned = 0.0;
+  Kokkos::parallel_reduce(
+      "swe_store_sweep_release",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i, real_t& sw, real_t& rel) {
+        if (isEtaBc(j, i) != 0.0) {
+          return;
+        }
+        real_t d = eta(j, i) - bottom(j, i);
+        if (d > 0.0 && d <= minDepth) {
+          const real_t v = d * cellArea;
+          store(j, i) += v;
+          parked(j, i) += v;
+          film(j, i) += d;
+          sw += v;
+          eta(j, i) = bottom(j, i);
+          d = 0.0;
+        }
+        const real_t vs = store(j, i);
+        if (vs > 0.0) {
+          const real_t hs = vs / cellArea;
+          if (d > minDepth || (hs >= wtfh && hs > minDepth)) {
+            eta(j, i) += hs;
+            released(j, i) += vs;
+            store(j, i) = 0.0;
+            rel += vs;
+          }
+        }
+      },
+      swept, returned);
+  audit_.filmSweep += swept;
+  audit_.storeRelease += returned;
+}
+
 void SurfaceSolver::applyVelocityLimiters() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();

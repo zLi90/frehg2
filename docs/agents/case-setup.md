@@ -157,8 +157,12 @@ Generate these files with small Python snippets in the case directory
    volumetric face fluxes, not Darcy velocities (a preserved legacy
    quirk), so they are not directly the physical dispersivity.
 10. **Surface salinity under wetting/drying**: set
-    `transport.surface_update: consistent` for tidal flats, marshes and
-    wind setdown. The `legacy` default (golden-pinned) can concentrate
+    `transport.surface_update: conservative` for tidal flats, marshes and
+    wind setdown (it includes `consistent`'s correction and further moves
+    salt with the water the free-surface solve actually moved, so salt
+    crosses drying faces with its water and `surf_anchor` falls to the
+    solve-residual class; `consistent` remains the lighter half-step).
+    The `legacy` default (golden-pinned) can concentrate
     draining thin films above every input value and gain or lose salt
     through the `surf_anchor` audit column. **Coupled salinity**: also set
     `transport.subsurface_update: consistent`, and with density coupling
@@ -266,11 +270,18 @@ ingredients and their coupling rules:
   exposed ones; they split each cell's time exactly, so intertidal cells
   switch channels through the tide with no double counting (check
   `wet_time + soil_evaporation_time <= t` in the `/atmosphere` outputs);
-- with salinity: `surface_update: consistent` and `subsurface_update:
-  consistent` are REQUIRED (the schema says so), and `surface_dryout`
+- with salinity: `surface_update: consistent` (or `conservative`) and
+  `subsurface_update: consistent` are REQUIRED (the schema says so), and `surface_dryout`
   must stay `store` (the shipped default since T8; an explicit `discard`
   is rejected) — evaporation then removes water only, drying cells bank
   their salt in `salt_store` and release it on rewet;
+- tidal salinity runs with or without ET: since T9 `surface_dryout: store`
+  is the paired water–salt store, safe on coupled seepage faces (thin
+  films park their water WITH its salt, so no rewetting film can exceed
+  the source salinity — the v30 matrix's interim explicit `discard` can go;
+  request `water_store` + `film_removal_rate` to see it work). The mass
+  audit closes at every row with the T9 columns (`film_removed`,
+  `film_pending`, `stage_volume`, `store_volume`; `docs/user-guide/output.md`);
 - analysis: use the interval-mean `/atmosphere` rates and `seepage_rate`
   (never the per-step `seepage` snapshot); the budgets live in
   `gw_mass_audit` (`soil_evaporation`, `soil_evaporation_unrealised`) and

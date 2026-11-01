@@ -48,6 +48,7 @@ result (README).
 | `transport.subsurface_update` (`legacy` / `consistent`) | TransportModule.ConsistentSubsurfaceUpdateClosesTheSubcycledLedger; TransportModule.ConsistentSubsurfaceUpdateReducesToLegacyWithoutSubcycling; ConfigTest.SubsurfaceUpdateAndReallocationGradientParseAndRoundTrip; ConfigTest.RejectsConsistentSubsurfaceUpdateWithoutGroundwater |
 | `groundwater.density_coupling.reallocation_gradient` (`freshwater` / `density`) | TransportModule.DensityReallocationGradientKeepsInfiltratedSalt; ConfigTest.SubsurfaceUpdateAndReallocationGradientParseAndRoundTrip |
 | `transport.surface_update` (`legacy` / `consistent`) | TransportModule.ConsistentSurfaceUpdateKeepsDrainingFilmsWithinTheInputRange; TransportModule.ConsistentSurfaceUpdateShrinksTheAnchorInSloshingFlow; ConfigTest.SurfaceUpdateParsesRoundTripsAndRejectsUnknownValues |
+| `transport.surface_update: conservative` (Stage-3 T10) | SweModule.SolveFaceVolumesTelescope; TransportModule.SolveConsistentUniformStaysUniform; TransportModule.SolveConsistentDryingFaceCarriesSalt; regression.s3.sx1/sx2/sx4/sx5/sx-restart (per-PR), sx3/sx_rank/sx_seam (nightly) |
 | Atmosphere block (met forcing incl. radiation terms) | regression.g7; MetForcing.SamplesConstantsAndFoldsRelativeHumidity |
 | `atmosphere.wind_speed_floor` | MetForcing.WindSpeedFloorBoundsStillAir |
 | Wind stress (`surface_water.wind`) | regression.g9; regression.g10; regression.wind_orient |
@@ -80,6 +81,16 @@ result (README).
 | ET limiters and r_a laws (alpha_barton / beta_lee_pielke / none; liu2006 / fao56 / log_profile) | AtmEt.AeroResistanceLaws; AtmEt.LeePielkeBeta; AtmEt.ThetaFcDefaultIsRetentionAt330cm; unit.et_gates.negative (two-way chain check) |
 | Time-basis complementarity (no double count across channels) | regression.s3.et3 (wet+soil <= t; the v2.0 window-lag real negative); regression.s3.et9 (3 tidal cycles, per cell) |
 | Surface salt store `transport.surface_dryout: store` (O4, D6) | regression.s3.et8 (b: capture at dry-out + rewet release; c: the v2.0 delete loss as the real negative); salt_store output + surf_store audit column |
+| Thin-layer removal books P1–P4 + `film_removed`/`film_pending`/`stage_volume` audit columns (Stage-3 T9 W9.1) | SweModule.ThinLayerRemovalsBookedPerPath; regression.s3.ws1 (P1 recorded, P4 thin vents floor; the discard twin's identity at every row + the film_removed-dropped negative); regression.s3.ws4 (P2, P3 per-lane books); regression.s3.default_bitwise (mass_audit T8 prefix bitwise) |
+| Paired water–salt store × no ET, coupled seepage face (S3-A12 / O15) | regression.s3.ws1 (source bound 35 psu, I2, ws2 ledgers; red 494 psu on T8); regression.s3.ws1n (the owner's H2 repro; red 72 854 psu) |
+| Paired store × legacy evaporation | regression.s3.ws3 (d: Σ(E − clamped) + V_s = V0, M_s = M0, V_s monotone while dry); regression.s3.ws4 (P3 lanes) |
+| Paired store × ET open water | regression.s3.ws3 (a-ET bitwise vs T8; b: Σ E + V_s = V0); regression.s3.et8, et9, et9-veg, et-orient (W9.6 re-measured) |
+| Paired store × rain | regression.s3.ws3 (a: store ≡ discard bitwise; c: the rewet closed form); SweModule.StoreReturnsAtWettingFaceDepth |
+| Paired store × surface-only | regression.s3.ws3, ws4; TransportStore.* (unit) |
+| Paired store × periodic | regression.s3.et9 (periodic-x tidal flat, explicit store); regression.s3.pd2 (pd2-coupled resolves store) |
+| Paired store × temperature (R9) | regression.s3.ws4 (P2T/P3T: parked heat = T·V_s); TransportStore.TemperatureParksWithItsWater |
+| Paired store × restart | regression.s3.ws-restart (checkpoint with ≥ 10 parked cells; water_store/salt_store/fields bitwise) |
+| Paired store × rank | regression.s3.ws_rank (stable slope base: S3-A6 classes + Σ stores; ws1 at n = 2/4: source bound, I2, ledgers — S3-A13) |
 | Subsurface ET salt (W5.8 exact top factor; the cauchy-style zero scalar flux) | regression.s3.et8 (a: per-cell c·theta identity, adjust/anchor at rounding) |
 | Held-seepage salt (W5.9, D9) | regression.s3.et8 (d: full-identity closure, surf_adjust == 0 exactly, store > floor while held) |
 | ET x coupled / external stage / periodic / salinity (the everything smoke) | regression.s3.et9 (+ the noET lane BITWISE vs its T5-start pin — T5 default-neutrality by execution) |

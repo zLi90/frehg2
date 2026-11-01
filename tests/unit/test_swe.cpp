@@ -60,6 +60,7 @@ struct MiniSim {
   void step(real_t t) {
     swe->beginStep(t);
     swe->solveFreeSurface();
+    swe->sweepAndRelease();  // the driver's order (T9 W9.2; no-op unless paired)
     swe->updateVelocity();
   }
 };
@@ -828,6 +829,111 @@ TEST(WindForcing, NorthAngleRotatesTheCompassIntoTheGrid) {
 
   EXPECT_DOUBLE_EQ(a.sample(0.0).omega, b.sample(0.0).omega);
   EXPECT_DOUBLE_EQ(a.sample(0.0).speed, b.sample(0.0).speed);
+}
+
+// ---------------------------------------------------------------------------
+// Stage-3 T9 (plan §12A, gate ws0): the thin-layer removal books and the
+// paired water store's return rule. States are built so the solve leaves
+// eta untouched (uniform eta, zero gradients), so every booked volume has
+// a closed form.
+// ---------------------------------------------------------------------------
+
+TEST(SweModule, ThinLayerRemovalsBookedPerPath) {
+  const real_t md = 1.0e-5;
+  {
+    // P1 and P2: a 5 x 1 channel at uniform eta = 0. Cell 0 is deep (wet);
+    // cells 1-4 hold 0.5 min_depth films (dry to updateDepth). Cell 1 has a
+    // wet neighbour, so the isolated rule skips it and the small-depth rule
+    // removes its film (P2); cells 2-4 have none (P1).
+    const std::vector<real_t> bed = {-0.1, -0.5 * md, -0.5 * md, -0.5 * md, -0.5 * md};
+    const std::string dir = writeRaster("t9_p12_bed.dat", bed);
+    MiniSim sim;
+    sim.cfg = baseConfig(5, 1, 1.0, 1.0);
+    sim.cfg.configDir = dir;
+    sim.cfg.domain.bottomElevation.fromFile = true;
+    sim.cfg.domain.bottomElevation.file = "t9_p12_bed.dat";
+    sim.cfg.initialConditions.surface.eta.constant = 0.0;
+    sim.cfg.surfaceWater.minDepth = md;
+    sim.cfg.surfaceWater.wettingFaceDepth = md;
+    sim.build();
+    std::vector<real_t> eta0(6, 0.0);
+    for (int i = 1; i <= 5; ++i) {
+      eta0[static_cast<std::size_t>(i)] = interiorValue(sim.swe->eta(), 1, i);
+    }
+    sim.step(1.0);
+    const frehg::swe::SurfaceStepAudit& a = sim.swe->audit();
+    // Booked = removed, exactly (the kernel's own arithmetic, area 1): the
+    // eta drop of the P2 cell and of the three P1 cells.
+    const auto drop = [&](int i) {
+      return eta0[static_cast<std::size_t>(i)] - interiorValue(sim.swe->eta(), 1, i);
+    };
+    EXPECT_NEAR(a.filmSmall, drop(2), 1.0e-14 * 0.5 * md);
+    EXPECT_NEAR(a.filmIsolated, drop(3) + drop(4) + drop(5), 1.0e-14 * 1.5 * md);
+    // Against the nominal 0.5 min_depth films only to the offset frame's
+    // rounding: depths are differences of elevations near the 0.1 m
+    // shift, ulp(0.1) / 5e-6 ~ 3e-12 relative.
+    EXPECT_NEAR(a.filmSmall, 0.5 * md, 1.0e-11 * 0.5 * md);
+    EXPECT_NEAR(a.filmIsolated, 3.0 * 0.5 * md, 1.0e-11 * 1.5 * md);
+    EXPECT_EQ(a.filmClamp, 0.0);
+    // The films are gone from eta; nothing pending.
+    for (int i = 2; i <= 5; ++i) {
+      EXPECT_DOUBLE_EQ(interiorValue(sim.swe->eta(), 1, i),
+                       interiorValue(sim.swe->bottom(), 1, i));
+    }
+    EXPECT_EQ(sim.swe->pendingFilmVolume(), 0.0);
+  }
+  {
+    // P3: one wet 3e-5 m cell loses (3e-5 - 0.5 md) to prescribed
+    // evaporation; the clamp deletes the 0.5 min_depth leftover (positive
+    // part — informational under discard, inside clamped).
+    MiniSim sim;
+    sim.cfg = baseConfig(1, 1, 1.0, 1.0);
+    sim.cfg.initialConditions.surface.eta.constant = 3.0e-5;
+    sim.cfg.surfaceWater.minDepth = md;
+    sim.cfg.surfaceWater.wettingFaceDepth = md;
+    sim.cfg.surfaceWater.evaporation.constant = 3.0e-5 - 0.5 * md;
+    sim.build();
+    sim.step(1.0);
+    const frehg::swe::SurfaceStepAudit& a = sim.swe->audit();
+    EXPECT_NEAR(a.filmClamp, 0.5 * md, 1.0e-14 * 0.5 * md);
+    EXPECT_EQ(a.filmIsolated, 0.0);
+    EXPECT_EQ(a.filmSmall, 0.0);
+    // Discard: the clamp's signed total holds the removal (clamped < 0).
+    EXPECT_NEAR(a.clampVolume, -0.5 * md, 1.0e-14 * 0.5 * md);
+  }
+}
+
+TEST(SweModule, StoreReturnsAtWettingFaceDepth) {
+  // R1/R6 under the paired store: rain of 0.8 min_depth per step on a dry
+  // 1 x 1 cell is a sub-min_depth leftover every step, so it parks (P3);
+  // V_s grows by 0.8e-5 m per step and returns to eta at the step it
+  // reaches wetting_face_depth = 5e-5 m (step 7: 5.6e-5 m), all at once.
+  const real_t md = 1.0e-5;
+  const real_t h = 0.8e-5;
+  MiniSim sim;
+  sim.cfg = baseConfig(1, 1, 1.0, 1.0);
+  sim.cfg.modules.transport = true;  // the store is active with transport
+  sim.cfg.transport.surfaceDryout = frehg::TransportConfig::SurfaceDryout::Store;
+  sim.cfg.initialConditions.surface.eta.constant = 0.0;
+  sim.cfg.surfaceWater.minDepth = md;
+  sim.cfg.surfaceWater.wettingFaceDepth = 5.0e-5;
+  sim.cfg.surfaceWater.rainfall.constant = h;
+  sim.build();
+  ASSERT_TRUE(sim.swe->pairedStore());
+  for (int n = 1; n <= 6; ++n) {
+    sim.step(static_cast<real_t>(n));
+    EXPECT_NEAR(interiorValue(sim.swe->waterStore(), 1, 1), n * h, 1.0e-14 * n * h);
+    EXPECT_EQ(interiorValue(sim.swe->depth(), 1, 1), 0.0);
+    EXPECT_NEAR(sim.swe->audit().filmClamp, h, 1.0e-14 * h);
+    EXPECT_EQ(sim.swe->audit().storeRelease, 0.0);
+    EXPECT_EQ(sim.swe->audit().clampVolume, 0.0);  // only the created part
+  }
+  sim.step(7.0);
+  EXPECT_EQ(interiorValue(sim.swe->waterStore(), 1, 1), 0.0);
+  EXPECT_NEAR(interiorValue(sim.swe->depth(), 1, 1), 7.0 * h, 1.0e-14 * 7.0 * h);
+  EXPECT_NEAR(sim.swe->audit().storeRelease, 7.0 * h, 1.0e-14 * 7.0 * h);
+  // Below wetting_face_depth a dry store stays parked: one fewer step of
+  // rain would not have released (checked above, steps 1-6).
 }
 
 }  // namespace

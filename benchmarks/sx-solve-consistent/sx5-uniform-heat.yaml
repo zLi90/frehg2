@@ -1,0 +1,482 @@
+# sx5 — sx1 with modules.temperature at a uniform 20 C (Stage-3 plan §12B,
+# C6/R9): the temperature instance reads the same solve face volumes, so a
+# uniform temperature stays uniform through wetting/drying and the heat
+# ledger closes without an anchor-class correction.
+simulation:
+  id: sx5-uniform-heat
+  title: Stage-3 sx5 uniform temperature through wetting/drying (solve-consistent)
+domain:
+  nx: 1
+  ny: 64
+  nz: 16
+  dx: 1.0
+  dy: 0.5
+  dz: 0.16907963191058278
+  dz_stretch: 1.05
+  bottom_elevation:
+    file: input/ws1_dem.dat
+  follow_terrain: true
+  terrain_layers: scaled
+time:
+  dt: 0.5
+  t_end: 7200
+  output_interval: 60
+modules:
+  surface_water: true
+  groundwater: true
+  transport: true
+  temperature: true
+surface_water:
+  gravity: 9.81
+  friction:
+    law: manning
+    coefficient:
+      constant: 0.025
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 0.0005
+  wind:
+    enabled: false
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 0.5
+    dt_min: 0.01
+    dt_max: 5.0
+    courant_max: 2.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  reallocation_surplus: redistribute
+  density_coupling:
+    enabled: true
+    reallocation_gradient: density
+soil:
+  types:
+  - name: lnk00
+    ksx: 0.0
+    ksy: 1.0154148565593389e-05
+    ksz: 1.0154148565593389e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk01
+    ksx: 0.0
+    ksy: 1.6786851564378635e-05
+    ksz: 1.6786851564378635e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk02
+    ksx: 0.0
+    ksy: 2.212160910361363e-05
+    ksz: 2.212160910361363e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk03
+    ksx: 0.0
+    ksy: 2.7119255959868998e-05
+    ksz: 2.7119255959868998e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk04
+    ksx: 0.0
+    ksy: 3.2058742412096525e-05
+    ksz: 3.2058742412096525e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk05
+    ksx: 0.0
+    ksy: 3.708165732017055e-05
+    ksz: 3.708165732017055e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk06
+    ksx: 0.0
+    ksy: 4.228455414665947e-05
+    ksz: 4.228455414665947e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk07
+    ksx: 0.0
+    ksy: 4.774813784916975e-05
+    ksz: 4.774813784916975e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk08
+    ksx: 0.0
+    ksy: 5.3550282330606865e-05
+    ksz: 5.3550282330606865e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk09
+    ksx: 0.0
+    ksy: 5.977392341337861e-05
+    ksz: 5.977392341337861e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk10
+    ksx: 0.0
+    ksy: 6.651355721296077e-05
+    ksz: 6.651355721296077e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk11
+    ksx: 0.0
+    ksy: 7.388215316429965e-05
+    ksz: 7.388215316429965e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk12
+    ksx: 0.0
+    ksy: 8.201988023201061e-05
+    ksz: 8.201988023201061e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk13
+    ksx: 0.0
+    ksy: 9.110631888799527e-05
+    ksz: 9.110631888799527e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk14
+    ksx: 0.0
+    ksy: 0.0001013787452416519
+    ksz: 0.0001013787452416519
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk15
+    ksx: 0.0
+    ksy: 0.00011316103464043581
+    ksz: 0.00011316103464043581
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk16
+    ksx: 0.0
+    ksy: 0.00012691186770384782
+    ksz: 0.00012691186770384782
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk17
+    ksx: 0.0
+    ksy: 0.00014331013950865206
+    ksz: 0.00014331013950865206
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk18
+    ksx: 0.0
+    ksy: 0.0001634178672624401
+    ksz: 0.0001634178672624401
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk19
+    ksx: 0.0
+    ksy: 0.000189021929679076
+    ksz: 0.000189021929679076
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk20
+    ksx: 0.0
+    ksy: 0.00022345028059715964
+    ksz: 0.00022345028059715964
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk21
+    ksx: 0.0
+    ksy: 0.0002739314904913058
+    ksz: 0.0002739314904913058
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk22
+    ksx: 0.0
+    ksy: 0.0003609852229037223
+    ksz: 0.0003609852229037223
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: lnk23
+    ksx: 0.0
+    ksy: 0.0005967812381977695
+    ksz: 0.0005967812381977695
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  - name: base
+    ksx: 0.0
+    ksy: 7.784475161383021e-05
+    ksz: 7.784475161383021e-05
+    theta_s: 0.41
+    theta_r: 0.15
+    vg_alpha: 2.0
+    vg_n: 1.41
+  map:
+    file: input/ws1_soil.dat
+coupling:
+  mode: subcycled
+initial_conditions:
+  surface:
+    eta:
+      constant: 0.0
+  groundwater:
+    water_table:
+      file: input/ws1_wt.dat
+  transport:
+    surface:
+      constant: 35.0
+    groundwater:
+      constant: 35.0
+  temperature:
+    surface:
+      constant: 20.0
+    groundwater:
+      constant: 20.0
+boundary_conditions:
+- name: tide-eta
+  region:
+    polygon:
+    - - -1.0
+      - 31.625
+    - - 2.0
+      - 31.625
+    - - 2.0
+      - 33.0
+    - - -1.0
+      - 33.0
+  target: surface
+  kind: eta
+  value:
+    series:
+      file: input/ws1_tide.dat
+  inflow:
+    closure: external
+- name: tide-salt
+  region:
+    polygon:
+    - - -1.0
+      - 31.625
+    - - 2.0
+      - 31.625
+    - - 2.0
+      - 33.0
+    - - -1.0
+      - 33.0
+  target: surface
+  kind: scalar_value
+  value:
+    constant: 35.0
+- name: tide-temperature
+  region:
+    polygon:
+    - - -1.0
+      - 31.625
+    - - 2.0
+      - 31.625
+    - - 2.0
+      - 33.0
+    - - -1.0
+      - 33.0
+  target: surface
+  kind: scalar_value
+  scalar: temperature
+  value:
+    constant: 20.0
+- name: x-walls
+  region:
+    polygon:
+    - - -1.0
+      - -1.0
+    - - 2.0
+      - -1.0
+    - - 2.0
+      - 31.625
+    - - -1.0
+      - 31.625
+  target: surface
+  kind: velocity
+  value:
+    constant: 0.0
+- name: inland-head
+  region:
+    polygon:
+    - - -1.0
+      - -1.0
+    - - 2.0
+      - -1.0
+    - - 2.0
+      - 0.375
+    - - -1.0
+      - 0.375
+  target: groundwater_side
+  kind: head
+  value:
+    hydrostatic:
+      eta: 0.45
+- name: inland-salinity
+  region:
+    polygon:
+    - - -1.0
+      - -1.0
+    - - 2.0
+      - -1.0
+    - - 2.0
+      - 0.375
+    - - -1.0
+      - 0.375
+  target: groundwater_side
+  kind: scalar_value
+  value:
+    constant: 35.0
+- name: seaward-head
+  region:
+    polygon:
+    - - -1.0
+      - 31.625
+    - - 2.0
+      - 31.625
+    - - 2.0
+      - 33.0
+    - - -1.0
+      - 33.0
+  target: groundwater_side
+  kind: head
+  value:
+    hydrostatic:
+      eta: 0.0
+- name: seaward-salinity
+  region:
+    polygon:
+    - - -1.0
+      - 31.625
+    - - 2.0
+      - 31.625
+    - - 2.0
+      - 33.0
+    - - -1.0
+      - 33.0
+  target: groundwater_side
+  kind: scalar_value
+  value:
+    constant: 35.0
+transport:
+  scheme:
+    advection: superbee
+  surface_diffusivity:
+    x: 0.0
+    y: 1.0e-10
+  dispersion:
+    longitudinal: 0.002
+    transverse: 0.0004
+    molecular: 1.0e-10
+  subsurface_update: consistent
+  surface_update: conservative
+  surface_dryout: store
+output:
+  filename: out/output.h5
+  monitor_interval: 60
+  variables:
+    surface:
+    - eta
+    - depth
+    - water_store
+    - film_removal_rate
+    transport:
+    - concentration
+    - concentration_surface
+    - salt_store
+    temperature:
+    - temperature_surface
+  monitors:
+  - name: p_24
+    i: 0
+    j: 24
+    variables:
+    - eta
+    - depth
+    - concentration_surface
+  - name: p_28
+    i: 0
+    j: 28
+    variables:
+    - eta
+    - depth
+    - concentration_surface
+  - name: p_32
+    i: 0
+    j: 32
+    variables:
+    - eta
+    - depth
+    - concentration_surface
+  - name: p_36
+    i: 0
+    j: 36
+    variables:
+    - eta
+    - depth
+    - concentration_surface
+  - name: p_40
+    i: 0
+    j: 40
+    variables:
+    - eta
+    - depth
+    - concentration_surface
+  - name: p_44
+    i: 0
+    j: 44
+    variables:
+    - eta
+    - depth
+    - concentration_surface
+  checkpoint:
+    interval: 1800
+temperature:
+  scheme:
+    advection: superbee
+  thermal_conductivity: 1.5
+  heat_capacity_solid: 2200000.0
+  heat_capacity_water: 4180000.0

@@ -56,6 +56,15 @@ void ScalarSolver::stageSurfaceFarNeighbors() {
 }
 
 void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
+  if (conservativeSurface_) {
+    stepSurfaceImpl<true>(t, dt, rain, evap);
+  } else {
+    stepSurfaceImpl<false>(t, dt, rain, evap);
+  }
+}
+
+template <bool QVOL>
+void ScalarSolver::stepSurfaceImpl(real_t t, real_t dt, real_t rain, real_t evap) {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const Grid::EdgeTopology topo = grid_.edgeTopology();
@@ -112,10 +121,22 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   Field2<real_t> Asx = surf_.asx, Asy = surf_.asy, rainMask = surf_.rainMask;
   Field2<real_t> qss = coupled ? cpl_.qss : Field2<real_t>();
   Field2<real_t> vent = consistentExchange ? cpl_.ventVolume : Field2<real_t>();
+  // Stage-3 T10 (plan §12B C3): the coupler's exact applied-deposit book —
+  // used for the flux volume under QVOL in place of the qss re-derivation.
+  Field2<real_t> cplGain = (QVOL && coupled) ? cpl_.gain : Field2<real_t>();
+  Field2<real_t> cplBounce = (QVOL && coupled) ? cpl_.bounce : Field2<real_t>();
   // Stage-3 T5: the salt store (W5.7), the ET per-cell dilution volumes
   // (D8), and the held-seepage salt split (W5.9).
   const bool store = store_;
   Field2<real_t> sStore = store ? sStore_ : Field2<real_t>();
+  // Stage-3 T10 (W10.2, plan §12B C2): under surface_update: conservative
+  // the advection, upwind signs, superbee weights and the flux volume all
+  // come from the free-surface solve's own continuity face volumes — the
+  // water that actually moved. legacy/consistent read Fu/uu through the
+  // same locals with identical values (no arithmetic: bitwise-safe).
+  Field2<real_t> qSolX = QVOL ? surf_.qxSolve : Field2<real_t>();
+  Field2<real_t> qSolY = QVOL ? surf_.qySolve : Field2<real_t>();
+  Field2<real_t> stageMask = QVOL ? surf_.isEtaBc : Field2<real_t>();
   const bool etSurf = surf_.etActive && !spec_.isTemperature;
   Field2<real_t> etRain = etSurf ? surf_.rainAdded : Field2<real_t>();
   Field2<real_t> etEvap = etSurf ? surf_.evapRemoved : Field2<real_t>();
@@ -154,73 +175,156 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
 
         real_t mass = s(j, i) * vsn(j, i);
 
+        const real_t flowE = QVOL ? qSolX(j, i) : Fu(j, i);
+        const real_t flowW = QVOL ? qSolX(j, i - 1) : Fu(j, i - 1);
+        const real_t flowN = QVOL ? qSolY(j, i) : Fv(j, i);
+        const real_t flowS = QVOL ? qSolY(j - 1, i) : Fv(j - 1, i);
+        const real_t velE =
+            QVOL ? ((Asx(j, i) > 0.0) ? qSolX(j, i) / (dt * Asx(j, i)) : 0.0)
+                 : uu(j, i);
+        const real_t velW =
+            QVOL ? ((Asx(j, i - 1) > 0.0) ? qSolX(j, i - 1) / (dt * Asx(j, i - 1)) : 0.0)
+                 : uu(j, i - 1);
+        const real_t velN =
+            QVOL ? ((Asy(j, i) > 0.0) ? qSolY(j, i) / (dt * Asy(j, i)) : 0.0)
+                 : vv(j, i);
+        const real_t velS =
+            QVOL ? ((Asy(j - 1, i) > 0.0) ? qSolY(j - 1, i) / (dt * Asy(j - 1, i)) : 0.0)
+                 : vv(j - 1, i);
+
+        // T10 (QVOL): infiltration concentration for a start-of-step-dry
+        // cell (set in the pass-through block below; unused otherwise).
+        real_t qvolInfilC = 0.0;
+        bool qvolDryStart = false;
+        (void)qvolInfilC;
+        (void)qvolDryStart;
+
         // x advection (scalar.c:45-77).
         real_t sip;
-        if (Fu(j, i) > 0.0) {
+        if (flowE > 0.0) {
           sip = s(j, i);
           if (superbee) {
-            sip = tvdSuperbee(s(j, i + 1), s(j, i), s(j, i - 1), uu(j, i), dx, dt);
+            sip = tvdSuperbee(s(j, i + 1), s(j, i), s(j, i - 1), velE, dx, dt);
           }
         } else {
           sip = s(j, i + 1);
           if (superbee && !eastCell) {
-            sip = tvdSuperbee(s(j, i), s(j, i + 1), sIp2, uu(j, i), dx, dt);
+            sip = tvdSuperbee(s(j, i), s(j, i + 1), sIp2, velE, dx, dt);
           }
         }
         real_t sim;
-        if (Fu(j, i - 1) > 0.0) {
+        if (flowW > 0.0) {
           sim = s(j, i - 1);
           if (superbee && !westCell) {
-            sim = tvdSuperbee(s(j, i), s(j, i - 1), sIm2, uu(j, i - 1), dx, dt);
+            sim = tvdSuperbee(s(j, i), s(j, i - 1), sIm2, velW, dx, dt);
           }
         } else {
           sim = s(j, i);
           if (superbee) {
-            sim = tvdSuperbee(s(j, i - 1), s(j, i), s(j, i + 1), uu(j, i - 1), dx, dt);
+            sim = tvdSuperbee(s(j, i - 1), s(j, i), s(j, i + 1), velW, dx, dt);
           }
         }
         // y advection (scalar.c:78-110).
         real_t sjp;
-        if (Fv(j, i) > 0.0) {
+        if (flowN > 0.0) {
           sjp = s(j, i);
           if (superbee) {
-            sjp = tvdSuperbee(s(j + 1, i), s(j, i), s(j - 1, i), vv(j, i), dy, dt);
+            sjp = tvdSuperbee(s(j + 1, i), s(j, i), s(j - 1, i), velN, dy, dt);
           }
         } else {
           sjp = s(j + 1, i);
           if (superbee && !northCell) {
-            sjp = tvdSuperbee(s(j, i), s(j + 1, i), sJp2, vv(j, i), dy, dt);
+            sjp = tvdSuperbee(s(j, i), s(j + 1, i), sJp2, velN, dy, dt);
           }
         }
         real_t sjm;
-        if (Fv(j - 1, i) > 0.0) {
+        if (flowS > 0.0) {
           sjm = s(j - 1, i);
           if (superbee && !southCell) {
-            sjm = tvdSuperbee(s(j, i), s(j - 1, i), sJm2, vv(j - 1, i), dy, dt);
+            sjm = tvdSuperbee(s(j, i), s(j - 1, i), sJm2, velS, dy, dt);
           }
         } else {
           sjm = s(j, i);
           if (superbee) {
-            sjm = tvdSuperbee(s(j - 1, i), s(j, i), s(j + 1, i), vv(j - 1, i), dy, dt);
+            sjm = tvdSuperbee(s(j - 1, i), s(j, i), s(j + 1, i), velS, dy, dt);
           }
         }
-        mass += dt * (-Fu(j, i) * sip + Fu(j, i - 1) * sim - Fv(j, i) * sjp +
-                      Fv(j - 1, i) * sjm);
+        if constexpr (QVOL) {
+          // C2 (pass-through front): the implicit solve can fill a cell
+          // that started the step dry AND push water onward in the same
+          // step; the outflow face's upwind value is then the stale dry
+          // zero, so the water would move on without its salt (the cell
+          // concentrates, downstream dilutes — the J1-breaking seed, found
+          // on sx1 at the swash front). The water passing through a
+          // start-of-step-dry cell IS this step's upstream water, so the
+          // face carries the same-axis far-upwind value instead — one
+          // level, both adjacent iterations compute the identical
+          // substitute (the distance-2 reads use the superbee far staging,
+          // with its edge guards).
+          const bool dry0C = etan(j, i) - bottom(j, i) <= 0.0;
+          if (flowE > 0.0) {
+            if (dry0C) {
+              sip = s(j, i - 1);
+            }
+          } else if (flowE < 0.0 && !eastCell &&
+                     etan(j, i + 1) - bottom(j, i + 1) <= 0.0) {
+            sip = sIp2;
+          }
+          if (flowW > 0.0) {
+            if (!westCell && etan(j, i - 1) - bottom(j, i - 1) <= 0.0) {
+              sim = sIm2;
+            }
+          } else if (flowW < 0.0 && dry0C) {
+            sim = s(j, i + 1);
+          }
+          if (flowN > 0.0) {
+            if (dry0C) {
+              sjp = s(j - 1, i);
+            }
+          } else if (flowN < 0.0 && !northCell &&
+                     etan(j + 1, i) - bottom(j + 1, i) <= 0.0) {
+            sjp = sJp2;
+          }
+          if (flowS > 0.0) {
+            if (!southCell && etan(j - 1, i) - bottom(j - 1, i) <= 0.0) {
+              sjm = sJm2;
+            }
+          } else if (flowS < 0.0 && dry0C) {
+            sjm = s(j + 1, i);
+          }
+          // C2 (bed face of a pass-through front): the same stale-zero
+          // mechanism drains through the bed when the cell wets and
+          // infiltrates in one step — the exchange term below then carries
+          // the inflow mix instead of s(j, i).
+          const real_t inVol = Kokkos::fmax(flowW, 0.0) + Kokkos::fmax(-flowE, 0.0) +
+                               Kokkos::fmax(flowS, 0.0) + Kokkos::fmax(-flowN, 0.0);
+          if (dry0C && inVol > 0.0) {
+            qvolInfilC = (Kokkos::fmax(flowW, 0.0) * sim + Kokkos::fmax(-flowE, 0.0) * sip +
+                          Kokkos::fmax(flowS, 0.0) * sjm + Kokkos::fmax(-flowN, 0.0) * sjp) /
+                         inVol;
+            qvolDryStart = true;
+          }
+          // C2: the salt moves with the water the solve moved.
+          mass += -flowE * sip + flowW * sim - flowN * sjp + flowS * sjm;
+        } else {
+          mass += dt * (-Fu(j, i) * sip + Fu(j, i - 1) * sim - Fv(j, i) * sjp +
+                        Fv(j - 1, i) * sjm);
+        }
 
         // Advective mass through the global-edge faces (see TransportAudit):
         // the closed-edge fold keeps the water in, but the boundary-face
         // velocities are live and the scalar crosses them.
         if (westCell) {
-          sumBoundary += dt * Fu(j, i - 1) * sim;
+          sumBoundary += QVOL ? flowW * sim : dt * Fu(j, i - 1) * sim;
         }
         if (eastCell) {
-          sumBoundary -= dt * Fu(j, i) * sip;
+          sumBoundary -= QVOL ? flowE * sip : dt * Fu(j, i) * sip;
         }
         if (southCell) {
-          sumBoundary += dt * Fv(j - 1, i) * sjm;
+          sumBoundary += QVOL ? flowS * sjm : dt * Fv(j - 1, i) * sjm;
         }
         if (northCell) {
-          sumBoundary -= dt * Fv(j, i) * sjp;
+          sumBoundary -= QVOL ? flowN * sjp : dt * Fv(j, i) * sjp;
         }
 
         // Diffusion (scalar.c:114-119).
@@ -275,7 +379,13 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
               if (exfNew(j, i) > 0.0) {
                 rate = exfNew(j, i) / dt * sKp(j, i);
               } else if (qss(j, i) < 0.0) {
-                rate = qss(j, i) * s(j, i);
+                real_t cInf = s(j, i);
+                if constexpr (QVOL) {
+                  if (qvolDryStart) {
+                    cInf = qvolInfilC;
+                  }
+                }
+                rate = qss(j, i) * cInf;
               }
               if (dept(j, i) > 0.0) {
                 rate += diffusive * (sKp(j, i) - s(j, i));
@@ -289,7 +399,13 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
               if (qss(j, i) > 0.0 && dept(j, i) > 0.0) {
                 rate = qss(j, i) * sKp(j, i);
               } else if (qss(j, i) < 0.0) {
-                rate = qss(j, i) * s(j, i);
+                real_t cInf = s(j, i);
+                if constexpr (QVOL) {
+                  if (qvolDryStart) {
+                    cInf = qvolInfilC;
+                  }
+                }
+                rate = qss(j, i) * cInf;
               }
               if (dept(j, i) > 0.0) {
                 rate += diffusive * (sKp(j, i) - s(j, i));
@@ -302,6 +418,13 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
             } else if (qss(j, i) < 0.0) {
               rate = qss(j, i) * s(j, i) + diffusive * (sKp(j, i) - s(j, i));
             }
+          }
+          if constexpr (QVOL) {
+            // T10 C3: the bounce-back deposits are in the flux volume (via
+            // gain); their salt arrives with them at the top-cell
+            // concentration — without this the bounced water dilutes the
+            // film it lands on (the sub-35 seed measured on sx1's beach).
+            rate += cplBounce(j, i) / dt * sKp(j, i);
           }
           ssee(j, i) = rate;
           mass += rate * cellArea * dt;
@@ -325,16 +448,23 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
             lo = v;
           }
         };
-        if (Asx(j, i) > 0.0 && etan(j, i + 1) > bottom(j, i + 1)) {
+        // T10: a face the solve moved water across admits its neighbour
+        // into the window even when the post-step geometry closed it —
+        // the arrived salt must not read as a minted extremum (J4).
+        if ((Asx(j, i) > 0.0 && etan(j, i + 1) > bottom(j, i + 1)) ||
+            (QVOL && flowE != 0.0)) {
           extend(s(j, i + 1));
         }
-        if (Asx(j, i - 1) > 0.0 && etan(j, i - 1) > bottom(j, i - 1)) {
+        if ((Asx(j, i - 1) > 0.0 && etan(j, i - 1) > bottom(j, i - 1)) ||
+            (QVOL && flowW != 0.0)) {
           extend(s(j, i - 1));
         }
-        if (Asy(j, i) > 0.0 && etan(j + 1, i) > bottom(j + 1, i)) {
+        if ((Asy(j, i) > 0.0 && etan(j + 1, i) > bottom(j + 1, i)) ||
+            (QVOL && flowN != 0.0)) {
           extend(s(j + 1, i));
         }
-        if (Asy(j - 1, i) > 0.0 && etan(j - 1, i) > bottom(j - 1, i)) {
+        if ((Asy(j - 1, i) > 0.0 && etan(j - 1, i) > bottom(j - 1, i)) ||
+            (QVOL && flowS != 0.0)) {
           extend(s(j - 1, i));
         }
         if (coupled && topKsz > 0.0) {
@@ -356,7 +486,29 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
         const real_t qyS = consistent ? Fv(j - 1, i) : fvOld(j - 1, i);
         const real_t qyN = consistent ? Fv(j, i) : fvOld(j, i);
         real_t v = vsn(j, i) + dt * (qxW - qxE + qyS - qyN);
-        if (coupled) {
+        if constexpr (QVOL) {
+          // C2: the post-solve, pre-manipulation water volume.
+          v = vsn(j, i) + (flowW - flowE + flowS - flowN);
+        }
+        if constexpr (QVOL) {
+          if (coupled) {
+            // C3: the coupled deposits as they were actually applied to eta
+            // this step (seepage post-clamp/post-hold, bounce-back, vents)
+            // — the gain field keeps the manipulation's own books, so no
+            // re-derivation from qss (whose clamp/hold approximation is
+            // what the anchor used to absorb).
+            v += cplGain(j, i) * cellArea;
+          }
+          if (stageMask(j, i) != 0.0) {
+            // C3 (stage rows): a prescribed-stage cell's volume comes from
+            // the identity row and the closure's reservoir routing, not
+            // from its face volumes — its flux volume IS the actual water
+            // it holds. The Dirichlet reset books the salt difference into
+            // surf_source, so the anchor term vanishes here instead of
+            // accumulating the reservoir's unbooked volume.
+            v = dept(j, i) * cellArea;
+          }
+        } else if (coupled) {
           const real_t area = (dept(j, i) > 0.0) ? cellArea : 0.0;
           const real_t dv = qss(j, i) * dt * area;
           if (qss(j, i) < 0.0 && v > -dv) {
@@ -418,6 +570,15 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
   real_t atmosMass = 0.0;
   real_t storeInMass = 0.0;
   real_t storeOutMass = 0.0;
+  // Stage-3 T9 (W9.3, plan §12A): the paired store's per-step surface
+  // books. R4 (salt kept without its water) is salinity-only; the
+  // temperature instance parks heat with its water and nothing else (R9).
+  Field2<real_t> parkedV = store ? surf_.parkedVol : Field2<real_t>();
+  Field2<real_t> releasedV = store ? surf_.releasedVol : Field2<real_t>();
+  Field2<real_t> evapV = store ? surf_.evapStep : Field2<real_t>();
+  const bool crust = store && !spec_.isTemperature;
+  const bool heldKeep = crust && held;
+  Field2<real_t> seepAcc = heldKeep ? cpl_.seepAccum : Field2<real_t>();
   Kokkos::parallel_reduce(
       "transport_surface_update",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
@@ -425,6 +586,11 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
       KOKKOS_LAMBDA(const int j, const int i, real_t& sumAdjust, real_t& sumAnchor,
                     real_t& sumAtmos, real_t& sumStoreIn, real_t& sumStoreOut) {
         const bool wet = (vflux(j, i) > 0.0 && dept(j, i) > 0.0);
+        // T9 (W9.3, R8): under the paired store "dry" means no surface
+        // water after the surface step (dept <= 0 — the W9.2 sweep made
+        // that exact); a cell holding water but no flux volume (wetted from
+        // dry by rain or a store release) keeps its mass in that water.
+        const bool fromDry = store && !wet && dept(j, i) > 0.0;
         real_t value = wet ? sm(j, i) / vflux(j, i) : 0.0;
         const real_t raw = value;
         if (wet) {
@@ -447,6 +613,16 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
             }
             applyLimiter = (kTop >= 0 && ksz(j, i, kTop) > 0.0);
           }
+          if constexpr (QVOL) {
+            if (stageMask(j, i) != 0.0) {
+              // C3 (stage rows): the stencil limiter would mint salt onto
+              // the reservoir's fresh volume (raw < window on a rising
+              // tide) and book it as adjust; the Dirichlet reset below is
+              // the stage cell's one honest book (surf_source), so the
+              // prescribed cell skips the limiter.
+              applyLimiter = false;
+            }
+          }
           if (applyLimiter) {
             if (value > sMax(j, i) && sMax(j, i) != limHi && sMax(j, i) != limLo) {
               value = sMax(j, i);
@@ -461,17 +637,79 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
           }
           sumAdjust += (value - raw) * vflux(j, i);
         } else if (store) {
-          // W5.7(a)/O4: a drying (or still-dry) cell's remaining scalar
-          // mass moves into the per-cell store instead of being deleted
-          // (D6); the W5.9 held-seepage salt arrives here too — the
-          // exchange credited sm on the dry cell. Only POSITIVE mass is
-          // storable: a negative dry-cell residual (an advective artifact
-          // of the slosh against the dry front) stays in surf_adjust as
-          // in the legacy path — a store must never hold negative salt.
-          const real_t keep = Kokkos::fmax(sm(j, i), 0.0);
-          sStore(j, i) += keep;
-          sumStoreIn += keep;
-          sumAdjust -= sm(j, i) - keep;
+          if (!fromDry) {
+            // T9 (W9.3, R3): the water parked this step (P1-P3 and the
+            // sweep) takes its salt along at the cell's limited post-source
+            // concentration, never above the limiter-window maximum (the
+            // flux-volume basis when the cell had one, else the parked
+            // volume itself). Salt is never created: at most the dry-branch
+            // mass parks, so a parcel the transport books salt-free (an
+            // isolated cell's solve-delivered water) parks fresh.
+            const real_t dv = parkedV(j, i);
+            real_t c = 0.0;
+            if (vflux(j, i) > 0.0) {
+              c = sm(j, i) / vflux(j, i);
+            } else if (dv > 0.0) {
+              c = sm(j, i) / dv;
+            }
+            if (c > sMax(j, i) && sMax(j, i) != limHi && sMax(j, i) != limLo) {
+              c = sMax(j, i);
+            }
+            if (hasMax && c > limHi) {
+              c = limHi;
+            }
+            real_t parkM = Kokkos::fmin(Kokkos::fmax(sm(j, i), 0.0),
+                                        Kokkos::fmax(c, 0.0) * dv);
+            if constexpr (QVOL) {
+              // C4 (redesigned under the C-SX contingency; S3-A15): an
+              // overdrawn cell — the solve drained it below its bed, the
+              // below-bed lift restored dept (booked in `clamped`), and
+              // the face volumes net negative here — parked the lifted
+              // water. A donor-side outflow cap was measured first and
+              // REJECTED: it starves the real receiving cells of their
+              // water's salt (8.2 psu J1 breach on sx1). Instead the
+              // lifted water parks PAIRED, at the cell's start-of-step
+              // concentration bounded by the limiter window; the ledger
+              // difference (the salt the faces over-exported plus this
+              // pairing) stays on the negative-residual path into
+              // surf_adjust — one honest book for the solve's minted
+              // volume, and the store's water–salt pairing (J1 at the
+              // release) survives.
+              if (vflux(j, i) < 0.0 && dv > 0.0) {
+                real_t cPair = s(j, i);
+                if (cPair > sMax(j, i) && sMax(j, i) != limHi && sMax(j, i) != limLo) {
+                  cPair = sMax(j, i);
+                }
+                if (hasMax && cPair > limHi) {
+                  cPair = limHi;
+                }
+                parkM = Kokkos::fmax(cPair, 0.0) * dv;
+              }
+            }
+            real_t keep = parkM;
+            real_t rest = sm(j, i) - parkM;
+            // R4: salt left without its water stays only as (a) the crust
+            // of this step's evaporation — at most the salt the evaporated
+            // water carried, c V_evap at the same limited concentration —
+            // or (b) the W5.9 held-seepage salt, at most this step's held
+            // exchange credit while the coupler holds its water. Any other
+            // unpaired or negative remainder follows the discard path into
+            // surf_adjust (an advective dry-front artifact never becomes a
+            // store, S3-A13).
+            if (rest > 0.0 && crust && evapV(j, i) > 0.0) {
+              const real_t k = Kokkos::fmin(rest, Kokkos::fmax(c, 0.0) * evapV(j, i));
+              keep += k;
+              rest -= k;
+            }
+            if (rest > 0.0 && heldKeep && seepAcc(j, i) > 0.0) {
+              const real_t k = Kokkos::fmin(rest, Kokkos::fmax(ssee(j, i) * cellArea * dt, 0.0));
+              keep += k;
+              rest -= k;
+            }
+            sumAdjust -= rest;
+            sStore(j, i) += keep;
+            sumStoreIn += keep;
+          }
         } else {
           sumAdjust -= sm(j, i);
         }
@@ -479,9 +717,7 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
         // temperature is invariant under volume exchange at the cell's own
         // temperature, V2-A17).
         real_t vre = 0.0;
-        const bool rewetBasis =
-            store && dept(j, i) > 0.0 && sStore(j, i) > 0.0;
-        if (dilution && (vflux(j, i) > 0.0 || rewetBasis)) {
+        if (dilution && vflux(j, i) > 0.0) {
           const real_t area = (dept(j, i) > 0.0) ? cellArea : 0.0;
           if (etSurf) {
             // W5.7(c)/D8: the actual per-cell volumes — rain AND
@@ -506,7 +742,23 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
         // toward a T_e below the wet-stencil minimum would otherwise
         // stall). Booked into surf_atmos; the anchor below then closes the
         // ledger on the final value.
-        const real_t vBasis = vflux(j, i) + vre;
+        // T9 (R8): a wetted-from-dry cell's basis is the water it holds
+        // apart from what the store returned this step (rain or nothing):
+        // its mass sm lives there; the release below mixes in the store.
+        real_t dVs = 0.0;
+        if (store && dept(j, i) > 0.0) {
+          dVs = Kokkos::fmax(releasedV(j, i) - parkedV(j, i), 0.0);
+        }
+        real_t vBasis = vflux(j, i) + vre;
+        if (fromDry) {
+          vBasis = dept(j, i) * cellArea - dVs;
+          if (vBasis > 0.0) {
+            value = sm(j, i) / vBasis;
+          } else {
+            vBasis = 0.0;
+            sumAdjust -= sm(j, i);
+          }
+        }
         if ((atmosEquilibrium || atmosBulk) && dept(j, i) > 0.0 && vBasis > 0.0) {
           const real_t qnet =
               atmosEquilibrium
@@ -517,24 +769,28 @@ void ScalarSolver::stepSurface(real_t t, real_t dt, real_t rain, real_t evap) {
           value += dTv / vBasis;
           sumAtmos += dTv;
         }
-        // W5.7(b): the first wet step releases the store into the water
-        // (after the limiter, bounds and dilution — the released salt must
-        // not be clipped to the advective extrema; the anchor then closes
-        // the ledger on the final value). A cell rewetted from dry by rain
-        // alone has vflux = 0 (not `wet`) but a live vre volume — the
-        // release keys on the PRESENT water (dept) and the actual basis.
-        const bool rewet = store && dept(j, i) > 0.0 && sStore(j, i) > 0.0 &&
-                           vBasis > 0.0;
-        if (rewet) {
-          value += sStore(j, i) / vBasis;
+        // T9 (W9.3, R5): the release is mixing. The cell holds water, so
+        // the surface returned the whole water store to eta this step (net
+        // dVs beyond this step's own parks); the salt store joins on the
+        // combined basis, c = (M + M_s) / (V + V_s) — after the limiter,
+        // bounds and dilution, so the released salt is never clipped, and
+        // the anchor stays the basis-lag correction (never a salt source).
+        // A crust (O4, V_s = 0) mixes the same way (dVs = 0).
+        bool rewet = false;
+        real_t basisOut = vBasis;
+        if (store && dept(j, i) > 0.0 && (sStore(j, i) > 0.0 || dVs > 0.0) &&
+            vBasis + dVs > 0.0) {
+          rewet = true;
+          basisOut = vBasis + dVs;
+          value = (value * vBasis + sStore(j, i)) / basisOut;
           sumStoreOut += sStore(j, i);
           sStore(j, i) = 0.0;
         }
         s(j, i) = value;
         // Ledger re-anchor: the mass now lives on the actual volume, not
         // the (lagged) flux volume the update divided by.
-        if (wet || rewet) {
-          sumAnchor += value * (dept(j, i) * cellArea - vBasis);
+        if (wet || rewet || fromDry) {
+          sumAnchor += value * (dept(j, i) * cellArea - basisOut);
         }
       },
       adjustMass, anchorMass, atmosMass, storeInMass, storeOutMass);

@@ -55,6 +55,13 @@ void SurfaceSolver::evapRain() {
       rainAdded);
   audit_.rainVolume += rainAdded;
 
+  // Stage-3 T9 (W9.2): under the paired store, measure the water the
+  // evaporation pass below actually takes from each cell (the R4(a) crust
+  // predicate, for every evaporation mode). The snapshot is after the rain,
+  // so the difference is evaporation alone; the passes stay byte-identical.
+  if (pairedStore_) {
+    Kokkos::deep_copy(etaPreEvap_, eta_);
+  }
   real_t evapRemoved = 0.0;
   const bool canopy = et && hasCanopy_;
   Field2<real_t> tau = canopy ? canopyTau_ : Field2<real_t>();
@@ -127,6 +134,60 @@ void SurfaceSolver::evapRain() {
         evapRemoved);
   }
   audit_.evapVolume += evapRemoved;
+  if (pairedStore_) {
+    Field2<real_t> pre = etaPreEvap_, evapStep = evapStep_;
+    Kokkos::parallel_for(
+        "swe_store_evap_step",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {1, 1}, {nyl + 1, nxl + 1}),
+        KOKKOS_LAMBDA(const int j, const int i) {
+          // Water present before the pass, and what the pass lowered eta
+          // by; beyond the water it is the below-bed overdraft the clamp
+          // lifts (R2: never debited from the store).
+          const real_t present = Kokkos::fmax(pre(j, i) - bottom(j, i), 0.0);
+          const real_t lowered = Kokkos::fmax(pre(j, i) - eta(j, i), 0.0);
+          evapStep(j, i) = Kokkos::fmin(present, lowered) * cellArea;
+        });
+  }
+
+  // Stage-3 T9 (W9.1): the clamp's positive-depth part — films the clamp
+  // below deletes — measured in a separate read-only pass so the clamp
+  // kernel stays byte-identical. Informational under discard (the clamp's
+  // signed total stays in clampVolume, bitwise).
+  real_t clampFilm = 0.0;
+  Field2<real_t> isEtaBc = isEtaBc_;
+  Kokkos::parallel_reduce(
+      "swe_book_clamp_film",
+      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+          {1, 1}, {nyl + 1, nxl + 1}),
+      KOKKOS_LAMBDA(const int j, const int i, real_t& acc) {
+        const real_t diff = eta(j, i) - bottom(j, i);
+        if (diff > 0.0 && diff < minDepth && isEtaBc(j, i) == 0.0) {
+          acc += diff * cellArea;
+        }
+      },
+      clampFilm);
+  audit_.filmClamp += clampFilm;
+  if (pairedStore_) {
+    // W9.2 (R1/R3): the leftover of rain and evaporation that the clamp
+    // below would remove parks instead, ahead of the clamp — which then
+    // sees eta = bottom on those cells and books only the below-bed lift
+    // (clamped keeps the created part only, plan §12A).
+    Field2<real_t> store = waterStore_, parked = parkedVol_, film = filmRemoved_;
+    Kokkos::parallel_for(
+        "swe_store_park_clamp_film",
+        Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
+            {1, 1}, {nyl + 1, nxl + 1}),
+        KOKKOS_LAMBDA(const int j, const int i) {
+          const real_t diff = eta(j, i) - bottom(j, i);
+          if (diff > 0.0 && diff < minDepth && isEtaBc(j, i) == 0.0) {
+            store(j, i) += diff * cellArea;
+            parked(j, i) += diff * cellArea;
+            film(j, i) += diff;
+            eta(j, i) = bottom(j, i);
+          }
+        });
+  }
 
   // Negative and sub-threshold depths are dried (shallowwater.c:628-635).
   // v2 Q4: the clamp's signed volume change is measured into the clamp

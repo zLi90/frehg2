@@ -1,0 +1,58 @@
+{
+ "cases": {
+  "b1": {
+   "ncols": 7,
+   "sha256": "edd77e2caddf47aacb23e551f16904ae59be944d94d280568fb06b2582cebda5"
+  },
+  "conveyor": {
+   "ncols": 7,
+   "sha256": "94ebf7cb0398b7b7f84f564743b66f4b4b38c81e27bb9ea6b41740e118863ebf"
+  },
+  "coupled-salt": {
+   "ncols": 9,
+   "sha256": "a6ccc323de9b8a7545a53e41dce8689daa1aef51e38960789ca1eaf78230baa8"
+  },
+  "et9-noet": {
+   "ncols": 9,
+   "sha256": "052806cefe85846325ea6c4c22d140949f72f7d779c9097769fc5bd19e55f857"
+  },
+  "g10": {
+   "ncols": 7,
+   "sha256": "4fbb70a9799b0d83792122224f59d8b2adf0af267759edf7d0786d0ac3af75e1"
+  },
+  "g4a": {
+   "ncols": 7,
+   "sha256": "e33ae469b44fffbe3e19a62d3a3798620bf28e8e452746bc5189f2b16280319f"
+  },
+  "g4b": {
+   "ncols": 7,
+   "sha256": "e33ae469b44fffbe3e19a62d3a3798620bf28e8e452746bc5189f2b16280319f"
+  },
+  "g4d": {
+   "ncols": 7,
+   "sha256": "04ee76259aaeb3aa6ed695516ae6457b8bdd016a096fcb8a58669afc44b53bb9"
+  },
+  "g6c-coupled": {
+   "ncols": 9,
+   "sha256": "32a29dd83d83e1f305233a05ecc712fd841b67adf3c3fefd7a5978980a0baed6"
+  },
+  "g7b": {
+   "ncols": 7,
+   "sha256": "acabd945deb23dc59e5464a27d0f85502b5532eb9cf89342ee31689d2a13d2f6"
+  },
+  "swe-orient": {
+   "ncols": 7,
+   "sha256": "b6cd573cbef34a2ce7a31e22604185d87edb94b29f31a9433fb79d9170269f1b"
+  },
+  "transport-orient": {
+   "ncols": 7,
+   "sha256": "015878d02d0c372459b9287ff8a4812ed95d3a5c306d9da957a0da8705fe14cb"
+  }
+ },
+ "toolchain": {
+  "compiler": "/opt/homebrew/bin/g++-16",
+  "compiler_version": "g++-16 (Homebrew GCC 16.2.0) 16.2.0",
+  "machine": "arm64",
+  "system": "Darwin"
+ }
+}

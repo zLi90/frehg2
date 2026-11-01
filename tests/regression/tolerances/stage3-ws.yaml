@@ -1,0 +1,57 @@
+# stage3-ws.yaml — Stage-3 T9 paired water–salt store gate tolerances (plan
+# §12A; every value cites its authoring measurement; relaxations only by
+# amendment — S3-A13).
+ws1:
+  c_max: 35.0
+  bound_rel: 1.0e-12        # max salinity <= c_max (1 + bound_rel) (measured 35.000000000)
+  # S3-A13: the plan's "zero CFL warnings" is replaced by a cap — R6 returns
+  # a >= wetting_face_depth film onto a dry slope cell, and its first step
+  # runs on the lagged point-implicit drag (the same one-step wetting burst
+  # as any dry-cell wetting; the b5 rain record logs 23 884 warnings, max
+  # 83.8). Measured max 1.247 (ws1) / 1.248 (ws1n) vs the T8 red's 81.
+  cfl_max: 1.5
+  clip_warnings: 0
+  # Anti-vacuity floors = 1/10 of the authoring measurement (S3-A13):
+  # max Sigma V_s 8.80e-4 m^3, 44 release rows, P4 thin vents 1.83e-3 m^3,
+  # P1 isolated removals 8.6e-11 m^3 (solver-noise films; recorded > 0).
+  parked_floor_m3: 8.8e-5
+  release_rows_floor: 4
+  vent_thin_floor_m3: 1.8e-4
+  # ws-rank (S3-A13): store totals across mpi_ny = 1/2/4 on the stable slope
+  # base, relative. The plan's 1e-12 is below the strict solve's rounding at
+  # the ~1e-5 m^3 parked scale (measured 5.4e-11 water, 2.9e-11 salt).
+  store_sum_rel: 1.0e-9
+ws1n:
+  c_max: 35.0
+  bound_rel: 1.0e-12
+  cfl_max: 1.5
+  clip_warnings: 0
+  # Authoring (T9 dev binary): max Sigma V_s 1.09e-3 m^3; the plan floor
+  # 1e-4 m^3 kept; release rows re-set at authoring by S3-A13.
+  parked_floor_m3: 1.0e-4
+  release_rows_floor: 100
+ws2:
+  # Water: the mode's identity at EVERY audit row, normalised by cumulative
+  # |stage exchange| + rain + evaporation (measured ws1 store 8.5e-11 /
+  # discard; ws1n 8.9e-13; et9-noet discard 7.1e-12).
+  water_rel: 1.0e-10
+  # S3-A13: absolute floor — the coupled lanes' solve-residual class: ws1
+  # store and discard twins jump by the same ~2e-11 m^3 at the same rows
+  # (t = 4440, 4920, 5940 s), worst 3.5e-11 m^3 (ws1n 3.2e-11, et9-noet
+  # 1.1e-11); 1e-10 of ws1's small exchange scale (0.25 m^3) is below it.
+  water_abs_m3: 5.0e-11
+  # Salt: Delta(surf_mass + surf_store + subs_mass) on the T5 ledger RHS.
+  # The reduced-sum rounding class of the long coupled lanes (et9 measured
+  # 2.7e-9, ledger_salt_rel 1e-7); ws1 measured 2.0e-9 strict.
+  salt_rel: 1.0e-7
+ws3:
+  exact_rel: 1.0e-12        # (b)/(c)/(d) closed forms (measured <= 2.4e-15)
+  move_floor_psu: 1.0       # (a) anti-vacuity: salinity moves > 1 psu (measured 3.25)
+ws4:
+  books_rel: 1.0e-12        # parked + released = removed per path (measured 2.7e-16 rel)
+  pair_exact_rel: 1.0e-12   # P3 / P3T (1 x 1): M = c V_s exactly (measured 0.0)
+  # P2 on a draining slope: c_park is the consistent update's limited value,
+  # uniform 35 only to its 1e-9 class (ConsistentSurfaceUpdateKeeps...);
+  # measured 1.3e-9 (S3-A13).
+  pair_slope_rel: 1.0e-8
+  path_floor_m3: 1.0e-6     # each lane's own path fires (P2 7.7e-5, P3 4.0e-6 m^3)

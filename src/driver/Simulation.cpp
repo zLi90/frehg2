@@ -35,6 +35,10 @@ io::VarMeta surfaceVarMeta(const std::string& var) {
     return {"m s-1", "surface-applied seepage rate (positive upward; a "
                      "PER-STEP SAMPLE — integrate seepage_rate instead)"};
   }
+  if (var == "water_store") {
+    return {"m3", "paired water store V_s: thin-layer water parked with its "
+                  "salt, inert until release (Stage-3 T9)"};
+  }
   return {"", var};
 }
 
@@ -292,6 +296,15 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
                             "seepage + bounce-back + vent deposits, positive "
                             "upward)"});
     }
+    // Stage-3 T9 (W9.1): the per-cell counted thin-layer removal (P1 + P2
+    // always; + P3's positive part and the sweep under the paired store) —
+    // the per-cell, per-interval form of the film_removed column.
+    if (surface_ && std::find(sv.begin(), sv.end(), "film_removal_rate") != sv.end()) {
+      rates_->add("surface", "film_removal_rate",
+                  {"m s-1", "interval-mean thin-layer removal (cflLimiter "
+                            "isolated + small rules; plus the clamp film and "
+                            "the end-of-step sweep under the paired store)"});
+    }
     // Stage-3 T5 (W5.10): the /atmosphere interval-mean ET rates.
     const auto& av = config_.output.atmosphereVariables;
     const auto wants = [&av](const char* name) {
@@ -366,6 +379,26 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
       // stage enforcement under zero_gradient). Appended last.
       auditConfig.variables.push_back("stage_deposit");
     }
+    // Stage-3 T9 (W9.1, plan §12A): the cumulative counted thin-layer
+    // removal (P1 + P2 in every mode; + P3's positive part + the sweep
+    // under the paired store) and the INSTANTANEOUS sub-min_depth film
+    // volume still in eta (dry to updateDepth, so outside `volume`). With
+    // them the surface identity closes at every row:
+    //   discard  D(volume + film_pending) = flows + clamped - stage_deposit
+    //                                       - film_removed
+    //   store    D(volume + store_volume) = flows + clamped - stage_deposit
+    // (film_pending is identically 0 after the W9.2 sweep). Appended last
+    // (plan §2.6 exception 1).
+    auditConfig.variables.push_back("film_removed");
+    auditConfig.variables.push_back("film_pending");
+    // T9 (S3-A13): the instantaneous water on prescribed-stage cells — the
+    // reservoir storage the identity's left-hand side subtracts.
+    auditConfig.variables.push_back("stage_volume");
+    if (surface_->pairedStore()) {
+      // W9.2: the instantaneous parked volume and the cumulative release.
+      auditConfig.variables.push_back("store_volume");
+      auditConfig.variables.push_back("store_release");
+    }
     massAudit_ = std::make_unique<io::Monitor>(*output_, auditConfig);
   }
   if (config_.modules.groundwater) {
@@ -431,6 +464,11 @@ Simulation::Simulation(MPI_Comm comm, const FrehgConfig& config,
                              "surf_source",   "surf_boundary", "surf_adjust",
                              "surf_anchor",   "surf_atmos",    "subs_boundary",
                              "subs_adjust",   "subs_anchor"};
+    if (temperature_->hasSurfaceStore()) {
+      // Stage-3 T9 (R9): the instantaneous parked heat, appended last —
+      // the heat identity's left-hand side gains it as the salt one does.
+      auditConfig.variables.push_back("surf_store");
+    }
     temperatureAudit_ = std::make_unique<io::Monitor>(*output_, auditConfig);
   }
 }
@@ -455,6 +493,20 @@ void Simulation::buildTransport() {
       surfWiring.etActive = true;
       surfWiring.rainAdded = surface_->rainAdded();
       surfWiring.evapRemoved = surface_->evapRemoved();
+    }
+    if (surface_->solveVolumesActive()) {
+      // Stage-3 T10 (W10.2): the solve's continuity face volumes.
+      surfWiring.solveVolumes = true;
+      surfWiring.qxSolve = surface_->solveVolumeX();
+      surfWiring.qySolve = surface_->solveVolumeY();
+      surfWiring.isEtaBc = surface_->etaBcMask();
+    }
+    if (surface_->pairedStore()) {
+      // Stage-3 T9 (W9.3): the paired store's per-step surface books.
+      surfWiring.pairedStore = true;
+      surfWiring.parkedVol = surface_->parkedVolume();
+      surfWiring.releasedVol = surface_->releasedVolume();
+      surfWiring.evapStep = surface_->evaporatedVolume();
     }
   }
   transport::SubsurfaceWiring subsWiring;
@@ -513,6 +565,8 @@ void Simulation::buildTransport() {
   if (coupler_) {
     cplWiring.active = true;
     cplWiring.qss = coupler_->seepageRate();
+    cplWiring.gain = coupler_->gain();
+    cplWiring.bounce = coupler_->bounce();
     if (transportWindow) {
       cplWiring.ventVolume = gw_->windowVentVolume();
     }
@@ -522,6 +576,7 @@ void Simulation::buildTransport() {
       coupler_->enableHeldSeepageSalt();
       cplWiring.heldSeepage = true;
       cplWiring.exfNew = coupler_->exfNew();
+      cplWiring.seepAccum = coupler_->seepAccum();
     }
   }
   if (config_.modules.transport) {
@@ -603,6 +658,11 @@ io::Checkpoint::Fields2 Simulation::checkpointFields2() const {
     // Stage-3 T5 (W5.10): the complementarity clocks are prognostic.
     fields.push_back({"et_wet_clock", surface_->wetClock()});
   }
+  if (surface_ && surface_->pairedStore()) {
+    // Stage-3 T9 (W9.2): the parked water is prognostic (released later).
+    // Runs without the paired store keep the T8 checkpoint layout.
+    fields.push_back({"swe_water_store", surface_->waterStore()});
+  }
   if (gw_ && gw_->etActive()) {
     fields.push_back({"et_wet_clock_last", gw_->etWetClockLast()});
     fields.push_back({"et_soil_time", gw_->etSoilTime()});
@@ -633,6 +693,9 @@ io::Checkpoint::Fields2 Simulation::checkpointFields2() const {
       fields.push_back({"t_surf", temperature_->surfaceScalar()});
       fields.push_back({"t_fu_old", temperature_->flowRateSnapshotX()});
       fields.push_back({"t_fv_old", temperature_->flowRateSnapshotY()});
+      if (temperature_->hasSurfaceStore()) {
+        fields.push_back({"t_store", temperature_->surfaceStore()});  // T9 (R9)
+      }
     }
     if (gw_) {
       fields.push_back({"t_dzz_top", temperature_->dispersionTopSnapshot()});
@@ -754,6 +817,12 @@ real_t Simulation::restoreFromCheckpoint() {
   return header.t;
 }
 
+void Simulation::addFilmRateContribution() {
+  if (rates_ && rates_->has("film_removal_rate")) {
+    rates_->addInto("film_removal_rate", surface_->filmRemovedDepth());
+  }
+}
+
 void Simulation::addEtRateContributions() {
   // Stage-3 T5 (W5.10): feed the registered atmosphere rates once per
   // outer step — the surface channel's removal and the soil channel's
@@ -815,8 +884,11 @@ void Simulation::writeOutputs(real_t label, real_t tActual) {
       field = &surface_->vv();
     } else if (var == "seepage" && coupler_) {
       field = &coupler_->seepageRate();
+    } else if (var == "water_store" && surface_->pairedStore()) {
+      field = &surface_->waterStore();
     }
-    // "seepage_rate" is written by the IntervalRates registry below.
+    // "seepage_rate" and "film_removal_rate" are written by the
+    // IntervalRates registry below.
     if (field != nullptr) {
       output_->writeField2("surface", var, t, *field, surfaceVarMeta(var));
     }
@@ -946,11 +1018,34 @@ void Simulation::recordMonitors(real_t t) {
 void Simulation::recordMassAudit(real_t t, bool writeRow) {
   const swe::SurfaceStepAudit& audit = surface_->audit();
   const real_t seepage = coupler_ ? coupler_->audit().surfaceGain : 0.0;
-  const real_t local[8] = {surface_->ownedVolume(), audit.rainVolume, audit.evapVolume,
-                           audit.boundaryOutflow, audit.bcInflow, seepage,
-                           audit.clampVolume, audit.stageDeposit};
-  real_t global[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-  MPI_Reduce(local, global, 8, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+  // Stage-3 T9 (W9.1): the counted removal — P1 + P2 always; P3's
+  // positive part and the sweep are removals only under the paired store
+  // (under discard P3 stays inside clamped, bitwise).
+  const bool paired = surface_->pairedStore();
+  const real_t film = audit.filmIsolated + audit.filmSmall +
+                      (paired ? audit.filmClamp + audit.filmSweep : 0.0);
+  const real_t local[13] = {surface_->ownedVolume(), audit.rainVolume, audit.evapVolume,
+                            audit.boundaryOutflow, audit.bcInflow, seepage,
+                            audit.clampVolume, audit.stageDeposit, film,
+                            surface_->pendingFilmVolume(),
+                            paired ? surface_->ownedStoreVolume() : 0.0,
+                            audit.storeRelease,
+                            surface_->stageVolume()};
+  real_t global[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  MPI_Reduce(local, global, 13, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+  // Per-path run-record books (W9.1), reduced on every rank's audit.
+  {
+    const real_t lp[4] = {audit.filmIsolated, audit.filmSmall, audit.filmClamp,
+                          audit.filmSweep};
+    real_t gp[4] = {0, 0, 0, 0};
+    MPI_Reduce(lp, gp, 4, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+    if (grid_.rank() == 0) {
+      cumFilmIsolated_ += gp[0];
+      cumFilmSmall_ += gp[1];
+      cumFilmClamp_ += gp[2];
+      cumFilmSweep_ += gp[3];
+    }
+  }
   if (grid_.rank() == 0) {
     cumRain_ += global[1];
     cumEvap_ += global[2];
@@ -959,6 +1054,8 @@ void Simulation::recordMassAudit(real_t t, bool writeRow) {
     cumSeepage_ += global[5];
     cumClamped_ += global[6];
     cumStageDeposit_ += global[7];
+    cumFilmRemoved_ += global[8];
+    cumStoreRelease_ += global[11];
     if (writeRow) {
       std::vector<real_t> row = {global[0], cumRain_, cumEvap_, cumOutflow_, cumBcInflow_};
       if (coupler_) {
@@ -967,6 +1064,13 @@ void Simulation::recordMassAudit(real_t t, bool writeRow) {
       row.push_back(cumClamped_);
       if (coupler_) {
         row.push_back(cumStageDeposit_);
+      }
+      row.push_back(cumFilmRemoved_);
+      row.push_back(global[9]);
+      row.push_back(global[12]);
+      if (paired) {
+        row.push_back(global[10]);
+        row.push_back(cumStoreRelease_);
       }
       massAudit_->record(t, row);
     }
@@ -979,14 +1083,15 @@ void Simulation::recordGwMassAudit(real_t t, bool writeRow) {
   // Coupled runs report the window aggregate (all subcycled substeps of the
   // surface step); groundwater-only runs report the single step.
   const gw::GwStepAudit& audit = coupler_ ? coupler_->audit().gw : gw_->audit();
-  const real_t local[11] = {gw_->ownedVolume(), audit.boundaryIn, audit.ssStorage,
+  const real_t local[12] = {gw_->ownedVolume(), audit.boundaryIn, audit.ssStorage,
                             audit.reallocAdjust, audit.reallocDropped, audit.vloss,
                             audit.evap,          audit.etApplied,
                             audit.etDemand - audit.etApplied,
                             audit.trApplied,
-                            audit.trDemand - audit.trApplied};
-  real_t global[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  MPI_Reduce(local, global, 11, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+                            audit.trDemand - audit.trApplied,
+                            audit.cplVentThin};
+  real_t global[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  MPI_Reduce(local, global, 12, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
   if (grid_.rank() == 0) {
     cumGwBoundary_ += global[1];
     cumGwStorage_ += global[2];
@@ -998,6 +1103,7 @@ void Simulation::recordGwMassAudit(real_t t, bool writeRow) {
     cumGwEtUnrealised_ += global[8];
     cumGwTrApplied_ += global[9];
     cumGwTrUnrealised_ += global[10];
+    cumGwVentThin_ += global[11];
     if (writeRow) {
       std::vector<real_t> row = {global[0], cumGwBoundary_, cumGwStorage_, cumGwRealloc_,
                                  cumGwDropped_, cumGwVloss_};
@@ -1054,13 +1160,14 @@ void Simulation::recordTransportAudit(real_t t, bool writeRow) {
 
 void Simulation::recordTemperatureAudit(real_t t, bool writeRow) {
   const transport::TransportAudit& audit = temperature_->audit();
-  const real_t local[11] = {temperature_->ownedSurfaceMass(),
+  const real_t local[12] = {temperature_->ownedSurfaceMass(),
                             temperature_->ownedSubsurfaceMass(),
                             audit.exchange,     audit.surfSource, audit.surfBoundary,
                             audit.surfAdjust,   audit.surfAnchor, audit.surfAtmos,
-                            audit.subsBoundary, audit.subsAdjust, audit.subsAnchor};
-  real_t global[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  MPI_Reduce(local, global, 11, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
+                            audit.subsBoundary, audit.subsAdjust, audit.subsAnchor,
+                            temperature_->surfaceStoreTotal()};
+  real_t global[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  MPI_Reduce(local, global, 12, MPI_DOUBLE, MPI_SUM, 0, grid_.comm());
   if (grid_.rank() == 0) {
     cumTpExchange_ += global[2];
     cumTpSurfSource_ += global[3];
@@ -1072,11 +1179,15 @@ void Simulation::recordTemperatureAudit(real_t t, bool writeRow) {
     cumTpSubsAdjust_ += global[9];
     cumTpSubsAnchor_ += global[10];
     if (writeRow) {
-      temperatureAudit_->record(t, {global[0], global[1], cumTpExchange_,
-                                    cumTpSurfSource_, cumTpSurfBoundary_,
-                                    cumTpSurfAdjust_, cumTpSurfAnchor_, cumTpSurfAtmos_,
-                                    cumTpSubsBoundary_, cumTpSubsAdjust_,
-                                    cumTpSubsAnchor_});
+      std::vector<real_t> row = {global[0], global[1], cumTpExchange_,
+                                 cumTpSurfSource_, cumTpSurfBoundary_,
+                                 cumTpSurfAdjust_, cumTpSurfAnchor_, cumTpSurfAtmos_,
+                                 cumTpSubsBoundary_, cumTpSubsAdjust_,
+                                 cumTpSubsAnchor_};
+      if (temperature_->hasSurfaceStore()) {
+        row.push_back(global[11]);  // T9 (R9): the parked heat [K m^3]
+      }
+      temperatureAudit_->record(t, row);
     }
   } else if (writeRow) {
     temperatureAudit_->record(t, {});
@@ -1235,6 +1346,26 @@ void Simulation::flushRunRecord(bool finished) {
     if (coupler_) {
       closure << "  stage_deposit_m3: " << cumStageDeposit_ << "\n";
     }
+    // Stage-3 T9 (W9.1): the thin-layer removals per path (P1 isolated,
+    // P2 small, P3 clamp — the clamp's positive part, informational under
+    // discard where it stays inside clamped — and the W9.2 sweep), the
+    // counted total the film_removed column carries, and under the paired
+    // store the parked volume still held and the cumulative release.
+    closure << "  film_removed_m3: " << cumFilmRemoved_ << "\n"
+            << "  film_removed_isolated_m3: " << cumFilmIsolated_ << "\n"
+            << "  film_removed_small_m3: " << cumFilmSmall_ << "\n"
+            << "  film_removed_clamp_m3: " << cumFilmClamp_ << "\n"
+            << "  film_removed_sweep_m3: " << cumFilmSweep_ << "\n";
+    {
+      const real_t local[2] = {surface_->ownedStoreVolume(), surface_->pendingFilmVolume()};
+      real_t global[2] = {0, 0};
+      MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_SUM, grid_.comm());
+      closure << "  film_pending_m3: " << global[1] << "\n";
+      if (surface_->pairedStore()) {
+        closure << "  store_volume_m3: " << global[0] << "\n"
+                << "  store_release_m3: " << cumStoreRelease_ << "\n";
+      }
+    }
     // Stage-3 T2 (W2.6): the stage-boundary free-energy observables. The
     // KE influx is the report_V1 engine metric (zero at a quiet boundary);
     // the ratio is the entrance head actually paid per v^2/2g (~1 under
@@ -1277,6 +1408,11 @@ void Simulation::flushRunRecord(bool finished) {
             << "  realloc_m3: " << cumGwRealloc_ << "\n"
             << "  realloc_dropped_m3: " << cumGwDropped_ << "\n"
             << "  vloss_m3: " << cumGwVloss_ << "\n";
+    if (surface_ && surface_->pairedStore() && coupler_) {
+      // Stage-3 T9 (W9.4): vents the legacy rule would have discarded,
+      // deposited for the sweep to park with their salt (P4).
+      closure << "  vent_thin_m3: " << cumGwVentThin_ << "\n";
+    }
   }
   if (config_.evapotranspiration.enabled) {
     // Stage-3 T5 (W5.10): the ET closure lines. open_water is the
@@ -1340,6 +1476,7 @@ void Simulation::runCoupledLoop(real_t t0) {
       rates_->addInto("seepage_rate", coupler_->gain());
     }
     addEtRateContributions();
+    addFilmRateContribution();
     stepTransport(t, dt, gw_->lastDtg());
 
     const bool checkpointDue =
@@ -1435,8 +1572,12 @@ void Simulation::runSurfaceLoop(real_t t0) {
     const real_t t = t0 + static_cast<real_t>(step) * dt;
     surface_->beginStep(t);
     surface_->solveFreeSurface();
+    // Stage-3 T9 (W9.2): the paired store's end-of-step sweep and release
+    // after the last eta change of the step (no-op unless the store is on).
+    surface_->sweepAndRelease();
     surface_->updateVelocity();
     addEtRateContributions();
+    addFilmRateContribution();
     stepTransport(t, dt, 0.0);
 
     bool checkpointDue = false;

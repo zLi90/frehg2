@@ -135,6 +135,7 @@ void RichardsSolver::reallocateWaterContent() {
   Field2<real_t> topValue = topValue_;
   const bool coupled = cpl_.active;
   const real_t minDepth = cpl_.minDepth;
+  const bool ventAll = coupled && cpl_.ventAll;
   Field2<real_t> cplEta = coupled ? cpl_.eta : Field2<real_t>();
   Field2<real_t> cplDept = coupled ? cpl_.dept : Field2<real_t>();
   Field2<real_t> cplAvail = coupled ? cpl_.avail : Field2<real_t>();
@@ -368,15 +369,17 @@ void RichardsSolver::reallocateWaterContent() {
     audit_.reallocAdjust = 0.0;
     audit_.reallocDropped = 0.0;
     audit_.cplVent = 0.0;
+    audit_.cplVentThin = 0.0;
     return;
   }
   real_t dropped = 0.0;
   real_t vented = 0.0;
+  real_t ventedThin = 0.0;
   Kokkos::parallel_reduce(
       "gw_reallocate_send",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
           {1, 1}, {nyl + 1, nxl + 1}),
-      KOKKOS_LAMBDA(const int j, const int i, real_t& lost, real_t& vent) {
+      KOKKOS_LAMBDA(const int j, const int i, real_t& lost, real_t& vent, real_t& thin) {
         (void)i0;
         (void)j0;
         (void)nxGlobal;
@@ -429,9 +432,14 @@ void RichardsSolver::reallocateWaterContent() {
                 // Coupled columns vent onto the surface (allocate_send
                 // :1185-1207): any amount when the surface is wet, only
                 // above min_depth when dry — smaller dry-cell vents are
-                // discarded outright (:1199-1206), audited here.
+                // discarded outright (:1199-1206), audited here. Stage-3 T9
+                // (W9.4): under the paired store every vent deposits and
+                // the surface sweep parks it with its salt.
                 const real_t d = dV / az;
-                if (cplDept(j, i) > 0.0 || d > minDepth) {
+                if (ventAll || cplDept(j, i) > 0.0 || d > minDepth) {
+                  if (!(cplDept(j, i) > 0.0 || d > minDepth)) {
+                    thin += dV;  // P4: legacy would have discarded it
+                  }
                   cplEta(j, i) += d;
                   cplDept(j, i) += d;
                   cplAvail(j, i) += d;
@@ -497,10 +505,11 @@ void RichardsSolver::reallocateWaterContent() {
           }
         }
       },
-      dropped, vented);
+      dropped, vented, ventedThin);
   audit_.reallocAdjust = adjusted + dropped;
   audit_.reallocDropped = discarded - dropped;  // dropped accumulates negative
   audit_.cplVent = vented;
+  audit_.cplVentThin = ventedThin;
 }
 
 }  // namespace frehg::gw

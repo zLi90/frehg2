@@ -92,6 +92,10 @@ struct GwStepAudit {
   /// send-walk overflow. Included in reallocAdjust; separated here so gates
   /// and tests can see pure losses.
   real_t reallocDropped = 0.0;
+  /// Stage-3 T9 (W9.4 / ws4 P4): vented volume that the legacy rule
+  /// would have discarded (a sub-min_depth vent onto a dry cell) but the
+  /// paired store deposits for the sweep to park [m^3; 0 otherwise].
+  real_t cplVentThin = 0.0;
   real_t vloss = 0.0;          ///< volume removed (+) or created (-) by the final clamp
   /// Actual evaporated volume through bulk-soil-evaporation top faces this
   /// step [m^3, positive out; negative = condensation deposit] — read off
@@ -139,12 +143,23 @@ struct GwCoupling {
   Field2<real_t> seepAccum;    ///< exchanged-not-yet-applied depth [m] (RW)
   Field2<real_t> avail;        ///< remaining infiltrable depth this window [m]
   Field2<real_t> gain;         ///< surface deposits this surface step [m]
+  /// Stage-3 T10 (plan §12B C3): the bounce-back share of gain [m] — the
+  /// Corrector's direct eta deposits (saturated-top rejection). The
+  /// conservative surface update books their salt at the top-cell
+  /// concentration; empty view unless the coupler allocated it.
+  Field2<real_t> bounce;
   // Stage-3 T5 (plan §9 W5.4): the surface channel's wet-time clock, read
   // by the soil channel's dry-fraction split. stepStart is t - dt of the
   // running surface step (set by Coupler::step before the substep loop).
   real_t stepStart = 0.0;           ///< surface-step start time [s]
   Field2<real_t> wetClockStepStart; ///< wet clock at the step start [s]
   Field2<real_t> wetFrac;           ///< this surface step's wet fraction [-]
+  /// Stage-3 T9 (W9.4, plan §12A P4): under the paired water–salt store
+  /// every dry-cell vent deposits onto the surface (the legacy sub-min_depth
+  /// discard is dropped); the end-of-step sweep then parks the vent with
+  /// its salt. False otherwise — realloc_dropped and the gw ledger stay
+  /// bitwise.
+  bool ventAll = false;
 };
 
 /// The groundwater module.

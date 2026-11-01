@@ -111,6 +111,8 @@ class Coupler {
   /// seepage + bounce-back + vent): what the audit reduces into the
   /// cumulative seepage column, and the seepage_rate contributor (T4 W4.2).
   const Field2<real_t>& gain() const { return gain_; }
+  /// Bounce-back share of gain (T10 C3; empty unless conservative).
+  const Field2<real_t>& bounce() const { return bounce_; }
 
   /// Stage-3 T5 (W5.9): switch the held-seepage salt bookkeeping on
   /// (called by the driver when ET + the salt store are active).
@@ -157,6 +159,7 @@ class Coupler {
   Field2<real_t> seepAccum_;  ///< exchanged-not-applied depth [m]
   Field2<real_t> avail_;      ///< window infiltration budget [m]
   Field2<real_t> gain_;       ///< coupled surface deposits this step [m]
+  Field2<real_t> bounce_;     ///< bounce-back share of gain [m] (T10; empty unless conservative)
   Field2<real_t> qss_;        ///< applied seepage rate [m/s]
   // Stage-3 T5 (W5.9): held-seepage salt support (allocated only when the
   // transport runs the store path; heldSalt_ gates the extra kernel work).
