@@ -194,7 +194,7 @@ class SurfaceSolver {
   /// transport.surface_update: conservative — the default path takes no
   /// extra exchange and no extra kernel.
   ///@{
-  bool solveVolumesActive() const { return recordSolveVolumes_; }
+  bool solveVolumesActive() const { return recordSolveVolumes_; }  ///< Q is recorded this run
   /// Eastward face volume of the step [m^3]; slot (j, i) is the face
   /// between cells i and i+1, slot (j, 0) the west interface/edge face.
   const Field2<real_t>& solveVolumeX() const { return Qx_; }

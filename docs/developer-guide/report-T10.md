@@ -124,5 +124,14 @@ Per-PR: sx0 ×3, sx1, sx2, sx4, sx5, sx-restart, the negative battery and
 4 validates green; bitwise pins (`default_bitwise`, et9 noET, et9-veg)
 green; nightly sx3, sx-rank, sx_seam green; 263/263 unit tests. Docs and
 checkers green (parameters lockstep, bc_matrix, coverage 139 rows,
-doxygen 0 warnings, mkdocs --strict). `legacy` and `consistent` are
-bitwise-unchanged everywhere.
+forbidden scan, doxygen, mkdocs --strict — all by exit code). `legacy`
+and `consistent` are bitwise-unchanged everywhere.
+
+**Correction (2026-11-01, post-sync).** The close originally recorded
+"doxygen 0 warnings"; that check was wrong. Under `WARN_AS_ERROR =
+FAIL_ON_WARNINGS` doxygen prints `error:`, not `warning:`, and the close
+grepped for "warning" without reading the exit code, so it passed a
+failing run. The official CI caught it (commit 14df443, `build` gcc and
+clang): `SurfaceSolver::solveVolumesActive()` had no member comment. It
+is documented now and doxygen exits 0; `check_forbidden.sh`, which the
+close had also skipped, is clean.
