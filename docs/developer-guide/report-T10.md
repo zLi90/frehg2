@@ -135,3 +135,23 @@ failing run. The official CI caught it (commit 14df443, `build` gcc and
 clang): `SurfaceSolver::solveVolumesActive()` had no member comment. It
 is documented now and doxygen exits 0; `check_forbidden.sh`, which the
 close had also skipped, is clean.
+
+**Correction 2 (2026-11-02): the nvcc compile lane.** `cuda-compile`
+failed on 14df443 and on 4c33e11 before it. nvcc rejects an extended
+`__host__ __device__` lambda (KOKKOS_LAMBDA) whose *first* capture of a
+variable sits inside an `if constexpr` branch (CUDA C++ guide, "Extended
+Lambda Restrictions"). Both compile-time templates hit it: T2's
+`momentumSourceImpl<Ext>` (7 errors; the 4c33e11 failure) and T10's
+`stepSurfaceImpl<QVOL>` (7 errors). gcc and clang accept the code, so no
+host lane could catch it. Fix: each such variable is named once,
+`(void)x;`, at the top of the kernel, before any `if constexpr`. The
+patched binary reproduces the frozen T10 binary bitwise on sx1, sx4,
+et9-noet, transport-orient and b1 (2 497 datasets including
+checkpoints; a 1-ulp negative control is detected). Those five cases
+cover all four `QVOL` × `Ext` instantiations. The `default_bitwise`,
+et9 and et9-veg pins are green. The other changed files that the
+failing nvcc run never reached were checked for the remaining
+extended-lambda restrictions (private or protected enclosing member,
+nested extended lambda, structured binding, private-type capture,
+implicit `this`); none apply. Only the CI lane can confirm that nvcc
+compiles.

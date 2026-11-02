@@ -97,6 +97,17 @@ void SurfaceSolver::momentumSourceImpl() {
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
           {1, 1}, {nyl + 1, nxl + 1}),
       KOKKOS_LAMBDA(const int j, const int i) {
+        // nvcc: an extended __host__ __device__ lambda may not FIRST capture
+        // a variable inside an if-constexpr branch (CUDA C++ guide, "Extended
+        // Lambda Restrictions"), so the Ext branch's captures are named
+        // here first. Discarded expressions: no code, no arithmetic.
+        (void)st;
+        (void)uRes;
+        (void)vRes;
+        (void)resX;
+        (void)resY;
+        (void)dx;
+        (void)dy;
         const real_t u = uu(j, i);
         const real_t v = vv(j, i);
         const real_t vxc = vx(j, i);

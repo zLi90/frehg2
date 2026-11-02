@@ -157,6 +157,15 @@ void ScalarSolver::stepSurfaceImpl(real_t t, real_t dt, real_t rain, real_t evap
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<2>, Kokkos::IndexType<int>>(
           {1, 1}, {nyl + 1, nxl + 1}),
       KOKKOS_LAMBDA(const int j, const int i, real_t& sumExchange, real_t& sumBoundary) {
+        // nvcc: an extended __host__ __device__ lambda may not FIRST capture
+        // a variable inside an if-constexpr branch (CUDA C++ guide, "Extended
+        // Lambda Restrictions"), so the QVOL branch's captures are named
+        // here first. Discarded expressions: no code, no arithmetic.
+        (void)etan;
+        (void)bottom;
+        (void)cplGain;
+        (void)cplBounce;
+        (void)stageMask;
         const int gi = i0 + i - 1;
         const int gj = j0 + j - 1;
         // Stage-3 T3: all false on a periodic axis (no edge: the superbee
@@ -585,6 +594,12 @@ void ScalarSolver::stepSurfaceImpl(real_t t, real_t dt, real_t rain, real_t evap
           {1, 1}, {nyl + 1, nxl + 1}),
       KOKKOS_LAMBDA(const int j, const int i, real_t& sumAdjust, real_t& sumAnchor,
                     real_t& sumAtmos, real_t& sumStoreIn, real_t& sumStoreOut) {
+        // nvcc: an extended __host__ __device__ lambda may not FIRST capture
+        // a variable inside an if-constexpr branch (CUDA C++ guide, "Extended
+        // Lambda Restrictions"), so the QVOL branch's captures are named
+        // here first. Discarded expressions: no code, no arithmetic.
+        (void)stageMask;
+        (void)s;
         const bool wet = (vflux(j, i) > 0.0 && dept(j, i) > 0.0);
         // T9 (W9.3, R8): under the paired store "dry" means no surface
         // water after the surface step (dept <= 0 — the W9.2 sweep made
