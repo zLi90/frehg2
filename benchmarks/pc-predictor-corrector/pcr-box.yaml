@@ -1,0 +1,249 @@
+# pcr-box — Stage-3 T11 §12C pc-x rank base: the pc0(a)-class saturated
+# heterogeneous box (24 Ks classes over 3 decades, every face a contrast)
+# as a runnable case, driven by opposing side water tables. Used by the
+# pc_rank gate at mpi_ny 1/2/4 under the strict solver, and by the
+# pc-restart lane. K1's churn assert runs on it through pc1's check.
+simulation:
+  id: pcr-box
+  title: Stage-3 pcr saturated heterogeneous box (rank/restart base)
+domain:
+  nx: 4
+  ny: 4
+  nz: 6
+  dx: 1.0
+  dy: 1.0
+  dz: 0.5
+  bottom_elevation: {constant: 3.0}
+time:
+  dt: 30.0
+  t_end: 7200.0
+  output_interval: 720.0
+modules:
+  groundwater: true
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 30.0
+    dt_min: 30.0
+    dt_max: 30.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  predictor_corrector: consistent
+soil:
+  types:
+    - name: lnk00
+      ksx: 3.162278e-07
+      ksy: 3.162278e-07
+      ksz: 3.162278e-07
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk01
+      ksx: 4.270068e-07
+      ksy: 4.270068e-07
+      ksz: 4.270068e-07
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk02
+      ksx: 5.765933e-07
+      ksy: 5.765933e-07
+      ksz: 5.765933e-07
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk03
+      ksx: 7.785820e-07
+      ksy: 7.785820e-07
+      ksz: 7.785820e-07
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk04
+      ksx: 1.051330e-06
+      ksy: 1.051330e-06
+      ksz: 1.051330e-06
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk05
+      ksx: 1.419626e-06
+      ksy: 1.419626e-06
+      ksz: 1.419626e-06
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk06
+      ksx: 1.916941e-06
+      ksy: 1.916941e-06
+      ksz: 1.916941e-06
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk07
+      ksx: 2.588472e-06
+      ksy: 2.588472e-06
+      ksz: 2.588472e-06
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk08
+      ksx: 3.495250e-06
+      ksy: 3.495250e-06
+      ksz: 3.495250e-06
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk09
+      ksx: 4.719685e-06
+      ksy: 4.719685e-06
+      ksz: 4.719685e-06
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk10
+      ksx: 6.373057e-06
+      ksy: 6.373057e-06
+      ksz: 6.373057e-06
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk11
+      ksx: 8.605629e-06
+      ksy: 8.605629e-06
+      ksz: 8.605629e-06
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk12
+      ksx: 1.162030e-05
+      ksy: 1.162030e-05
+      ksz: 1.162030e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk13
+      ksx: 1.569106e-05
+      ksy: 1.569106e-05
+      ksz: 1.569106e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk14
+      ksx: 2.118785e-05
+      ksy: 2.118785e-05
+      ksz: 2.118785e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk15
+      ksx: 2.861026e-05
+      ksy: 2.861026e-05
+      ksz: 2.861026e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk16
+      ksx: 3.863283e-05
+      ksy: 3.863283e-05
+      ksz: 3.863283e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk17
+      ksx: 5.216645e-05
+      ksy: 5.216645e-05
+      ksz: 5.216645e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk18
+      ksx: 7.044109e-05
+      ksy: 7.044109e-05
+      ksz: 7.044109e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk19
+      ksx: 9.511760e-05
+      ksy: 9.511760e-05
+      ksz: 9.511760e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk20
+      ksx: 1.284386e-04
+      ksy: 1.284386e-04
+      ksz: 1.284386e-04
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk21
+      ksx: 1.734325e-04
+      ksy: 1.734325e-04
+      ksz: 1.734325e-04
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk22
+      ksx: 2.341883e-04
+      ksy: 2.341883e-04
+      ksz: 2.341883e-04
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lnk23
+      ksx: 3.162278e-04
+      ksy: 3.162278e-04
+      ksz: 3.162278e-04
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+  map: {file: input/pcr_soil.dat}
+initial_conditions:
+  groundwater:
+    water_table: {constant: 5.0}
+boundary_conditions:
+  - name: south-head
+    region:
+      polygon: [[0.9, -1.0], [3.1, -1.0], [3.1, 0.6], [0.9, 0.6]]
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 5.0}}
+  - name: north-head
+    region:
+      polygon: [[0.9, 3.4], [3.1, 3.4], [3.1, 5.0], [0.9, 5.0]]
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 4.5}}
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, qx, qy, qz, realloc_created, realloc_dropped, vloss]
+  checkpoint:
+    interval: 3600

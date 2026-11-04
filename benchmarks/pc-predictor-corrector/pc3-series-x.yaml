@@ -1,0 +1,71 @@
+# pc3-series-x — the x-oriented twin of pc3-series-z: one saturated layer,
+# side head BCs (hydrostatic eta above the surface keeps every cell
+# saturated), K = 1e-3 (i < 4) over 1e-5 (i >= 4). Exact flux from
+# gate_pc.series_resistance() with the half-spacing edge faces.
+simulation:
+  id: pc3-series-x
+  title: Stage-3 pc3 saturated two-layer series flow (x)
+domain:
+  nx: 8
+  ny: 1
+  nz: 1
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {constant: 1.0}
+time:
+  dt: 30.0
+  t_end: 21600.0
+  output_interval: 1800.0
+modules:
+  groundwater: true
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 30.0
+    dt_min: 30.0
+    dt_max: 30.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  predictor_corrector: consistent
+  face_conductivity: harmonic     # the harness rewrites this per lane
+soil:
+  types:
+    - name: hi
+      ksx: 1.0e-3
+      ksy: 1.0e-3
+      ksz: 1.0e-3
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lo
+      ksx: 1.0e-5
+      ksy: 1.0e-5
+      ksz: 1.0e-5
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+  map: {file: input/pc3x_soil.dat}
+initial_conditions:
+  groundwater:
+    water_table: {constant: 1.0}
+boundary_conditions:
+  - name: west-head
+    region:
+      polygon: [[-1.0, -1.0], [0.6, -1.0], [0.6, 2.0], [-1.0, 2.0]]
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 3.0}}
+  - name: east-head
+    region:
+      polygon: [[7.4, -1.0], [9.0, -1.0], [9.0, 2.0], [7.4, 2.0]]
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 2.5}}
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, qx, realloc_created, realloc_dropped, vloss]

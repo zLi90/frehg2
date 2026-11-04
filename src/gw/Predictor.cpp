@@ -21,9 +21,17 @@
 ///    bctype_GW[5], the top code, in the bottom branch — darcy_flux
 ///    subroutines.c:190).
 /// None of these paths is exercised by any benchmark configuration.
+///
+/// Stage-3 T11 (O17/S3-A16): under groundwater.predictor_corrector:
+/// consistent the compile-time instantiations here share every face rule
+/// with the corrector (gw/FaceConductivity.hpp; M2 ponded top = Ksz; the
+/// mode-3 seepage Dirichlet leg; the P5 terrain-gravity density factors
+/// r^2 v^1). The <false, ...> instantiations are the literal v1 expression
+/// trees (the S3-A8.1 fma rule).
 
 #include "core/Logger.hpp"
 #include "core/Timer.hpp"
+#include "gw/FaceConductivity.hpp"
 #include "gw/RichardsSolver.hpp"
 #include "gw/VanGenuchten.hpp"
 
@@ -81,6 +89,21 @@ KOKKOS_INLINE_FUNCTION real_t ghostHead(int code, real_t value, real_t interior,
 }  // namespace
 
 void RichardsSolver::computeFaceConductivity() {
+  // T11 dispatch (S3-A8.1 fma rule: compile-time instantiations; the
+  // legacy pair <false, false> folds to the literal v1 expression trees).
+  if (pcConsistent_) {
+    if (pcHarmonic_) {
+      computeFaceConductivityImpl<true, true>();
+    } else {
+      computeFaceConductivityImpl<true, false>();
+    }
+  } else {
+    computeFaceConductivityImpl<false, false>();
+  }
+}
+
+template <bool PC, bool HARM>
+void RichardsSolver::computeFaceConductivityImpl() {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const int nz = grid_.nz();
@@ -91,6 +114,7 @@ void RichardsSolver::computeFaceConductivity() {
 
   Field3<real_t> h = h_, wc = wc_, kx = kx_, ky = ky_, kzF = kzF_;
   Field3<real_t> ksx = ksx_, ksy = ksy_, ksz = ksz_;
+  Field3<real_t> dz3dK = mesh_.dz3d();  // T11 HARM: thickness weighting
   Field3<real_t> vga = vga_, vgn = vgn_, wcs = wcs_, wcr = wcr_, aev = aev_;
   Field3<PetscInt> gid = grid_.gid3();
   Field2<int> topCode = topCode_, botCode = botCode_;
@@ -105,28 +129,51 @@ void RichardsSolver::computeFaceConductivity() {
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
           {1, 0, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
-        const real_t km = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
-                                               h(j, i, k), ksx(j, i, k));
-        const real_t kp = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i + 1, k),
-                                               h(j, i + 1, k), ksx(j, i + 1, k));
-        kx(j, i, k) = 0.5 * (km + kp);
+        // nvcc: name the HARM branch's captures before the if constexpr
+        // (extended-lambda first-capture rule, report-T10 correction 2).
+        (void)vga;
+        (void)h;
+        (void)ksx;
+        if constexpr (HARM) {
+          kx(j, i, k) = faceK<true>(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                    h(j, i, k), ksx(j, i, k), 1.0,
+                                    soilAt(vga, vgn, wcs, wcr, aev, j, i + 1, k),
+                                    h(j, i + 1, k), ksx(j, i + 1, k), 1.0);
+        } else {
+          const real_t km = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                                 h(j, i, k), ksx(j, i, k));
+          const real_t kp = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i + 1, k),
+                                                 h(j, i + 1, k), ksx(j, i + 1, k));
+          kx(j, i, k) = 0.5 * (km + kp);
+        }
       });
   Kokkos::parallel_for(
       "gw_face_k_y",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
           {0, 1, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
-        const real_t km = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
-                                               h(j, i, k), ksy(j, i, k));
-        const real_t kp = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j + 1, i, k),
-                                               h(j + 1, i, k), ksy(j + 1, i, k));
-        ky(j, i, k) = 0.5 * (km + kp);
+        (void)vga;
+        (void)h;
+        (void)ksy;
+        if constexpr (HARM) {
+          ky(j, i, k) = faceK<true>(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                    h(j, i, k), ksy(j, i, k), 1.0,
+                                    soilAt(vga, vgn, wcs, wcr, aev, j + 1, i, k),
+                                    h(j + 1, i, k), ksy(j + 1, i, k), 1.0);
+        } else {
+          const real_t km = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                                 h(j, i, k), ksy(j, i, k));
+          const real_t kp = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j + 1, i, k),
+                                                 h(j + 1, i, k), ksy(j + 1, i, k));
+          ky(j, i, k) = 0.5 * (km + kp);
+        }
       });
   Kokkos::parallel_for(
       "gw_face_k_z",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
           {1, 1, 0}, {nyl + 1, nxl + 1, nz + 1}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
+        (void)dz3dK;  // nvcc extended-lambda first-capture rule
         if (k == 0) {
           // Face above the k = 0 cell: zero, then the top-face rule below
           // (legacy Kz[kMou] = 0, groundwater.c:266).
@@ -160,11 +207,18 @@ void RichardsSolver::computeFaceConductivity() {
           kzF(j, i, k) = 0.0;
           return;
         }
-        const real_t km = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k - 1),
-                                               h(j, i, k - 1), ksz(j, i, k - 1));
-        const real_t kp = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
-                                               h(j, i, k), ksz(j, i, k));
-        kzF(j, i, k) = 0.5 * (km + kp);
+        if constexpr (HARM) {
+          kzF(j, i, k) = faceK<true>(soilAt(vga, vgn, wcs, wcr, aev, j, i, k - 1),
+                                     h(j, i, k - 1), ksz(j, i, k - 1), dz3dK(j, i, k - 1),
+                                     soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                     h(j, i, k), ksz(j, i, k), dz3dK(j, i, k));
+        } else {
+          const real_t km = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k - 1),
+                                                 h(j, i, k - 1), ksz(j, i, k - 1));
+          const real_t kp = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                                 h(j, i, k), ksz(j, i, k));
+          kzF(j, i, k) = 0.5 * (km + kp);
+        }
       });
 
   // Domain-edge side overrides (compute_K_face:222-262): no-flux edges are
@@ -218,6 +272,7 @@ void RichardsSolver::computeFaceConductivity() {
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
           {1, 1, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
+        (void)cplDept;  // nvcc extended-lambda first-capture rule
         const bool isTop = (gid(j, i, k) >= 0) && (k == 0 || gid(j, i, k - 1) < 0);
         if (!isTop) {
           return;
@@ -225,7 +280,15 @@ void RichardsSolver::computeFaceConductivity() {
         const real_t own = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
                                                 h(j, i, k), ksz(j, i, k));
         if (coupled) {
-          kzF(j, i, k) = (cplDept(j, i) > 0.0) ? 0.5 * (ksz(j, i, k) + own) : own;
+          if constexpr (PC) {
+            // T11 P3 (M2, O17c): the corrector infiltrates a wet top at
+            // Ksz (darcy_flux :102-103); the predictor's 0.5 (Ksz + K(h))
+            // under-infiltrates an unsaturated top cell and the restore
+            // books the difference (36 % of the pc6a infiltration, red).
+            kzF(j, i, k) = (cplDept(j, i) > 0.0) ? ksz(j, i, k) : own;
+          } else {
+            kzF(j, i, k) = (cplDept(j, i) > 0.0) ? 0.5 * (ksz(j, i, k) + own) : own;
+          }
           return;
         }
         const int code = topCode(j, i);
@@ -311,7 +374,20 @@ void RichardsSolver::computeFaceConductivity() {
       });
 }
 
+template void RichardsSolver::computeFaceConductivityImpl<false, false>();
+template void RichardsSolver::computeFaceConductivityImpl<true, false>();
+template void RichardsSolver::computeFaceConductivityImpl<true, true>();
+
 void RichardsSolver::assembleSystem(real_t dtg) {
+  if (pcConsistent_) {
+    assembleSystemImpl<true>(dtg);
+  } else {
+    assembleSystemImpl<false>(dtg);
+  }
+}
+
+template <bool PC>
+void RichardsSolver::assembleSystemImpl(real_t dtg) {
   const int nyl = grid_.nyLocal();
   const int nxl = grid_.nxLocal();
   const int nz = grid_.nz();
@@ -438,8 +514,16 @@ void RichardsSolver::assembleSystem(real_t dtg) {
           // head: the configured head condition, or a capacity-limited wet
           // surface in coupled runs (groundwater_mat_coeff:550-557;
           // supply-limited columns take a flux instead — amendment A13).
-          const bool dirichletTop = coupled ? (cplMode(j, i) == 1)
-                                            : (topCode(j, i) == static_cast<int>(GwBcCode::Head));
+          bool dirichletTop = coupled ? (cplMode(j, i) == 1)
+                                      : (topCode(j, i) == static_cast<int>(GwBcCode::Head));
+          if constexpr (PC) {
+            // T11 P4 (M3): a pressurized dry column (mode 3) is a seepage
+            // face in BOTH halves — a Dirichlet leg against the ghost head
+            // 0 (the surface depth). The legacy predictor sealed it while
+            // the corrector drained it; the restore minted the drain
+            // (pc6b red: 0.33 m^3/h created against a sealed boundary).
+            dirichletTop = dirichletTop || (coupled && cplMode(j, i) == 3);
+          }
           if (dirichletTop) {
             gct -= gzm;
           }
@@ -454,14 +538,33 @@ void RichardsSolver::assembleSystem(real_t dtg) {
         b += dtg * volume * kzF(j, i, k) * rZp(j, i, k) * rZp(j, i, k) * vZp(j, i, k) /
              dz3d(j, i, k);
         if (terrain) {
-          real_t sign = (bot3d(j, i + 1, k) > bot3d(j, i, k)) ? 1.0 : -1.0;
-          b += sign * dtg * ax(j, i, k) * kx(j, i, k) * sinx(j, i, k);
-          sign = (bot3d(j, i, k) > bot3d(j, i - 1, k)) ? -1.0 : 1.0;
-          b += sign * dtg * ax(j, i - 1, k) * kx(j, i - 1, k) * sinx(j, i - 1, k);
-          sign = (bot3d(j + 1, i, k) > bot3d(j, i, k)) ? 1.0 : -1.0;
-          b += sign * dtg * ay(j, i, k) * ky(j, i, k) * siny(j, i, k);
-          sign = (bot3d(j, i, k) > bot3d(j - 1, i, k)) ? -1.0 : 1.0;
-          b += sign * dtg * ay(j - 1, i, k) * ky(j - 1, i, k) * siny(j - 1, i, k);
+          if constexpr (PC) {
+            // T11 P5 (M4 + S1, O17d): the along-layer gravity term in the
+            // z-gravity form r^2 v^1 — K v_f r_f^2 sin(a) here, K v_f r_f
+            // sin(a) inside the corrector's q (its theta update supplies
+            // the second r_f). Fresh or flat, every factor is 1 (K3).
+            real_t sign = (bot3d(j, i + 1, k) > bot3d(j, i, k)) ? 1.0 : -1.0;
+            b += sign * dtg * ax(j, i, k) * kx(j, i, k) * rXp(j, i, k) *
+                 rXp(j, i, k) * vXp(j, i, k) * sinx(j, i, k);
+            sign = (bot3d(j, i, k) > bot3d(j, i - 1, k)) ? -1.0 : 1.0;
+            b += sign * dtg * ax(j, i - 1, k) * kx(j, i - 1, k) * rXp(j, i - 1, k) *
+                 rXp(j, i - 1, k) * vXp(j, i - 1, k) * sinx(j, i - 1, k);
+            sign = (bot3d(j + 1, i, k) > bot3d(j, i, k)) ? 1.0 : -1.0;
+            b += sign * dtg * ay(j, i, k) * ky(j, i, k) * rYp(j, i, k) *
+                 rYp(j, i, k) * vYp(j, i, k) * siny(j, i, k);
+            sign = (bot3d(j, i, k) > bot3d(j - 1, i, k)) ? -1.0 : 1.0;
+            b += sign * dtg * ay(j - 1, i, k) * ky(j - 1, i, k) * rYp(j - 1, i, k) *
+                 rYp(j - 1, i, k) * vYp(j - 1, i, k) * siny(j - 1, i, k);
+          } else {
+            real_t sign = (bot3d(j, i + 1, k) > bot3d(j, i, k)) ? 1.0 : -1.0;
+            b += sign * dtg * ax(j, i, k) * kx(j, i, k) * sinx(j, i, k);
+            sign = (bot3d(j, i, k) > bot3d(j, i - 1, k)) ? -1.0 : 1.0;
+            b += sign * dtg * ax(j, i - 1, k) * kx(j, i - 1, k) * sinx(j, i - 1, k);
+            sign = (bot3d(j + 1, i, k) > bot3d(j, i, k)) ? 1.0 : -1.0;
+            b += sign * dtg * ay(j, i, k) * ky(j, i, k) * siny(j, i, k);
+            sign = (bot3d(j, i, k) > bot3d(j - 1, i, k)) ? -1.0 : 1.0;
+            b += sign * dtg * ay(j - 1, i, k) * ky(j - 1, i, k) * siny(j - 1, i, k);
+          }
         }
         // Domain-edge legs: prescribed flux replaces the leg; anything else
         // folds the ghost head (zero-gradient copies for open/no-flux edges,
@@ -518,6 +621,9 @@ void RichardsSolver::assembleSystem(real_t dtg) {
           if (coupled) {
             if (cplMode(j, i) == 1) {
               b -= gzm * cplDept(j, i);
+            } else if (PC && cplMode(j, i) == 3) {
+              // T11 P4: the mode-3 Dirichlet ghost head is 0 — the leg is
+              // in the diagonal above; nothing enters the RHS.
             } else if (cplMode(j, i) == 2) {
               // Supply-limited flux (amendment A13): the exchange takes the
               // remaining surface water, bounded by the top cell's pore
@@ -603,6 +709,9 @@ void RichardsSolver::assembleSystem(real_t dtg) {
         });
   }
 }
+
+template void RichardsSolver::assembleSystemImpl<false>(real_t);
+template void RichardsSolver::assembleSystemImpl<true>(real_t);
 
 void RichardsSolver::fillAndSolve() {
   {

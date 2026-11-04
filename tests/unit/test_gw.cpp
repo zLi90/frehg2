@@ -388,6 +388,10 @@ TEST(GwModule, ReallocationSurplusModesDropOrConserve) {
     sim.cfg = gwBaseConfig(1, 1, 10, 0.05, 0.5);
     // asserts the legacy post-allocation (kept selectable; Stage-3 §2.7)
     sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
+    // ... whose corrector surplus comes from the LEGACY one-sided face rule
+    // (S3-A18 flipped the configuration default to consistent).
+    sim.cfg.groundwater.predictorCorrector =
+        frehg::GroundwaterConfig::PredictorCorrector::Legacy;
     frehg::SoilType sand = testSoil(3.0e-4);
     sand.name = "sand";
     frehg::SoilType clay = testSoil(1.52e-6);
@@ -815,6 +819,171 @@ TEST(GwModule, SinkInSaturatedConfinedCellDropsHeadBySinkOverSs) {
   const real_t expected = -sinkRate * 60.0 / 1.0e-4;
   EXPECT_NEAR((h - hn) / expected, 1.0, 1.0e-12);
   EXPECT_NEAR(theta, thetaS, 1.0e-14);
+}
+
+
+// ---------------------------------------------------------------------------
+// Stage-3 T11 pc0 (plan §12C): predictor–corrector consistency, K1/K2/K3.
+// ---------------------------------------------------------------------------
+
+/// A saturated heterogeneous stack (Ks spanning 3 decades), head BCs top
+/// and bottom, one substep: the corrector's theta update must equal
+/// theta(h_pred) so the restore books nothing (K1).
+TEST(GwPc, SaturatedHeterogeneousColumnRestoreBooksNothing) {
+  const std::vector<real_t> ids = {0, 3, 1, 4, 2, 5};
+  const std::string dir = writeFlatFile("soil_id.dat", ids);
+  for (const bool harmonic : {false, true}) {
+    MiniGw sim;
+    sim.cfg = gwBaseConfig(1, 1, 6, 0.25, 10.0);
+    sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
+    sim.cfg.groundwater.predictorCorrector =
+        frehg::GroundwaterConfig::PredictorCorrector::Consistent;
+    sim.cfg.groundwater.faceConductivity =
+        harmonic ? frehg::GroundwaterConfig::FaceConductivity::Harmonic
+                 : frehg::GroundwaterConfig::FaceConductivity::Arithmetic;
+    sim.cfg.soil.types.clear();
+    for (int n = 0; n < 6; ++n) {
+      frehg::SoilType soil = testSoil(std::pow(10.0, -6.5 + 0.6 * n));
+      soil.name = "k" + std::to_string(n);
+      sim.cfg.soil.types.push_back(soil);
+    }
+    sim.cfg.soil.map.fromFile = true;
+    sim.cfg.soil.map.file = "soil_id.dat";
+    sim.cfg.soil.map.constantName.clear();
+    sim.cfg.configDir = dir;
+    // Saturated throughout: water table above the surface.
+    sim.cfg.initialConditions.groundwater.form =
+        frehg::GroundwaterInitialConfig::Form::WaterTable;
+    sim.cfg.initialConditions.groundwater.value.constant = 5.0;
+    // Top psi 2.0 at z = 0, bottom psi 3.3 at z = -1.5: H drops 0.2 m
+    // down the column and psi in [2.0, 3.3] keeps EVERY layer saturated
+    // (a larger drive desaturates the low-K layers and measures the
+    // vadose chord error instead of M1 -- found at authoring, S3-A17).
+    sim.cfg.boundaryConditions = {topBc(frehg::BcKind::Head, 2.0, 1, 1)};
+    frehg::BoundaryConditionConfig bot = topBc(frehg::BcKind::Head, 3.3, 1, 1);
+    bot.name = "bottom";
+    bot.target = frehg::BcTarget::GroundwaterBottom;
+    sim.cfg.boundaryConditions.push_back(bot);
+    sim.build();
+    real_t throughput = 0.0;
+    real_t churn = 0.0;
+    for (int n = 0; n < 20; ++n) {
+      const real_t dtg = sim.step();
+      const frehg::gw::GwStepAudit& a = sim.gw->audit();
+      // boundaryIn is the NET inflow (a steady through-flow nets to 0), so
+      // the throughput is the measured mid-stack face flux x dtg.
+      throughput += std::fabs(interior3(sim.gw->fluxZFaceVolumetric(), 1, 1, 3)) * dtg;
+      churn += std::fabs(a.reallocAdjust) + 2.0 * a.reallocDropped;
+    }
+    // K1: the restore books nothing beyond the solve-residual class.
+    EXPECT_GT(throughput, 1.0e-5) << "vacuous: no flow crossed the stack";
+    EXPECT_LE(churn, 1.0e-10 * throughput) << "harmonic=" << harmonic;
+  }
+}
+
+/// The same stack under predictor_corrector: legacy books the M1 churn —
+/// the red control proving the K1 assert can fail (gate-first negative).
+TEST(GwPc, SaturatedHeterogeneousColumnLegacyChurns) {
+  const std::vector<real_t> ids = {0, 3, 1, 4, 2, 5};
+  const std::string dir = writeFlatFile("soil_id.dat", ids);
+  MiniGw sim;
+  sim.cfg = gwBaseConfig(1, 1, 6, 0.25, 10.0);
+  sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
+  // The red control runs the LEGACY pair by construction (S3-A18 flipped
+  // the configuration default to consistent).
+  sim.cfg.groundwater.predictorCorrector =
+      frehg::GroundwaterConfig::PredictorCorrector::Legacy;
+  sim.cfg.soil.types.clear();
+  for (int n = 0; n < 6; ++n) {
+    frehg::SoilType soil = testSoil(std::pow(10.0, -6.5 + 0.6 * n));
+    soil.name = "k" + std::to_string(n);
+    sim.cfg.soil.types.push_back(soil);
+  }
+  sim.cfg.soil.map.fromFile = true;
+  sim.cfg.soil.map.file = "soil_id.dat";
+  sim.cfg.soil.map.constantName.clear();
+  sim.cfg.configDir = dir;
+  sim.cfg.initialConditions.groundwater.form =
+      frehg::GroundwaterInitialConfig::Form::WaterTable;
+  sim.cfg.initialConditions.groundwater.value.constant = 5.0;
+  sim.cfg.boundaryConditions = {topBc(frehg::BcKind::Head, 2.0, 1, 1)};
+  frehg::BoundaryConditionConfig bot = topBc(frehg::BcKind::Head, 3.3, 1, 1);
+  bot.name = "bottom";
+  bot.target = frehg::BcTarget::GroundwaterBottom;
+  sim.cfg.boundaryConditions.push_back(bot);
+  sim.build();
+  real_t throughput = 0.0;
+  real_t churn = 0.0;
+  for (int n = 0; n < 20; ++n) {
+    const real_t dtg = sim.step();
+    const frehg::gw::GwStepAudit& a = sim.gw->audit();
+    throughput += std::fabs(interior3(sim.gw->fluxZFaceVolumetric(), 1, 1, 3)) * dtg;
+    churn += std::fabs(a.reallocAdjust) + 2.0 * a.reallocDropped;
+  }
+  EXPECT_GT(throughput, 1.0e-5) << "vacuous control";
+  EXPECT_GT(churn, 1.0e-4 * throughput)
+      << "the legacy one-sided Ks no longer churns: re-measure pc0/pc1";
+}
+
+/// K3: on homogeneous soil, uniform density, uncoupled, the consistent
+/// pair is bitwise the legacy pair (every face rule coincides).
+TEST(GwPc, HomogeneousConsistentIsBitwiseLegacy) {
+  real_t head[2][4];
+  int lane = 0;
+  for (const bool consistent : {false, true}) {
+    MiniGw sim;
+    sim.cfg = gwBaseConfig(2, 1, 4, 0.25, 10.0);
+    sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
+    sim.cfg.groundwater.predictorCorrector =
+        consistent ? frehg::GroundwaterConfig::PredictorCorrector::Consistent
+                   : frehg::GroundwaterConfig::PredictorCorrector::Legacy;
+    sim.cfg.initialConditions.groundwater.value.constant = 0.2;
+    sim.cfg.boundaryConditions = {topBc(frehg::BcKind::Head, 0.1, 2, 1)};
+    sim.build();
+    for (int n = 0; n < 30; ++n) {
+      sim.step();
+    }
+    for (int k = 0; k < 4; ++k) {
+      head[lane][k] = interior3(sim.gw->head(), 1, 1, k);
+    }
+    ++lane;
+  }
+  for (int k = 0; k < 4; ++k) {
+    EXPECT_EQ(head[0][k], head[1][k]) << "k = " << k;  // bitwise (K3)
+  }
+}
+
+/// K2 (M2): under a pond, the predictor's top leg at Ksz carries the same
+/// flux the corrector books — the restore's top-cell churn vanishes once
+/// the top cell saturates, and the infiltrated volumes agree.
+TEST(GwPc, PondedTopFaceConsistent) {
+  // (The coupled lane is gate pc6a; here the uncoupled Dirichlet top over
+  // an unsaturated column isolates the same chord-vs-face question: the
+  // uncoupled top head rule was ALREADY Ksz in both halves, so this pins
+  // the uncoupled path bitwise under the token.)
+  real_t theta[2][6];
+  int lane = 0;
+  for (const bool consistent : {false, true}) {
+    MiniGw sim;
+    sim.cfg = gwBaseConfig(1, 1, 6, 0.2, 5.0);
+    sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
+    sim.cfg.groundwater.predictorCorrector =
+        consistent ? frehg::GroundwaterConfig::PredictorCorrector::Consistent
+                   : frehg::GroundwaterConfig::PredictorCorrector::Legacy;
+    sim.cfg.initialConditions.groundwater.value.constant = 0.15;
+    sim.cfg.boundaryConditions = {topBc(frehg::BcKind::Head, 0.3, 1, 1)};
+    sim.build();
+    for (int n = 0; n < 50; ++n) {
+      sim.step();
+    }
+    for (int k = 0; k < 6; ++k) {
+      theta[lane][k] = interior3(sim.gw->waterContent(), 1, 1, k);
+    }
+    ++lane;
+  }
+  for (int k = 0; k < 6; ++k) {
+    EXPECT_EQ(theta[0][k], theta[1][k]) << "k = " << k;
+  }
 }
 
 }  // namespace

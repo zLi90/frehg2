@@ -1,0 +1,75 @@
+# pc3-series-z-stretch — pc3-series-z with dz_stretch 1.25 (sum of the 8
+# thicknesses = 2.0 m): the harmonic face K must be THICKNESS-WEIGHTED
+# (dz_a+dz_b)/(dz_a/K_a+dz_b/K_b) for the series flux to stay exact. Exact continuum/discrete flux (harmonic, thickness-weighted):
+# q = dH_total / Sigma(L/K) through K = 1e-3 (upper 1 m) over 1e-5 (lower 1 m),
+# head BCs top (psi 1.0 at the surface face) and bottom (psi 0.0 at the base).
+# gate_pc.series_resistance() recomputes the exact value from this geometry.
+# The arithmetic lane's bias is recorded, not gated (plan pc3 row).
+simulation:
+  id: pc3-series-z-stretch
+  title: Stage-3 pc3 series flow, stretched dz (tests the thickness weighting)
+domain:
+  nx: 1
+  ny: 1
+  nz: 8
+  dx: 1.0
+  dy: 1.0
+  dz: 0.10079701251042023
+  dz_stretch: 1.25
+  bottom_elevation: {constant: 2.0}
+time:
+  dt: 30.0
+  t_end: 21600.0
+  output_interval: 1800.0
+modules:
+  groundwater: true
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 30.0
+    dt_min: 30.0
+    dt_max: 30.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  predictor_corrector: consistent
+  face_conductivity: harmonic     # the harness rewrites this per lane
+soil:
+  types:
+    - name: hi
+      ksx: 1.0e-3
+      ksy: 1.0e-3
+      ksz: 1.0e-3
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: lo
+      ksx: 1.0e-5
+      ksy: 1.0e-5
+      ksz: 1.0e-5
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+  map: {file: input/pc3z_soil.dat}
+initial_conditions:
+  groundwater:
+    water_table: {constant: 2.0}
+boundary_conditions:
+  - name: top-head
+    region:
+      polygon: [[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0], [-1.0, 2.0]]
+    target: groundwater_top
+    kind: head
+    value: {constant: 1.0}
+  - name: bottom-head
+    region:
+      polygon: [[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0], [-1.0, 2.0]]
+    target: groundwater_bottom
+    kind: head
+    value: {constant: 0.0}
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, qz, realloc_created, realloc_dropped, vloss]

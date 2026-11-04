@@ -1,0 +1,68 @@
+# pc8-tilt-rest — Stage-3 T11 §12C gate pc8 (S1): a sealed, saturated,
+# terrain-PARALLEL slab (terrain_layers: uniform, 10 % slope) of uniform
+# 35 psu water, hydrostatic IC, no forcing. The §12C S1 derivation: with
+# the along-layer gravity term K sin(a) carrying no density ratio, a salty
+# body at rest is pushed along the slope by K (rho_f/rho_0 - 1) sin(a) —
+# red on T10 as a persistent circulation (|qy| of that scale after the
+# elastic IC settling). Green under P5: max |qy| <= tol * Ks * A_face,
+# calibrated by the fresh twin (pc8-tilt-fresh), which must rest on BOTH
+# binaries (every density factor is 1 there).
+simulation:
+  id: pc8-tilt-rest
+  title: Stage-3 pc8 salty slab at rest on a 10 % slope
+domain:
+  nx: 1
+  ny: 16
+  nz: 8
+  dx: 1.0
+  dy: 1.0
+  dz: 0.25
+  bottom_elevation: {file: input/pc8_dem.dat}
+  follow_terrain: true
+  terrain_layers: uniform
+time:
+  dt: 30.0
+  t_end: 14400.0
+  output_interval: 720.0
+modules:
+  groundwater: true
+  transport: true
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 30.0
+    dt_min: 30.0
+    dt_max: 30.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  predictor_corrector: consistent
+  density_coupling: {enabled: true}
+soil:
+  types:
+    - name: sand
+      ksx: 0.0
+      ksy: 1.0e-04
+      ksz: 1.0e-04
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+  map: {constant: sand}
+initial_conditions:
+  groundwater:
+    water_table: {constant: 10.0}
+  transport:
+    groundwater: {constant: 35.0}
+transport:
+  scheme: {advection: superbee}
+  dispersion:
+    longitudinal: 0.0
+    transverse: 0.0
+    molecular: 1.0e-09
+  subsurface_update: consistent
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, qy, qz, realloc_created, realloc_dropped, vloss]
+    transport: [concentration]

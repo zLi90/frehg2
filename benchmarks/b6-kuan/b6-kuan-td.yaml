@@ -54,6 +54,8 @@ surface_water:
   evaporation: {constant: 0.0}
 
 groundwater:
+  # S3-A18 pin: see b6-kuan-ss.yaml (W11.9 td: +25.3 % vs 10 %).
+  predictor_corrector: legacy
   scheme: pca
   use_full3d: true
   timestep:

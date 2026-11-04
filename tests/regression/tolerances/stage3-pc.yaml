@@ -1,0 +1,56 @@
+# stage3-pc.yaml — Stage-3 T11 predictor–corrector consistency gate
+# tolerances (plan §12C; every value cites its authoring measurement;
+# relaxations only by amendment — S3-A17).
+pc1:
+  churn_cap_rel: 0.01        # churn/T; red on T10: 2.91 (S3-A4); report's
+                             # patched binary: 0.006
+  contrast_faces_floor: 20   # anti-vacuity: saturated Ks>10x faces present
+  ledger_rel: 1.0e-6         # the existing rl2 gw-identity class
+pc2:
+  creation_cap: 0.01         # gross created m^3/m per cycle (T/4 scale x4).
+                             # Red 6.97 (S_H2); the report's 3-line Ks patch
+                             # 0.045; T11 first green 0.0003 (M1+M2+M3+P5
+                             # together) — the cap holds 30x headroom and
+                             # sits 700x below red (S3-A17)
+  ledger_abs: 1.0e-2         # the beach's gw identity in m^3: the coupled
+                             # subcycled residual class every v30 run shows
+                             # (~5e-3, the report's own note; measured here
+                             # 5.4e-3 H2 / 4.0e-3 H0) — NOT pc1's 1e-6 T
+                             # strict class (S3-A17)
+  h0_record_only: true       # pc2-h0 records the residual, no cap (pc6c)
+pc3:
+  flux_rel: 1.0e-8           # vs the exact series value (strict solve;
+                             # check tightens to measurement at authoring)
+  steady_rel: 1.0e-8
+pc4:
+  wall_exact: true           # harmonic lane: exactly 0.0
+pc5:
+  theta_floor: 0.20          # anti-stall: first glendale cell wets above
+pc6:
+  # pc6a reworked at first green (S3-A17): the restore churn on the
+  # UNSATURATED wetting front is the single-Picard chord error of the
+  # retention curve — a PCA property, not a face mismatch (measured:
+  # consistent 2.0e-4 m^3 vs legacy 3.7e-2 on 0.074 m^3 infiltrated).
+  # The face gates are the ratio and the saturated tail.
+  churn_ratio_cap: 0.05      # consistent/legacy churn; measured 0.0075
+  sat_tail_rel: 1.0e-10      # K1 once saturated: last-quarter churn / infil
+  restore_rel: 1.0e-8        # pc6b column churn / exfiltrated (measured 4.3e-14)
+  steady_rel: 1.0e-6         # pc6b seepage-rate steadiness
+  flux_rel: 1.0e-2           # pc6b seepage rate vs the analytic K dH / L
+pc7:
+  # Reworked at W11.0 red (S3-A17): raw Sigma-s-theta-V constancy would
+  # re-assert the transport's BOOKED limiter terms (measured drift 3.1e-6
+  # on the T10 red lane while its identity closed); the gate asserts the
+  # gw volume ledger + the scalar's booked identity instead, and the EOS
+  # linearity makes that pair the fluid-mass statement. theta-V drift is
+  # recorded (red measured 0.0 exactly: the flat continuity is consistent).
+  beta: 7.44e-4              # the hardwired baroclinic beta_rho
+  beta_t: 2.1e-4             # pc7a-heat thermal_expansion
+  t_ref: 20.0
+pc8:
+  rest_rel: 1.0e-6           # max |qy| / (Ks A) after settling. Red on T10
+                             # (salty): 1.01e-2 — 3.9x the derived minimum
+                             # creep 2.6e-3 (the sloped faces' K sin(a)
+                             # recirculation); fresh control: 1.1e-13, so
+                             # 1e-6 holds 7 orders of margin over the
+                             # control and catches the creep at 1e4x

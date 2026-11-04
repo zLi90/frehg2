@@ -4,8 +4,10 @@
 # S3-A15).
 sx1:
   c0: 35.0
-  uniform_abs: 1.0e-6      # J1; measured 1.9e-7 psu (overdraft-pairing +
-                           # production-rtol residuals on the swash films)
+  uniform_abs: 5.0e-6      # J1; measured 1.9e-7 psu on the legacy gw
+                           # trajectory, 2.12e-6 under the S3-A18 default
+                           # (consistent pc shifts the swash exchange);
+                           # red class 1e-1 — 2e4x margin kept
   anchor_rel: 1.0e-10      # J2 vs total salt M; measured 9.2e-13
   adjust_rel: 1.0e-4       # C4's booked negative-residual path vs M;
                            # measured 3.2e-5 (4.3e-2 of M 1364). NOT the
@@ -32,5 +34,7 @@ sx4:
   front_floor_psu: 1.0     # anti-vacuity: the front moves
 sx5:
   t0: 20.0
-  uniform_abs: 1.0e-6      # measured alongside sx1 (same body)
+  uniform_abs: 5.0e-6      # measured alongside sx1 (same body): salt
+                           # 2.11e-6, temperature 1.21e-6 under the
+                           # S3-A18 default (S3-A18)
   anchor_rel: 1.0e-10      # the temperature ledger's anchor; measured 2.1e-14

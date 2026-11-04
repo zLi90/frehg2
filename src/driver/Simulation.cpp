@@ -1413,6 +1413,15 @@ void Simulation::flushRunRecord(bool finished) {
       // deposited for the sweep to park with their salt (P4).
       closure << "  vent_thin_m3: " << cumGwVentThin_ << "\n";
     }
+    if (config_.groundwater.predictorCorrector ==
+        GroundwaterConfig::PredictorCorrector::Consistent) {
+      // Stage-3 T11 (P4): the mode-3 guard clamp's cumulative volume
+      // (expected 0; a nonzero value is the C-SEEP chatter window).
+      real_t clampLocal = gw_->pcClampVolume();
+      real_t clamp = 0.0;
+      MPI_Allreduce(&clampLocal, &clamp, 1, MPI_DOUBLE, MPI_SUM, grid_.comm());
+      closure << "  pc_clamp_m3: " << clamp << "\n";
+    }
   }
   if (config_.evapotranspiration.enabled) {
     // Stage-3 T5 (W5.10): the ET closure lines. open_water is the

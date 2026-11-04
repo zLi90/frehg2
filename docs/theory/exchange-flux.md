@@ -109,7 +109,19 @@ results are the b5 envelope member):
   filling column nor land it exactly on the singular C(h) = 0 state
   (SERGHEI's CFL-sized surface steps keep the same formula bounded
   implicitly; the plan §5.2 adaptive dtg does not);
-- **mode 0 (dry)**: the legacy seepage face.
+- **mode 0 (dry)**: the legacy seepage face — the predictor seals the top
+  while the corrector keeps an upward Darcy flux to the zero ghost head
+  (the preserved split; under `predictor_corrector: legacy` only);
+- **mode 3 (pressurized seepage face; Stage-3 T11, `predictor_corrector:
+  consistent` only)**: a dry surface whose top cell is pressurized against
+  the zero ghost head at the substep's start (h_top > r_zp · dz/2). BOTH
+  halves then apply the seepage Dirichlet leg with Ksz, so an artesian
+  column exfiltrates through the solve instead of having its drain minted
+  by the reallocation restore (the legacy split created 0.33 m³/h against
+  a sealed boundary on the pc6b column; S3-A16/M3). The corrector's
+  upward-only clamp stays as a guard, booked to the run record
+  (`pc_clamp_m3`, expected 0 outside the C-SEEP chatter window). Dry,
+  unpressurized columns remain mode 0 (sealed in both halves).
 
 ## Coupled-regime surface corrections (amendment A13)
 

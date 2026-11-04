@@ -1,0 +1,65 @@
+# pc7a-lock — Stage-3 T11 §12C gate pc7(a): a sealed, saturated, FLAT box
+# with a 35|0 psu lock-exchange front (density coupling on). The flat mesh
+# isolates the continuity gradient/storage terms from M4's terrain term:
+# the corrected-M4 statement is that these are ALREADY mass-consistent in
+# both halves, so the K1 restore churn at the front stays in the
+# solve-residual class, and the Sigma s-theta-V and Sigma (1+beta s) theta-V
+# ledgers hold to 1e-12 while the plain Sigma theta-V drift (the mass-form
+# distinction) is recorded, not gated.
+simulation:
+  id: pc7a-lock
+  title: Stage-3 pc7a sealed saturated lock exchange (flat; ledger gate)
+domain:
+  nx: 8
+  ny: 1
+  nz: 8
+  dx: 0.25
+  dy: 1.0
+  dz: 0.25
+  bottom_elevation: {constant: 2.0}
+time:
+  dt: 30.0
+  t_end: 3600.0
+  output_interval: 360.0
+modules:
+  groundwater: true
+  transport: true
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 30.0
+    dt_min: 30.0
+    dt_max: 30.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  predictor_corrector: consistent
+  density_coupling: {enabled: true}
+soil:
+  types:
+    - name: sand
+      ksx: 1.0e-03
+      ksy: 0.0
+      ksz: 1.0e-03
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+  map: {constant: sand}
+initial_conditions:
+  groundwater:
+    water_table: {constant: 5.0}
+  transport:
+    groundwater: {file: input/pc7_salt.dat}
+transport:
+  scheme: {advection: superbee}
+  dispersion:
+    longitudinal: 0.0
+    transverse: 0.0
+    molecular: 1.0e-09
+  subsurface_update: consistent
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, qx, qz, realloc_created, realloc_dropped, vloss]
+    transport: [concentration]

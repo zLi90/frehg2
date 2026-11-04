@@ -8,16 +8,27 @@
 /// (solve_groundwater:163-189).
 ///
 /// The corrector re-evaluates its face conductivities from the *predicted*
-/// head exactly as darcy_flux does — including the legacy quirks that the
-/// x/y faces use the minus cell's saturated conductivity for both flanks
-/// while z faces use the plus (lower) cell's, and that each flank's own vG
-/// parameters enter its closure. Interface faces evaluate two-sided from
-/// exchanged neighbor state (the legacy one-sided interface treatment was
-/// rank-dependent; single-rank values are identical). The flux fields carry
-/// the legacy face-area factor [m^3/s]; positive x/y flux points in the
-/// -axis direction and positive z flux upward.
+/// head exactly as darcy_flux does. Under the default
+/// groundwater.predictor_corrector: legacy that includes the one-sided-Ks
+/// rule — x/y faces use the minus cell's saturated conductivity for both
+/// flanks, z faces the plus (lower) cell's — WHICH IS NOT HARMLESS: it
+/// disagrees with the predictor's own-Ks arithmetic mean on every face
+/// across a Ks contrast, and the reallocation's saturated-contact restore
+/// θ := θ(h) turns the disagreement into created/dropped water (72 % of
+/// the net exfiltration on the v30 H2 beach; Stage-3 S3-A16, phase T11).
+/// Under predictor_corrector: consistent both halves evaluate interior
+/// faces through gw/FaceConductivity.hpp (each flank's own Ks), the
+/// coupled top takes Ksz under ponding in both halves (M2), a pressurized
+/// dry column is a seepage face in both halves (mode 3, M3), and the
+/// terrain gravity term carries the z-form density factors (P5).
+/// Interface faces evaluate two-sided from exchanged neighbor state (the
+/// legacy one-sided interface treatment was rank-dependent; single-rank
+/// values are identical). The flux fields carry the legacy face-area
+/// factor [m^3/s]; positive x/y flux points in the -axis direction and
+/// positive z flux upward.
 
 #include "core/Logger.hpp"
+#include "gw/FaceConductivity.hpp"
 #include "gw/RichardsSolver.hpp"
 #include "gw/VanGenuchten.hpp"
 
@@ -34,6 +45,15 @@ KOKKOS_INLINE_FUNCTION VgSoil soilAt(const V3& vga, const V3& vgn, const V3& wcs
 }  // namespace
 
 void RichardsSolver::classifyCoupledTop(real_t dtg) {
+  if (pcConsistent_) {
+    classifyCoupledTopImpl<true>(dtg);
+  } else {
+    classifyCoupledTopImpl<false>(dtg);
+  }
+}
+
+template <bool PC>
+void RichardsSolver::classifyCoupledTopImpl(real_t dtg) {
   // Coupled top-exchange classification (amendment A13; SERGHEI
   // GwBC.h:277-288, the reference implementation's evolution of the legacy
   // exchange): a wet column whose saturated-Darcy demand the available
@@ -51,6 +71,7 @@ void RichardsSolver::classifyCoupledTop(real_t dtg) {
 
   Field3<real_t> h = h_, ksz = ksz_;
   Field3<real_t> dz3d = mesh_.dz3d();
+  Field3<real_t> rZpC = rRhoZp_;  // T11 P4: the pressurization threshold
   Field3<PetscInt> gid = grid_.gid3();
   Field2<int> mode = cplMode_;
   Field2<real_t> dept = cpl_.dept, avail = cpl_.avail;
@@ -67,7 +88,20 @@ void RichardsSolver::classifyCoupledTop(real_t dtg) {
             break;
           }
         }
+        (void)rZpC;  // nvcc extended-lambda first-capture rule
         if (kTop < 0 || dept(j, i) <= 0.0) {
+          if constexpr (PC) {
+            // T11 P4 (M3): a dry surface over a top cell pressurized
+            // against the zero ghost head is a seepage face in BOTH
+            // halves (mode 3) — the corrector's top Darcy at h^n points
+            // up exactly when h > r_zp * (dz/2). Mode 0 stays sealed in
+            // both halves.
+            if (kTop >= 0 &&
+                h(j, i, kTop) > rZpC(j, i, kTop) * 0.5 * dz3d(j, i, kTop)) {
+              mode(j, i) = 3;
+              return;
+            }
+          }
           mode(j, i) = 0;
           return;
         }
@@ -80,7 +114,23 @@ void RichardsSolver::classifyCoupledTop(real_t dtg) {
       });
 }
 
+template void RichardsSolver::classifyCoupledTopImpl<false>(real_t);
+template void RichardsSolver::classifyCoupledTopImpl<true>(real_t);
+
 void RichardsSolver::computeFluxes(real_t dtg) {
+  if (pcConsistent_) {
+    if (pcHarmonic_) {
+      computeFluxesImpl<true, true>(dtg);
+    } else {
+      computeFluxesImpl<true, false>(dtg);
+    }
+  } else {
+    computeFluxesImpl<false, false>(dtg);
+  }
+}
+
+template <bool PC, bool HARM>
+void RichardsSolver::computeFluxesImpl(real_t dtg) {
   const bool full3d = useFull3d_;
   const bool coupled = cpl_.active;
   const int nyl = grid_.nyLocal();
@@ -126,6 +176,8 @@ void RichardsSolver::computeFluxes(real_t dtg) {
           {1, 0, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         const int giMinus = i0 + i - 1;
+        (void)gid;  // nvcc extended-lambda first-capture rule
+        (void)rXp;
         // Stage-3 T3: no edge faces on a periodic axis — the seam face
         // takes the interior Darcy form with the wrapped neighbor's halo.
         const bool westEdgeFace = topo.outsideX(giMinus);
@@ -153,6 +205,21 @@ void RichardsSolver::computeFluxes(real_t dtg) {
           if (eastEdgeFace) {
             kface = kc;
             delta = 0.5 * dx;
+          } else if constexpr (PC) {
+            // T11 P1/P2 (M1): the shared face rule — each flank's own Ks
+            // (the legacy quirk fed the minus cell's Ks to both flanks and
+            // the restore turned the predictor/corrector gap into water:
+            // 72 % of the H2 exfiltration, S3-A16).
+            kface = faceK<HARM>(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                h(j, i, k), ksx(j, i, k), 1.0,
+                                soilAt(vga, vgn, wcs, wcr, aev, j, i + 1, k),
+                                h(j, i + 1, k), ksx(j, i + 1, k), 1.0);
+            const bool minusInDomain = !topo.outsideX(giMinus);
+            const bool plusInDomain = !topo.outsideX(giMinus + 1);
+            if (minusInDomain && plusInDomain &&
+                (gid(j, i, k) < 0 || gid(j, i + 1, k) < 0)) {
+              kface = 0.0;  // subroutines.c:99
+            }
           } else {
             const real_t kn = conductivityFromHead(
                 soilAt(vga, vgn, wcs, wcr, aev, j, i + 1, k), h(j, i + 1, k), ks);
@@ -164,9 +231,19 @@ void RichardsSolver::computeFluxes(real_t dtg) {
               kface = 0.0;  // subroutines.c:99
             }
           }
-          q = faceA * (kface * vXp(j, i, k) * cosx(j, i, k) * (h(j, i + 1, k) - h(j, i, k)) /
-                           delta +
-                       static_cast<real_t>(sign) * kface * sinx(j, i, k));
+          if constexpr (PC) {
+            // T11 P5 (M4 + S1): the along-layer gravity term carries the
+            // face density and viscosity ratios (the theta update's rXp
+            // weight supplies the second r — the z-gravity r^2 v^1 form).
+            q = faceA * (kface * vXp(j, i, k) * cosx(j, i, k) *
+                             (h(j, i + 1, k) - h(j, i, k)) / delta +
+                         static_cast<real_t>(sign) * kface * rXp(j, i, k) *
+                             vXp(j, i, k) * sinx(j, i, k));
+          } else {
+            q = faceA * (kface * vXp(j, i, k) * cosx(j, i, k) *
+                             (h(j, i + 1, k) - h(j, i, k)) / delta +
+                         static_cast<real_t>(sign) * kface * sinx(j, i, k));
+          }
           // use_full3d = false: column mode also suppresses the corrector's
           // lateral flux at faces the predictor sealed. Legacy only zeroed
           // the matrix conductivities (no benchmark can observe the
@@ -205,6 +282,8 @@ void RichardsSolver::computeFluxes(real_t dtg) {
           {0, 1, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         const int gjMinus = j0 + j - 1;
+        (void)gid;  // nvcc extended-lambda first-capture rule
+        (void)rYp;
         const bool southEdgeFace = topo.outsideY(gjMinus);
         const bool northEdgeFace = topo.north(gjMinus);
         const real_t faceA = ay(j, i, k);
@@ -225,6 +304,18 @@ void RichardsSolver::computeFluxes(real_t dtg) {
           if (northEdgeFace) {
             kface = kc;
             delta = 0.5 * dy;
+          } else if constexpr (PC) {
+            // T11 P1/P2 (M1): each flank's own Ks (see the x branch).
+            kface = faceK<HARM>(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                h(j, i, k), ksy(j, i, k), 1.0,
+                                soilAt(vga, vgn, wcs, wcr, aev, j + 1, i, k),
+                                h(j + 1, i, k), ksy(j + 1, i, k), 1.0);
+            const bool minusInDomain = !topo.outsideY(gjMinus);
+            const bool plusInDomain = !topo.outsideY(gjMinus + 1);
+            if (minusInDomain && plusInDomain &&
+                (gid(j, i, k) < 0 || gid(j + 1, i, k) < 0)) {
+              kface = 0.0;
+            }
           } else {
             const real_t kn = conductivityFromHead(
                 soilAt(vga, vgn, wcs, wcr, aev, j + 1, i, k), h(j + 1, i, k), ks);
@@ -236,9 +327,16 @@ void RichardsSolver::computeFluxes(real_t dtg) {
               kface = 0.0;
             }
           }
-          q = faceA * (kface * vYp(j, i, k) * cosy(j, i, k) * (h(j + 1, i, k) - h(j, i, k)) /
-                           delta +
-                       static_cast<real_t>(sign) * kface * siny(j, i, k));
+          if constexpr (PC) {
+            q = faceA * (kface * vYp(j, i, k) * cosy(j, i, k) *
+                             (h(j + 1, i, k) - h(j, i, k)) / delta +
+                         static_cast<real_t>(sign) * kface * rYp(j, i, k) *
+                             vYp(j, i, k) * siny(j, i, k));
+          } else {
+            q = faceA * (kface * vYp(j, i, k) * cosy(j, i, k) *
+                             (h(j + 1, i, k) - h(j, i, k)) / delta +
+                         static_cast<real_t>(sign) * kface * siny(j, i, k));
+          }
           if (!full3d && ((gid(j, i, k) >= 0 && wc(j, i, k) < wcs(j, i, k)) ||
                           (gid(j + 1, i, k) >= 0 && wc(j + 1, i, k) < wcs(j + 1, i, k)))) {
             q = 0.0;
@@ -265,11 +363,14 @@ void RichardsSolver::computeFluxes(real_t dtg) {
   // z faces (darcy_flux "z" branch, subroutines.c:70-105 and the boundary
   // overrides :160-191). Plane k is the face above cell k; plane nz the
   // bottom boundary face. Positive flux points upward.
+  // T11 P4 guard book (mode-3 upward-only clamp; expected 0 — C-SEEP).
+  Kokkos::View<real_t*, MemSpace> clampView("gw_pc_clamp", 1);
   Kokkos::parallel_for(
       "gw_flux_z",
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
           {1, 1, 0}, {nyl + 1, nxl + 1, nz + 1}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
+        (void)clampView;  // nvcc extended-lambda first-capture rule
         const bool belowActive = (k < nz) && (gid(j, i, k) >= 0);
         const bool aboveActive = (k >= 1) && (gid(j, i, k - 1) >= 0);
         const bool isTopFace = belowActive && !aboveActive;
@@ -320,6 +421,21 @@ void RichardsSolver::computeFluxes(real_t dtg) {
                 } else {
                   cplAvail(j, i) -= need;
                 }
+              }
+            } else if (PC && modeHere == 3) {
+              // T11 P4 (M3): the pressurized seepage face, the predictor's
+              // Dirichlet leg mirrored — Ksz against the zero ghost head
+              // (a pressurized top cell is saturated, so the legacy
+              // 0.5 (kGhost + kCell) equals Ksz wherever mode 3 fires).
+              // The upward-only clamp stays as a guard: it can only act in
+              // the chatter window where the SOLVE un-pressurized the cell
+              // (C-SEEP); its volume is booked and reported.
+              const real_t delta = 0.5 * dz3d(j, i, k);
+              q = az * ks * vZp(j, i, k) *
+                  ((h(j, i, k) - depthHere) / delta - rZp(j, i, k));
+              if (q <= 0.0) {
+                Kokkos::atomic_add(&clampView(0), -q * dtg);
+                q = 0.0;
               }
             } else {
               // Dry surface: a seepage face — infiltration from dry land is
@@ -379,21 +495,41 @@ void RichardsSolver::computeFluxes(real_t dtg) {
             q = 0.0;
           }
         } else if (aboveActive && belowActive) {
-          // Interior face: the lower cell's saturated conductivity enters
-          // both flanks (subroutines.c:77, :90-98).
-          const real_t ks = ksz(j, i, k);
-          const real_t ka = conductivityFromHead(
-              soilAt(vga, vgn, wcs, wcr, aev, j, i, k - 1), h(j, i, k - 1), ks);
-          const real_t kb = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
-                                                 h(j, i, k), ks);
-          const real_t kface = 0.5 * (ka + kb);
+          real_t kface;
+          if constexpr (PC) {
+            // T11 P1/P2 (M1): each flank's own Ks, thickness-weighted
+            // under HARM (the legacy quirk fed the lower cell's Ks to both
+            // flanks: subroutines.c:77).
+            kface = faceK<HARM>(soilAt(vga, vgn, wcs, wcr, aev, j, i, k - 1),
+                                h(j, i, k - 1), ksz(j, i, k - 1), dz3d(j, i, k - 1),
+                                soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                h(j, i, k), ksz(j, i, k), dz3d(j, i, k));
+          } else {
+            // Interior face: the lower cell's saturated conductivity enters
+            // both flanks (subroutines.c:77, :90-98).
+            const real_t ks = ksz(j, i, k);
+            const real_t ka = conductivityFromHead(
+                soilAt(vga, vgn, wcs, wcr, aev, j, i, k - 1), h(j, i, k - 1), ks);
+            const real_t kb = conductivityFromHead(soilAt(vga, vgn, wcs, wcr, aev, j, i, k),
+                                                   h(j, i, k), ks);
+            kface = 0.5 * (ka + kb);
+          }
           const real_t delta = 0.5 * (dz3d(j, i, k - 1) + dz3d(j, i, k));
           q = az * kface * vZp(j, i, k) *
               ((h(j, i, k) - h(j, i, k - 1)) / delta - rZp(j, i, k));
         }
         qzF(j, i, k) = q;
       });
+  if constexpr (PC) {
+    auto host = Kokkos::create_mirror_view(clampView);
+    Kokkos::deep_copy(host, clampView);
+    pcClampVolume_ += host(0);
+  }
 }
+
+template void RichardsSolver::computeFluxesImpl<false, false>(real_t);
+template void RichardsSolver::computeFluxesImpl<true, false>(real_t);
+template void RichardsSolver::computeFluxesImpl<true, true>(real_t);
 
 void RichardsSolver::applyCoupledTopBookkeeping(real_t dtg) {
   // Coupled top-face bookkeeping (legacy groundwater_flux,

@@ -400,8 +400,9 @@ soil:
 }
 
 TEST_F(ConfigTest, SurfaceUpdateParsesRoundTripsAndRejectsUnknownValues) {
-  // transport.surface_update (post-v2.0 opt-in): default legacy, consistent
-  // selects the current-flow-rate flux volume and the still-cell limiter.
+  // transport.surface_update: default CONSERVATIVE since the S3-A18 flip
+  // (owner, 2026-11-04); legacy and consistent stay the golden-pinned
+  // opt-outs and round-trip through the resolved configuration.
   std::string base = kBaseConfig;
   const std::string needle = "modules: {surface_water: true}";
   base.replace(base.find(needle), needle.size(),
@@ -412,8 +413,16 @@ TEST_F(ConfigTest, SurfaceUpdateParsesRoundTripsAndRejectsUnknownValues) {
                "  transport: {surface: {constant: 0.0}}");
 
   const frehg::FrehgConfig byDefault = frehg::loadConfig(writeConfig(base + "transport: {}\n"));
-  EXPECT_FALSE(byDefault.transport.consistentSurfaceUpdate);
-  EXPECT_NE(frehg::resolvedConfigYaml(byDefault).find("surface_update: legacy"),
+  EXPECT_TRUE(byDefault.transport.consistentSurfaceUpdate);
+  EXPECT_TRUE(byDefault.transport.conservativeSurfaceUpdate);
+  EXPECT_NE(frehg::resolvedConfigYaml(byDefault).find("surface_update: conservative"),
+            std::string::npos);
+
+  const std::string legacy = base + "transport: {surface_update: legacy}\n";
+  const frehg::FrehgConfig lg = frehg::loadConfig(writeConfig(legacy));
+  EXPECT_FALSE(lg.transport.consistentSurfaceUpdate);
+  EXPECT_FALSE(lg.transport.conservativeSurfaceUpdate);
+  EXPECT_NE(frehg::resolvedConfigYaml(lg).find("surface_update: legacy"),
             std::string::npos);
 
   const std::string consistent = base + "transport: {surface_update: consistent}\n";
@@ -421,6 +430,7 @@ TEST_F(ConfigTest, SurfaceUpdateParsesRoundTripsAndRejectsUnknownValues) {
   EXPECT_TRUE(ok.ok()) << joined(ok);
   const frehg::FrehgConfig cfg = frehg::loadConfig(writeConfig(consistent));
   EXPECT_TRUE(cfg.transport.consistentSurfaceUpdate);
+  EXPECT_FALSE(cfg.transport.conservativeSurfaceUpdate);
   EXPECT_NE(frehg::resolvedConfigYaml(cfg).find("surface_update: consistent"),
             std::string::npos);
 
@@ -773,16 +783,29 @@ TEST_F(ConfigTest, MonitorIntervalAndSeepageRateParseRoundTripAndRejectMisuse) {
 
 TEST_F(ConfigTest, SubsurfaceUpdateAndReallocationGradientParseAndRoundTrip) {
   // transport.subsurface_update and groundwater.density_coupling.
-  // reallocation_gradient (post-v2.0 opt-ins): both default to the legacy
-  // behavior, round-trip through the resolved configuration, and reject
-  // unknown values.
+  // reallocation_gradient. Since the S3-A18 default flip an absent
+  // surface_update resolves to conservative, and an absent
+  // subsurface_update beside it resolves to consistent (the T10 coupled-
+  // book rule); reallocation_gradient still defaults to freshwater. Both
+  // round-trip through the resolved configuration and reject unknown
+  // values.
   const std::string base = kGwTransportConfig;
   const frehg::FrehgConfig byDefault = frehg::loadConfig(writeConfig(base));
-  EXPECT_FALSE(byDefault.transport.consistentSubsurfaceUpdate);
+  EXPECT_TRUE(byDefault.transport.consistentSubsurfaceUpdate);
   EXPECT_FALSE(byDefault.groundwater.densityCoupling.densityReallocationGradient);
   const std::string resolvedDefault = frehg::resolvedConfigYaml(byDefault);
-  EXPECT_NE(resolvedDefault.find("subsurface_update: legacy"), std::string::npos);
+  EXPECT_NE(resolvedDefault.find("subsurface_update: consistent"), std::string::npos);
   EXPECT_NE(resolvedDefault.find("reallocation_gradient: freshwater"), std::string::npos);
+  // Under an explicit non-conservative surface scheme the subsurface
+  // default stays legacy (the golden-pinned pair).
+  std::string legacyPair = base;
+  const std::string trNeedle0 = "  scheme: {advection: upwind}";
+  legacyPair.replace(legacyPair.find(trNeedle0), trNeedle0.size(),
+                     "  scheme: {advection: upwind}\n  surface_update: consistent");
+  const frehg::FrehgConfig lp = frehg::loadConfig(writeConfig(legacyPair));
+  EXPECT_FALSE(lp.transport.consistentSubsurfaceUpdate);
+  EXPECT_NE(frehg::resolvedConfigYaml(lp).find("subsurface_update: legacy"),
+            std::string::npos);
 
   std::string text = base;
   const std::string trNeedle = "  scheme: {advection: upwind}";

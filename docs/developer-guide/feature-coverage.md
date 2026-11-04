@@ -49,6 +49,8 @@ result (README).
 | `groundwater.density_coupling.reallocation_gradient` (`freshwater` / `density`) | TransportModule.DensityReallocationGradientKeepsInfiltratedSalt; ConfigTest.SubsurfaceUpdateAndReallocationGradientParseAndRoundTrip |
 | `transport.surface_update` (`legacy` / `consistent`) | TransportModule.ConsistentSurfaceUpdateKeepsDrainingFilmsWithinTheInputRange; TransportModule.ConsistentSurfaceUpdateShrinksTheAnchorInSloshingFlow; ConfigTest.SurfaceUpdateParsesRoundTripsAndRejectsUnknownValues |
 | `transport.surface_update: conservative` (Stage-3 T10) | SweModule.SolveFaceVolumesTelescope; TransportModule.SolveConsistentUniformStaysUniform; TransportModule.SolveConsistentDryingFaceCarriesSalt; regression.s3.sx1/sx2/sx4/sx5/sx-restart (per-PR), sx3/sx_rank/sx_seam (nightly) |
+| `groundwater.predictor_corrector` (`legacy` / `consistent`, Stage-3 T11) | GwPc.SaturatedHeterogeneousColumnRestoreBooksNothing; GwPc.SaturatedHeterogeneousColumnLegacyChurns; GwPc.HomogeneousConsistentIsBitwiseLegacy; GwPc.PondedTopFaceConsistent; regression.s3.pc1/pc3/pc4/pc5/pc6/pc7/pc8/pc-restart (per-PR), pc2/pc2_h0/pc_rank (nightly) |
+| `groundwater.face_conductivity` (`arithmetic` / `harmonic`, T11) | regression.s3.pc3 (exact series flow, both lanes); regression.s3.pc4 (the Ks = 0 wall); regression.s3.pc5 (b3 anti-stall) |
 | Atmosphere block (met forcing incl. radiation terms) | regression.g7; MetForcing.SamplesConstantsAndFoldsRelativeHumidity |
 | `atmosphere.wind_speed_floor` | MetForcing.WindSpeedFloorBoundsStillAir |
 | Wind stress (`surface_water.wind`) | regression.g9; regression.g10; regression.wind_orient |

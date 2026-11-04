@@ -41,6 +41,11 @@ surface_water:
   wetting_face_depth: 1.0e-03
 
 groundwater:
+  # S3-A18 pin: the combined-rate identity window and pond-phase
+  # timings were authored on the legacy top-face modes; the consistent
+  # pair changes the ponded/pressurized top face (M2/M3) and moves the
+  # pond-dry switch and the alpha_1 window (measured err 5.9e-2/3.2e-2).
+  predictor_corrector: legacy
   scheme: pca
   use_full3d: true
   timestep: {dt_init: 7.0, dt_min: 7.0, dt_max: 7.0}

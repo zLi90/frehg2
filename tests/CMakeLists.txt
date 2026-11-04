@@ -247,6 +247,9 @@ set_tests_properties(unit.dg_gates.negative PROPERTIES LABELS "unit")
 # Stage-3 T5 et gate-logic battery (plan §6.3): the bulk potential chain
 # two independent ways, the FAO-56/log-profile hand values, t_d, the salt
 # closed forms; every et criterion provably able to fail.
+add_test(NAME unit.pc_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_pc_gates.py)
+set_tests_properties(unit.pc_gates.negative PROPERTIES LABELS "unit")
 add_test(NAME unit.sx_gates.negative
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_sx_gates.py)
 set_tests_properties(unit.sx_gates.negative PROPERTIES LABELS "unit")
@@ -313,6 +316,14 @@ foreach(case
     sx-solve-consistent/sx2-drying-strip
     sx-solve-consistent/sx4-front-slope
     sx-solve-consistent/sx5-uniform-heat
+    pc-predictor-corrector/pc2-h2-beach
+    pc-predictor-corrector/pc3-series-z
+    pc-predictor-corrector/pc4-wall
+    pc-predictor-corrector/pc6a-ponded
+    pc-predictor-corrector/pc6b-artesian
+    pc-predictor-corrector/pc7a-lock
+    pc-predictor-corrector/pc8-tilt-rest
+    pc-predictor-corrector/pcr-box
     g9-wind/g9a-setup
     g9-wind/g9b-linear
     g9-wind/g9c-slope
@@ -800,6 +811,34 @@ set_tests_properties(regression.s3.sx_seam PROPERTIES LABELS "stage3_nightly"
   ENVIRONMENT
   "${_regress_env};FREHG_STAGE3_OVERRIDES=transport.surface_update=conservative"
   TIMEOUT 3600)
+
+# Stage-3 T11 predictor–corrector consistency gates (plan §12C, O17/S3-A16;
+# authored FAILING per §2.3 — the T10 binary rejects the predictor_corrector
+# / face_conductivity tokens: records/T11/red/). pc2 (the packaged v30 H2
+# beach, ~6 min), pc2-h0 (the H0 record lane), pc_rank and pc-restart's
+# nightly twin are nightly-class; the rest are per-PR.
+foreach(gate pc1 pc3 pc4 pc5 pc6 pc7 pc8 pc-restart)
+  add_test(NAME regression.s3.${gate}
+    COMMAND ${_regress} ${gate} ${_regress_args}
+            --work ${CMAKE_BINARY_DIR}/regression/s3-${gate})
+  set_tests_properties(regression.s3.${gate} PROPERTIES LABELS "stage3"
+    ENVIRONMENT "${_regress_env}" TIMEOUT 3600)
+endforeach()
+add_test(NAME regression.s3.pc2
+  COMMAND ${_regress} pc2 ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-pc2)
+set_tests_properties(regression.s3.pc2 PROPERTIES LABELS "stage3_nightly"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 7200)
+add_test(NAME regression.s3.pc2_h0
+  COMMAND ${_regress} pc2-h0 ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-pc2-h0)
+set_tests_properties(regression.s3.pc2_h0 PROPERTIES LABELS "stage3_nightly"
+  ENVIRONMENT "${_regress_env}" TIMEOUT 7200)
+add_test(NAME regression.s3.pc_rank
+  COMMAND ${_regress} pc-rank ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-pc-rank)
+set_tests_properties(regression.s3.pc_rank PROPERTIES LABELS "stage3_nightly;mpi"
+  ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 3600)
 
 add_test(NAME regression.s3.ws1n
   COMMAND ${_regress} ws1n ${_regress_args}

@@ -1358,7 +1358,12 @@ def gate_rank_invariance_b5(args: argparse.Namespace) -> int:
                     bounds = {"subsurface": 4.0e-4, "exchanged": 1.6e-2,
                               "surface": 3.0e-3}
                 else:
-                    bounds = {"subsurface": 3.0e-5, "exchanged": 2.0e-3,
+                    # Re-derived at the S3-A18 default flip (the consistent
+                    # predictor-corrector trajectory; same A14 discipline,
+                    # ~2x headroom on the measured n=4 values: subsurface
+                    # 7.06e-5, exchanged 2.02e-3; legacy-trajectory record:
+                    # 3.0e-5 / 2.0e-3).
+                    bounds = {"subsurface": 1.5e-4, "exchanged": 4.0e-3,
                               "surface": 2.0e-3}
                 checks = [
                     ("subsurface volume", base_ga[-1, 1], ga[-1, 1],
@@ -3667,6 +3672,13 @@ BITWISE_CASES = [
 BITWISE_PINS: dict[str, object] = {
     "groundwater.reallocation": "legacy",
     "transport.surface_dryout": "discard",
+    # T11 (W11.9): the gate tests the v2.0 face rule whatever the default.
+    "groundwater.predictor_corrector": "legacy",
+    # S3-A18 (the surface-update default flip): v2.0's default was legacy.
+    # Pins fill ABSENT keys only — coupled-salt's explicit `consistent`
+    # is part of the recorded T0 configuration and stays.
+    "transport.surface_update": "legacy",
+    "transport.subsurface_update": "legacy",
 }
 
 
@@ -3700,6 +3712,11 @@ def gate_default_bitwise(args: argparse.Namespace) -> int:
             parts = dotted.split(".")
             for part in parts[:-1]:
                 node = node.setdefault(part, {})
+            # A pin recreates the T0 configuration: it supplies the
+            # v2.0 DEFAULT for an absent key; a key the case sets
+            # explicitly was recorded that way and is left alone.
+            if parts[-1] in node:
+                continue
             node[parts[-1]] = value
             pinned.append(dotted)
         with open(config, "w", encoding="utf-8") as handle:
@@ -4040,6 +4057,12 @@ def gate_rl4(args: argparse.Namespace) -> int:
     for lane in ("legacy", "disabled"):
         def consistent(doc):
             doc.setdefault("transport", {})["subsurface_update"] = "consistent"
+            # S3-A18: the disabled-vs-legacy anchor relation (anchor >= 5x)
+            # measures the LEGACY-reallocation trajectory, whose anchor the
+            # consistent predictor-corrector default starves (W11.8:
+            # disabled 1.297 vs legacy 2.317 under consistent — the ratio
+            # premise fails structurally). Pinned like rl2's case file.
+            doc.setdefault("groundwater", {})["predictor_corrector"] = "legacy"
         config = rl_stage_lane(args, "x-orient", "coupled-salt-base.yaml", lane,
                                extra_transform=consistent)
         if config is None:
@@ -6629,6 +6652,7 @@ def gate_ws_rank(args: argparse.Namespace) -> int:
 # sx4 (a tracer front), sx5 (temperature), sx-restart/sx-rank/sx-seam.
 # Pure checks: gate_sx.py.
 # ---------------------------------------------------------------------------
+import gate_pc  # noqa: E402
 import gate_sx  # noqa: E402
 
 CAPABILITY_ABSENT_S3SX = ("capability absent: the schema rejects the T10 "
@@ -6933,6 +6957,611 @@ def gate_sx_rank(args: argparse.Namespace) -> int:
                     ok = ok and good
     print("sx rank gate:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T11 predictor–corrector consistency gates (plan §12C, pc1–pc8).
+# ---------------------------------------------------------------------------
+
+CAPABILITY_ABSENT_S3PC = ("capability absent: the schema rejects the T11 "
+                          "groundwater.predictor_corrector / face_conductivity "
+                          "tokens (expected red before W11.1 lands)")
+
+
+def pc_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-pc.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def pc_stage(args: argparse.Namespace, config_name: str, lane: str,
+             transform=None) -> Path | None:
+    """Stage benchmarks/pc-predictor-corrector into work/<lane> and validate;
+    None = capability absent (the red state)."""
+    case_dir = stage_case(args.repo, "pc-predictor-corrector", args.work / lane)
+    config = case_dir / config_name
+    if transform is not None:
+        rewrite_config(config, transform)
+    if not validate_config(args.frehg, config):
+        return None
+    return config
+
+
+def pc_run(args: argparse.Namespace, config: Path, ranks: int | None = None):
+    run_case(args.frehg, config, config.parent, args.mpiexec,
+             ranks or args.ranks, STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW)
+
+
+def pc_report(ok_ref: list, label: str, result) -> None:
+    good, msg = result
+    print(f"  {label}: {msg}{'' if good else ' FAIL'}")
+    ok_ref[0] = ok_ref[0] and good
+
+
+def pc_reshape3(data: np.ndarray, ny: int, nx: int, nz: int) -> np.ndarray:
+    """Normalize a 3D groundwater output to (ny, nx, nz): small cases are
+    stored flat in (j*nx + i)*nz + k order (the readField3D convention)."""
+    return np.asarray(data).reshape(ny, nx, nz)
+
+
+def pc_face_flux_series(output: Path, var: str, dims, slicer) -> list[float]:
+    """The sampled face flux at `slicer` across every output frame [m^3/s];
+    dims = (ny, nx, nz) for the reshape."""
+    vals = []
+    with h5py.File(output, "r") as handle:
+        for t in output_times(handle, f"/groundwater/{var}"):
+            data = pc_reshape3(np.nan_to_num(handle[f"/groundwater/{var}/{t}"][:]), *dims)
+            vals.append(float(data[slicer]))
+    return vals
+
+
+def gate_pc1(args: argparse.Namespace) -> int:
+    """rl2's legacy lane under predictor_corrector: consistent — the churn
+    cap that replaces the old check_legacy_churn floor (S3-A16)."""
+    tol = pc_tolerances("pc1")
+
+    def set_pc(doc):
+        doc["groundwater"]["predictor_corrector"] = "consistent"
+
+    config = rl_stage_lane(args, "rl-realloc", "rl2-tidal-box.yaml", "legacy",
+                           extra_transform=set_pc)
+    if config is None:
+        print(f"pc1 gate: {CAPABILITY_ABSENT_S3PC}")
+        print("pc1 gate: FAIL")
+        return 1
+    run_case(args.frehg, config, config.parent, args.mpiexec, args.ranks)
+    output = config.parent / "out" / "output.h5"
+    with open(config, encoding="utf-8") as handle:
+        dom = yaml.safe_load(handle)["domain"]
+    dims = (dom["ny"], dom["nx"], dom["nz"])
+    with h5py.File(output, "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+        t_last = output_times(handle, "/groundwater/water_content")[-1]
+        wc = pc_reshape3(handle[f"/groundwater/water_content/{t_last}"][:], *dims)
+    ok = [True]
+    pc_report(ok, "K1 churn cap",
+              gate_pc.check_churn_cap(audit, tol["churn_cap_rel"]))
+    pc_report(ok, "gw ledger",
+              gate_realloc.check_ledger(audit, tol["ledger_rel"]))
+    # Anti-vacuity from the actual fields: the saturated Ks contrasts exist
+    # and the restore fired (it is the scheme's consistency mechanism).
+    ks, wcs = pc_soil_fields(config, dims)
+    n = gate_pc.count_sat_contrast_faces(ks, wc, wcs)
+    pc_report(ok, "anti-vacuity",
+              gate_pc.check_hetero_activity(n, tol["contrast_faces_floor"],
+                                            gate_pc.churn(audit)))
+    print("pc1 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def pc_soil_fields(config: Path, shape) -> tuple[np.ndarray, np.ndarray]:
+    """(Ks, theta_s) fields on the (ny, nx, nz) grid from the staged yaml's
+    soil table and map (k-fastest flat file, matching readField3D)."""
+    with open(config, encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    types = doc["soil"]["types"]
+    ks_t = np.array([t.get("ksz", 0.0) for t in types])
+    ths_t = np.array([t["theta_s"] for t in types])
+    ny, nx, nz = shape
+    soil_map = doc["soil"].get("map", {})
+    if "file" in soil_map:
+        path = config.parent / soil_map["file"]
+        with open(path, encoding="utf-8") as handle:
+            tokens = [t for line in handle if not line.lstrip().startswith("#")
+                      for t in line.split()]
+        ids = np.array(tokens, dtype=int).reshape(ny, nx, nz)
+    else:
+        name = soil_map.get("constant")
+        idx = next(n for n, t in enumerate(types) if t["name"] == name)
+        ids = np.full((ny, nx, nz), idx, dtype=int)
+    return ks_t[ids], ths_t[ids]
+
+
+def gate_pc2(args: argparse.Namespace, het: str = "h2", label: str = "pc2") -> int:
+    """The packaged v30 beach lane (plan §12C pc2; het h0 doubles as pc6c)."""
+    tol = pc_tolerances("pc2")
+    config = pc_stage(args, f"pc2-{het}-beach.yaml", f"pc2-{het}")
+    if config is None:
+        print(f"{label} gate: {CAPABILITY_ABSENT_S3PC}")
+        print(f"{label} gate: FAIL")
+        return 1
+    run_case(args.frehg, config, config.parent, args.mpiexec, args.ranks)
+    output = config.parent / "out" / "output.h5"
+    with h5py.File(output, "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+        t_last = output_times(handle, "/groundwater/realloc_created")[-1]
+        created = float(np.nansum(handle[f"/groundwater/realloc_created/{t_last}"][:]))
+        dropped = float(np.nansum(handle[f"/groundwater/realloc_dropped/{t_last}"][:]))
+    # per metre of shore, scaled T/4 -> cycle (x4; dy 0.5 m, nx 1, dx 1 m)
+    per_m_cycle = created * 4.0 / 1.0
+    ok = [True]
+    # The beach's gw identity holds at ITS OWN class: the coupled subcycled
+    # residual every v30 run shows (~5e-3 m^3; the bug report's note), not
+    # pc1's strict uncoupled class (S3-A17).
+    pc_report(ok, "gw ledger",
+              gate_realloc.check_ledger(audit, 0.0, tol_abs=tol["ledger_abs"]))
+    if het == "h2":
+        cap = float(tol["creation_cap"])
+        good = per_m_cycle <= cap
+        print(f"  gross created {per_m_cycle:.4f} m^3/m per cycle "
+              f"(<= {cap}; red 6.97, report's Ks-only patch 0.045)"
+              f"{'' if good else ' FAIL'}")
+        ok[0] = ok[0] and good
+    else:
+        print(f"  pc6(c) record: H0 gross created {per_m_cycle:.4f}, dropped "
+              f"{dropped * 4.0:.4f} m^3/m per cycle (stock record: 0.021 "
+              f"created; reported, not gated)")
+    print(f"{label} gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def gate_pc3(args: argparse.Namespace) -> int:
+    """Saturated two-layer series flow: the measured resistance of every
+    INTERIOR face equals delta / K_rule — per-face, so the side/top edge-leg
+    conventions (their own predictor/corrector split, S3-A17) are out of
+    scope. Harmonic is gated exact; arithmetic is recorded with an
+    anti-vacuity floor on the interface bias."""
+    tol = pc_tolerances("pc3")
+    ok = [True]
+    for case, axis in (("pc3-series-z.yaml", "z"),
+                       ("pc3-series-z-stretch.yaml", "z"),
+                       ("pc3-series-x.yaml", "x")):
+        for lane in ("harmonic", "arithmetic"):
+            def set_fc(doc, lane=lane):
+                doc["groundwater"]["face_conductivity"] = lane
+            config = pc_stage(args, case,
+                              f"pc3/{case.split('.yaml')[0]}/{lane}",
+                              transform=set_fc)
+            if config is None:
+                print(f"pc3 gate: {CAPABILITY_ABSENT_S3PC}")
+                print("pc3 gate: FAIL")
+                return 1
+            pc_run(args, config)
+            with open(config, encoding="utf-8") as handle:
+                doc = yaml.safe_load(handle)
+            dom = doc["domain"]
+            ny, nx, nz = dom["ny"], dom["nx"], dom["nz"]
+            r = float(dom.get("dz_stretch", 1.0))
+            dzs = np.array([float(dom["dz"]) * r**k for k in range(nz)])
+            ks_t = {t["name"]: t["ksz" if axis == "z" else "ksx"]
+                    for t in doc["soil"]["types"]}
+            ids = np.atleast_1d(np.loadtxt(config.parent / doc["soil"]["map"]["file"],
+                                           dtype=int, comments="#")).ravel()
+            names = [doc["soil"]["types"][i]["name"] for i in ids]
+            ks_prof = np.array([ks_t[n] for n in names])
+            output = config.parent / "out" / "output.h5"
+            with h5py.File(output, "r") as handle:
+                ts = output_times(handle, "/groundwater/hydraulic_head")
+                hh = [pc_reshape3(np.nan_to_num(handle[f"/groundwater/hydraulic_head/{t}"][:]),
+                                  ny, nx, nz) for t in ts[-2:]]
+                var = "qz" if axis == "z" else "qx"
+                q = pc_reshape3(np.nan_to_num(handle[f"/groundwater/{var}/{ts[-1]}"][:]),
+                                ny, nx, nz)
+            # steady: the last two head fields agree
+            dmax = float(np.max(np.abs(hh[-1] - hh[-2])))
+            good = dmax <= tol["steady_rel"]
+            print(f"  {case} [{lane}] steady: max |dh| between the last frames "
+                  f"= {dmax:.3e} (<= {tol['steady_rel']:.0e}){'' if good else ' FAIL'}")
+            ok[0] = ok[0] and good
+            h = hh[-1]
+            iface_bias = None
+            n_faces = (nz if axis == "z" else nx) - 1
+            for f in range(n_faces):
+                if axis == "z":
+                    # face below cell f (plane f+1); positive q is upward,
+                    # the steady flow here is upward-negative... use |q| and
+                    # |dpsi + delta| with the face's own gravity term.
+                    delta = 0.5 * (dzs[f] + dzs[f + 1])
+                    dh = h[0, 0, f + 1] - h[0, 0, f]
+                    grav = -delta  # H = psi + z; z decreases with k
+                    qf = q[0, 0, f + 1]
+                    ka, kb = ks_prof[f], ks_prof[f + 1]
+                    la, lb = dzs[f], dzs[f + 1]
+                else:
+                    delta = float(dom["dx"])
+                    dh = h[0, f + 1, 0] - h[0, f, 0]
+                    grav = 0.0
+                    qf = q[0, f, 0]
+                    ka, kb = ks_prof[f], ks_prof[f + 1]
+                    la = lb = delta
+                k_h = (la + lb) / (la / ka + lb / kb)
+                k_a = 0.5 * (ka + kb)
+                k_rule = k_h if lane == "harmonic" else k_a
+                good, msg = gate_pc.check_face_resistance(
+                    dh, grav, qf, delta, k_rule, tol["flux_rel"],
+                    f"{case.split('.yaml')[0]} [{lane}] face {f}|{f + 1}")
+                if lane == "harmonic":
+                    if not good:
+                        print(f"  {msg} FAIL")
+                    ok[0] = ok[0] and good
+                if abs(ka / kb - 1.0) > 1.0:  # the contrast interface
+                    r_meas = abs(dh + grav) / max(abs(qf), 1.0e-300)
+                    iface_bias = (delta / r_meas) / k_h
+            if lane == "harmonic":
+                print(f"  {case} [harmonic]: every interior face at its exact "
+                      f"series resistance (interface K ratio to harmonic-exact "
+                      f"{iface_bias:.4f})")
+            else:
+                good = iface_bias > 1.01
+                print(f"  {case} [arithmetic] recorded: interface face carries "
+                      f"{iface_bias:.1f}x the harmonic-exact conductance "
+                      f"(anti-vacuity > 1.01){'' if good else ' FAIL'}")
+                ok[0] = ok[0] and good
+    print("pc3 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def gate_pc4(args: argparse.Namespace) -> int:
+    """The Ks = 0 wall: sealed under harmonic; the arithmetic leak recorded."""
+    ok = [True]
+    leak = {}
+    for lane in ("arithmetic", "harmonic"):
+        def set_fc(doc, lane=lane):
+            doc["groundwater"]["face_conductivity"] = lane
+        config = pc_stage(args, "pc4-wall.yaml", f"pc4/{lane}", transform=set_fc)
+        if config is None:
+            print(f"pc4 gate: {CAPABILITY_ABSENT_S3PC}")
+            print("pc4 gate: FAIL")
+            return 1
+        pc_run(args, config)
+        output = config.parent / "out" / "output.h5"
+        with h5py.File(output, "r") as handle:
+            worst = 0.0
+            for t in output_times(handle, "/groundwater/qx"):
+                qx = pc_reshape3(np.nan_to_num(handle[f"/groundwater/qx/{t}"][:]),
+                                 1, 8, 2)
+                # the sand|wall faces flanking cell i = 3: slots 2 and 3
+                worst = max(worst, float(np.max(np.abs(qx[0, 2:4, :]))))
+        leak[lane] = worst
+    pc_report(ok, "harmonic wall",
+              gate_pc.check_wall_flux(leak["harmonic"], leak["arithmetic"]))
+    good = leak["arithmetic"] > 0.0
+    print(f"  anti-vacuity: the arithmetic lane leaks {leak['arithmetic']:.3e} "
+          f"m^3/s through the wall{'' if good else ' FAIL (vacuous)'}")
+    ok[0] = ok[0] and good
+    print("pc4 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def gate_pc5(args: argparse.Namespace) -> int:
+    """b3 Kirkland under both face rules: the wetting front must enter the
+    low-K glendale layer (anti-stall), water identity at its class."""
+    tol = pc_tolerances("pc5")
+    ok = [True]
+    infiltrated = {}
+    for lane in ("harmonic", "arithmetic"):
+        case_dir = stage_case(args.repo, "b3-kirkland", args.work / f"pc5-{lane}")
+        config = case_dir / "b3-kirkland.yaml"
+        def set_fc(doc, lane=lane):
+            doc.setdefault("groundwater", {})["predictor_corrector"] = "consistent"
+            doc["groundwater"]["face_conductivity"] = lane
+        rewrite_config(config, set_fc)
+        if not validate_config(args.frehg, config):
+            print(f"pc5 gate: {CAPABILITY_ABSENT_S3PC}")
+            print("pc5 gate: FAIL")
+            return 1
+        run_case(args.frehg, config, case_dir, args.mpiexec, args.ranks)
+        output = case_dir / "out" / "output.h5"
+        with open(config, encoding="utf-8") as handle:
+            dom = yaml.safe_load(handle)["domain"]
+        dims = (dom["ny"], dom["nx"], dom["nz"])
+        with h5py.File(output, "r") as handle:
+            audit = handle["/monitor/gw_mass_audit"][:]
+            t_last = output_times(handle, "/groundwater/water_content")[-1]
+            wc = pc_reshape3(handle[f"/groundwater/water_content/{t_last}"][:], *dims)
+        pc_report(ok, f"[{lane}] gw ledger",
+                  gate_realloc.check_ledger(audit, pc_tolerances("pc1")["ledger_rel"]))
+        # b3: berino over glendale; find the first glendale layer from the map
+        ks, _ = pc_soil_fields(config, dims)
+        col = ks[dims[0] // 2, dims[1] // 2, :]
+        k_int = int(np.argmax(col < 0.9 * col[0]))
+        prof = wc[dims[0] // 2, dims[1] // 2, :]
+        if lane == "harmonic":
+            pc_report(ok, "[harmonic] front",
+                      gate_pc.check_front_advance(prof, k_int, tol["theta_floor"]))
+        infiltrated[lane] = float(np.nansum(wc))
+    ratio = infiltrated["harmonic"] / infiltrated["arithmetic"]
+    print(f"  infiltrated-theta ratio harmonic/arithmetic = {ratio:.4f} (recorded)")
+    print("pc5 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def gate_pc6(args: argparse.Namespace) -> int:
+    """The top-face modes. (a) ponded infiltration (M2): the restore churn
+    falls to <= ratio_cap of the LEGACY twin's (the remainder is the
+    single-Picard chord error of the retention curve on the unsaturated
+    wetting front — present in every PCA mode, NOT a face mismatch,
+    S3-A17), and once the column saturates (C(h) = 0, no chord error) the
+    churn stops cold (K1 at saturation). (b) the artesian seepage face
+    (M3): the held-dry stage column exfiltrates at the analytic column
+    rate, read from the surface audit's seepage column (the gw boundary
+    column nets the bottom inflow against the coupled top), with the
+    restore at rounding and the P4 guard clamp at zero."""
+    tol = pc_tolerances("pc6")
+    ok = [True]
+    # (a) ponded: consistent lane and its legacy twin
+    churn = {}
+    for lane in ("consistent", "legacy"):
+        def set_pc(doc, lane=lane):
+            doc["groundwater"]["predictor_corrector"] = lane
+        config = pc_stage(args, "pc6a-ponded.yaml", f"pc6a/{lane}",
+                          transform=set_pc)
+        if config is None:
+            print(f"pc6 gate: {CAPABILITY_ABSENT_S3PC}")
+            print("pc6 gate: FAIL")
+            return 1
+        pc_run(args, config)
+        output = config.parent / "out" / "output.h5"
+        with h5py.File(output, "r") as handle:
+            audit = handle["/monitor/gw_mass_audit"][:]
+            times = output_times(handle, "/surface/depth")
+            d0 = float(handle[f"/surface/depth/{times[0]}"][:].ravel()[0])
+            d1 = float(handle[f"/surface/depth/{times[-1]}"][:].ravel()[0])
+        churn[lane] = gate_pc.churn(audit)
+        if lane == "consistent":
+            infil = d0 - d1
+            # K1 at saturation: the churn's last-quarter increment is zero
+            # (the column is saturated there; C = 0, theta(h) = theta_s).
+            n = audit.shape[0]
+            tail = (audit[-1, gate_pc.REALLOC] - audit[3 * n // 4, gate_pc.REALLOC]) +                 2.0 * (audit[-1, gate_pc.REALLOC_DROPPED] -
+                       audit[3 * n // 4, gate_pc.REALLOC_DROPPED])
+            good = abs(tail) <= tol["sat_tail_rel"] * max(infil, 1.0e-12)
+            print(f"  pc6a (M2) K1 at saturation: last-quarter churn "
+                  f"{tail:.3e} m^3 of infiltrated {infil:.4f} "
+                  f"(<= {tol['sat_tail_rel']:.0e}){'' if good else ' FAIL'}")
+            ok[0] = ok[0] and good
+            good = infil > 0.01
+            print(f"  pc6a anti-vacuity: infiltrated {infil:.4f} m^3 (> 0.01; "
+                  f"the 0.4 m unsaturated zone holds ~0.012)"
+                  f"{'' if good else ' FAIL'}")
+            ok[0] = ok[0] and good
+    ratio = churn["consistent"] / max(churn["legacy"], 1.0e-300)
+    good = ratio <= tol["churn_ratio_cap"]
+    print(f"  pc6a (M2) churn ratio consistent/legacy = {churn['consistent']:.3e}"
+          f"/{churn['legacy']:.3e} = {ratio:.4f} (<= {tol['churn_ratio_cap']}; "
+          f"the remainder is the chord-error class){'' if good else ' FAIL'}")
+    ok[0] = ok[0] and good
+    # (b) artesian
+    config = pc_stage(args, "pc6b-artesian.yaml", "pc6b")
+    if config is None:
+        print(f"pc6 gate: {CAPABILITY_ABSENT_S3PC}")
+        print("pc6 gate: FAIL")
+        return 1
+    pc_run(args, config)
+    output = config.parent / "out" / "output.h5"
+    with h5py.File(output, "r") as handle:
+        audit = handle["/monitor/gw_mass_audit"][:]
+        ma = handle["/monitor/mass_audit"][:]
+        t_last = output_times(handle, "/groundwater/realloc_created")[-1]
+        created = float(np.nansum(handle[f"/groundwater/realloc_created/{t_last}"][:]))
+        dropped = float(np.nansum(handle[f"/groundwater/realloc_dropped/{t_last}"][:]))
+    cols = gate_ws.audit_columns(coupled=True, store=False)
+    seep = ma[:, cols["seepage"]]
+    rates = np.diff(seep) / np.diff(ma[:, 0])
+    pc_report(ok, "pc6b (M3) steady",
+              gate_pc.check_steady(list(rates[-2:]), tol["steady_rel"]))
+    q = float(rates[-1])
+    q_exact = 1.0e-5 * (3.0 - 2.0) / 2.0  # K dH / L through the column [m^3/s]
+    rel = abs(q - q_exact) / q_exact
+    good = rel <= tol["flux_rel"]
+    print(f"  pc6b exfiltration (surface seepage rate) {q:.4e} vs analytic "
+          f"{q_exact:.4e} m^3/s (rel {rel:.2e} <= {tol['flux_rel']:.0e})"
+          f"{'' if good else ' FAIL'}")
+    ok[0] = ok[0] and good
+    pc_report(ok, "pc6b (M3) restore",
+              gate_pc.check_column_restore(created, dropped,
+                                           float(seep[-1] - seep[0]),
+                                           tol["restore_rel"], "pc6b"))
+    clamp = pc_run_record_value(config.parent / "out" / "run-record.yaml",
+                                "pc_clamp_m3")
+    good = clamp == 0.0
+    print(f"  pc6b P4 guard clamp: pc_clamp_m3 = {clamp!r} (expected 0.0; "
+          f"nonzero = the C-SEEP chatter window){'' if good else ' FAIL'}")
+    ok[0] = ok[0] and good
+    print("pc6 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def pc_run_record_value(path: Path, key: str) -> float:
+    """A scalar from the run-record closure block."""
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if key in line:
+                return float(line.split(":")[-1])
+    return float("nan")
+
+
+def gate_pc7(args: argparse.Namespace) -> int:
+    """The density ledgers on the flat lock exchange (salt + heat lanes)."""
+    tol = pc_tolerances("pc7")
+    ok = [True]
+    for case, scalar, beta in (("pc7a-lock.yaml", "concentration", tol["beta"]),
+                               ("pc7a-heat.yaml", "temperature", None)):
+        lane = case.split(".")[0]
+        config = pc_stage(args, case, lane)
+        if config is None:
+            print(f"pc7 gate: {CAPABILITY_ABSENT_S3PC}")
+            print("pc7 gate: FAIL")
+            return 1
+        pc_run(args, config)
+        output = config.parent / "out" / "output.h5"
+        with open(config, encoding="utf-8") as handle:
+            doc = yaml.safe_load(handle)
+        dom = doc["domain"]
+        cell_vol = np.full((dom["ny"], dom["nx"], dom["nz"]),
+                           dom["dx"] * dom["dy"] * dom["dz"])
+        group = ("/transport/concentration" if scalar == "concentration"
+                 else "/temperature/temperature")
+        tv = []
+        with h5py.File(output, "r") as handle:
+            audit = handle["/monitor/gw_mass_audit"][:]
+            ta_name = ("/monitor/transport_audit" if scalar == "concentration"
+                       else "/monitor/temperature_audit")
+            ta = handle[ta_name][:]
+            for t in output_times(handle, "/groundwater/water_content"):
+                theta = handle[f"/groundwater/water_content/{t}"][:]
+                m = np.isfinite(theta)
+                tv.append(float(np.sum(theta[m]) * cell_vol.flat[0]))
+        # The gw volume ledger (boundary/realloc/vloss all booked) and the
+        # scalar's own booked identity (subs_mass vs subs_boundary +
+        # subs_adjust + subs_anchor) — raw Sigma-s-theta-V constancy would
+        # re-assert the transport limiter's BOOKED terms (the T10 sx2
+        # lesson, measured 3.1e-6 at W11.0 red); the fluid-mass statement
+        # Sigma (1 + beta s) theta V follows from these two by the EOS
+        # linearity, so the identity pair IS the pc7 ledger set.
+        pc_report(ok, f"[{lane}] gw volume ledger",
+                  gate_realloc.check_ledger(audit, pc_tolerances("pc1")["ledger_rel"]))
+        d = ta[-1] - ta[0]
+        # transport_audit subs identity columns are 8/9/10; the temperature
+        # audit inserts surf_atmos at 8, shifting them to 9/10/11.
+        off = 1 if scalar == "temperature" else 0
+        subs_resid = d[2] - (d[8 + off] + d[9 + off] + d[10 + off])
+        m_scale = max(abs(float(ta[0, 2])), 1.0e-12)
+        good = abs(subs_resid) <= 1.0e-10 * m_scale
+        print(f"  [{lane}] scalar identity residual {subs_resid:.3e} of "
+              f"M = {m_scale:.4e} (<= 1e-10 M){'' if good else ' FAIL'}")
+        ok[0] = ok[0] and good
+        drift = max(abs(v - tv[0]) for v in tv) / tv[0]
+        print(f"  [{lane}] theta-V drift {drift:.3e} (recorded; red measured "
+              f"0.0 exactly — the flat continuity is consistent)")
+        # K1 on a CLOSED box: the throughput is zero, so the churn scales
+        # against the standing water volume (gross churn at rounding).
+        c = gate_pc.churn(audit)
+        vol0 = float(audit[0, gate_pc.VOLUME])
+        good = abs(c) <= 1.0e-10 * vol0
+        print(f"  [{lane}] K1 front churn {c:.3e} m^3 of V = {vol0:.3e} "
+              f"(<= 1e-10 V){'' if good else ' FAIL'}")
+        ok[0] = ok[0] and good
+    print("pc7 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def gate_pc8(args: argparse.Namespace) -> int:
+    """S1: the salty slab at rest on the slope, with the fresh control."""
+    tol = pc_tolerances("pc8")
+    ok = [True]
+    rest = {}
+    for case in ("pc8-tilt-fresh.yaml", "pc8-tilt-rest.yaml"):
+        lane = case.split(".")[0]
+        config = pc_stage(args, case, lane)
+        if config is None:
+            print(f"pc8 gate: {CAPABILITY_ABSENT_S3PC}")
+            print("pc8 gate: FAIL")
+            return 1
+        pc_run(args, config)
+        output = config.parent / "out" / "output.h5"
+        with h5py.File(output, "r") as handle:
+            ts = output_times(handle, "/groundwater/qy")
+            # settle for the first half; assert on the second
+            worst = 0.0
+            for t in ts[len(ts) // 2:]:
+                qy = np.nan_to_num(handle[f"/groundwater/qy/{t}"][:])
+                worst = max(worst, float(np.max(np.abs(qy))))
+        rest[lane] = worst
+    face_area = 1.0 * 0.25
+    cap = tol["rest_rel"]
+    if cap == "TBD":
+        print(f"  fresh control max |qy| = {rest['pc8-tilt-fresh']:.3e}; "
+              f"salty max |qy| = {rest['pc8-tilt-rest']:.3e} m^3/s "
+              f"(S1 creep class = 2.6e-3 Ks A = {2.6e-3 * 1.0e-4 * face_area:.3e}) "
+              f"— authoring measurement, bound set by amendment FAIL")
+        ok[0] = False
+    else:
+        pc_report(ok, "fresh control at rest",
+                  gate_pc.check_rest(rest["pc8-tilt-fresh"], 1.0e-4, face_area,
+                                     float(cap), "fresh"))
+        pc_report(ok, "salty slab at rest (S1)",
+                  gate_pc.check_rest(rest["pc8-tilt-rest"], 1.0e-4, face_area,
+                                     float(cap), "salty"))
+    print("pc8 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def gate_pc_restart(args: argparse.Namespace) -> int:
+    """pcr-box checkpointed mid-run; the continuation bitwise (gw fields)."""
+    config = pc_stage(args, "pcr-box.yaml", "pc-restart/full")
+    if config is None:
+        print(f"pc restart gate: {CAPABILITY_ABSENT_S3PC}")
+        print("pc restart determinism: FAIL")
+        return 1
+    pc_run(args, config)
+    full_out = config.parent / "out" / "output.h5"
+    ckpt = 3600
+    re_cfg = pc_stage(args, "pcr-box.yaml", "pc-restart/restart")
+
+    def add_restart(doc):
+        doc["restart"] = {"enabled": True, "file": str(full_out.resolve()),
+                          "time": ckpt}
+        doc["output"]["filename"] = "out/restarted.h5"
+
+    rewrite_config(re_cfg, add_restart)
+    pc_run(args, re_cfg)
+    ok = True
+    with h5py.File(full_out, "r") as full, \
+            h5py.File(re_cfg.parent / "out" / "restarted.h5", "r") as part:
+        for group in ("/groundwater/hydraulic_head", "/groundwater/water_content",
+                      "/groundwater/realloc_created", "/groundwater/realloc_dropped"):
+            same = all(np.array_equal(
+                np.nan_to_num(full[f"{group}/{t}"][:], nan=-9e99),
+                np.nan_to_num(part[f"{group}/{t}"][:], nan=-9e99))
+                for t in output_times(part, group) if t > ckpt)
+            print(f"  restart {group.rsplit('/', 1)[-1]}: "
+                  f"{'bitwise' if same else 'DIFFERS'}")
+            ok = ok and same
+    print("pc restart determinism:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def gate_pc_rank(args: argparse.Namespace) -> int:
+    """pcr-box at mpi_ny 1/2/4 under the strict solver (S3-A6 classes)."""
+    outs = {}
+    for n in (1, 2, 4):
+        def setup(doc, n=n):
+            if n > 1:
+                doc["domain"]["decomposition"] = {"mpi_nx": 1, "mpi_ny": n}
+        config = pc_stage(args, "pcr-box.yaml", f"pc-rank/n{n}", transform=setup)
+        if config is None:
+            print(f"pc rank gate: {CAPABILITY_ABSENT_S3PC}")
+            print("pc rank gate: FAIL")
+            return 1
+        pc_run(args, config, ranks=n)
+        outs[n] = config.parent / "out" / "output.h5"
+    ok = [True]
+    with h5py.File(outs[1], "r") as base:
+        times = output_times(base, "/groundwater/hydraulic_head")
+        for n in (2, 4):
+            with h5py.File(outs[n], "r") as other:
+                for group, bound in (("/groundwater/hydraulic_head", 1.0e-6),
+                                     ("/groundwater/water_content", 1.0e-8)):
+                    worst = max(float(np.nanmax(np.abs(
+                        base[f"{group}/{t}"][:] - other[f"{group}/{t}"][:])))
+                        for t in times)
+                    good = worst <= bound
+                    print(f"  n=1 vs n={n}: {group.rsplit('/', 1)[-1]} "
+                          f"max |d| = {worst:.3e} (<= {bound:.0e})"
+                          f"{'' if good else ' FAIL'}")
+                    ok[0] = ok[0] and good
+    print("pc rank gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
 
 
 def gate_et7t(args: argparse.Namespace) -> int:
@@ -7242,6 +7871,9 @@ def main() -> int:
                                          "ws1", "ws1n", "ws3", "ws4", "ws-restart",
                                          "ws-rank",
                                          "sx1", "sx2", "sx3", "sx4", "sx5",
+                                         "pc1", "pc2", "pc2-h0", "pc3", "pc4",
+                                         "pc5", "pc6", "pc7", "pc8",
+                                         "pc-restart", "pc-rank",
                                          "sx-restart", "sx-rank"])
     parser.add_argument("--frehg", type=Path, required=True)
     parser.add_argument("--mpiexec", type=Path, required=True)
@@ -7495,6 +8127,28 @@ def main() -> int:
         return gate_sx_restart(args)
     if args.gate == "sx-rank":
         return gate_sx_rank(args)
+    if args.gate == "pc1":
+        return gate_pc1(args)
+    if args.gate == "pc2":
+        return gate_pc2(args)
+    if args.gate == "pc2-h0":
+        return gate_pc2(args, het="h0", label="pc2-h0")
+    if args.gate == "pc3":
+        return gate_pc3(args)
+    if args.gate == "pc4":
+        return gate_pc4(args)
+    if args.gate == "pc5":
+        return gate_pc5(args)
+    if args.gate == "pc6":
+        return gate_pc6(args)
+    if args.gate == "pc7":
+        return gate_pc7(args)
+    if args.gate == "pc8":
+        return gate_pc8(args)
+    if args.gate == "pc-restart":
+        return gate_pc_restart(args)
+    if args.gate == "pc-rank":
+        return gate_pc_rank(args)
     return gate_rank_invariance(args)
 
 

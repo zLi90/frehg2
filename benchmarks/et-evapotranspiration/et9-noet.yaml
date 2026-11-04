@@ -32,6 +32,9 @@ surface_water:
   min_depth: 1.0e-05
   wetting_face_depth: 0.001
 groundwater:
+  # S3-A18 pin: the noET 1271-dataset bitwise pin records the legacy
+  # predictor-corrector trajectory (W11.8).
+  predictor_corrector: legacy
   timestep:
     dt_init: 2.0
     dt_min: 1.0

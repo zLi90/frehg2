@@ -156,16 +156,27 @@ Generate these files with small Python snippets in the case directory
    surrogate `s = (Δρ/ρ)/β_s`. Configured dispersivities act on
    volumetric face fluxes, not Darcy velocities (a preserved legacy
    quirk), so they are not directly the physical dispersivity.
-10. **Surface salinity under wetting/drying**: set
-    `transport.surface_update: conservative` for tidal flats, marshes and
+9b. **Heterogeneous soils (a Ks contrast between neighbouring cells)**:
+    `groundwater.predictor_corrector: consistent` is the default (since
+    S3-A18, 2026-11-04) — leave it. The golden-pinned `legacy` opt-out
+    lets the head solve and the flux update
+    disagree at saturated Ks contrasts, and the reallocation books the
+    difference as created water (72 % of the net exfiltration on a
+    layered tidal beach). With strong layering also consider
+    `groundwater.face_conductivity: harmonic` (exact for saturated
+    series flow; seals impermeable layers exactly).
+10. **Surface salinity under wetting/drying**:
+    `transport.surface_update: conservative` is the default (since
+    S3-A18, 2026-11-04) and is right for tidal flats, marshes and
     wind setdown (it includes `consistent`'s correction and further moves
     salt with the water the free-surface solve actually moved, so salt
     crosses drying faces with its water and `surf_anchor` falls to the
     solve-residual class; `consistent` remains the lighter half-step).
-    The `legacy` default (golden-pinned) can concentrate
+    The golden-pinned `legacy` opt-out can concentrate
     draining thin films above every input value and gain or lose salt
-    through the `surf_anchor` audit column. **Coupled salinity**: also set
-    `transport.subsurface_update: consistent`, and with density coupling
+    through the `surf_anchor` audit column. **Coupled salinity**:
+    `transport.subsurface_update: consistent` resolves automatically
+    beside the conservative default; with density coupling also set
     `groundwater.density_coupling.reallocation_gradient: density`. The
     legacy defaults lose infiltrated salt in the soil: 30 % kept under
     density coupling, 67 % under subcycling with dtg > dt. Check the
@@ -270,8 +281,10 @@ ingredients and their coupling rules:
   exposed ones; they split each cell's time exactly, so intertidal cells
   switch channels through the tide with no double counting (check
   `wet_time + soil_evaporation_time <= t` in the `/atmosphere` outputs);
-- with salinity: `surface_update: consistent` (or `conservative`) and
-  `subsurface_update: consistent` are REQUIRED (the schema says so), and `surface_dryout`
+- with salinity: the consistent-class updates are REQUIRED; the defaults
+  (`surface_update: conservative`, `subsurface_update: consistent` since
+  S3-A18) already satisfy the rule — only an explicit `legacy` is
+  rejected — and `surface_dryout`
   must stay `store` (the shipped default since T8; an explicit `discard`
   is rejected) — evaporation then removes water only, drying cells bank
   their salt in `salt_store` and release it on rewet;

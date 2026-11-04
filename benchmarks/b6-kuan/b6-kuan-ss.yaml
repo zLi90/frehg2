@@ -56,6 +56,11 @@ surface_water:
   evaporation: {constant: 0.0}
 
 groundwater:
+  # S3-A18 pin: the legacy Newton golden carries the P5 terrain-gravity
+  # force; under the consistent pair the salinity comparison leaves its
+  # caps (W11.9: +27.5 % tidal salt mass vs 10 %). Re-goldening under
+  # the new defaults is owner-scheduled follow-on work.
+  predictor_corrector: legacy
   scheme: pca
   use_full3d: true
   timestep:

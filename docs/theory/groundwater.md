@@ -66,11 +66,18 @@ legacy trigger semantics (`solve.c:121-126`).
 - **The aev cutoff applies to θ(h) only.** C(h) and K(h) cut off at h > 0.
   Between aev and 0 a cell is saturated in θ but still on the Mualem K
   curve — live in b1/b2/b6 and pinned by `test_vangenuchten`.
-- **The corrector's face conductivities are not the predictor's.**
-  `darcy_flux` re-evaluates K from the predicted head with its own Ks
-  selection: x/y faces use the *minus* cell's saturated conductivity for
-  both flanks; z faces use the *lower* cell's. Heterogeneous-soil faces
-  (b3's sand/clay interfaces) genuinely differ between the two phases.
+- **The corrector's face conductivities are not the predictor's**
+  (`predictor_corrector: legacy` — the v1/v2.0 behavior; the default is
+  `consistent` since the S3-A18 flip, 2026-11-04). `darcy_flux` re-evaluates
+  K from the predicted head with its own Ks selection: x/y faces use the
+  *minus* cell's saturated conductivity for both flanks; z faces use the
+  *lower* cell's. Heterogeneous-soil faces (b3's sand/clay interfaces)
+  genuinely differ between the two phases — and at SATURATED Ks contrasts
+  the saturated-contact restore θ := θ(h) turns the disagreement into
+  created and dropped water (72 % of the net exfiltration on a 24-class
+  tidal beach; Stage-3 S3-A16). `predictor_corrector: consistent` (the
+  default since S3-A18) removes the whole class — see the T11 section
+  below.
 - **Top cells are excluded from the adaptive controller** (`istop` guard,
   `groundwater.c:1672`), and the per-cell flux sums divide by the cell's own
   face areas, not the per-face areas (`:1674-1675`).
@@ -240,6 +247,54 @@ With the per-cell diagnostics requested
 vloss]`), both modes book every created and discarded volume per cell;
 the sums reproduce the audit columns exactly (gate rl2) and the fields
 checkpoint/restart bitwise (gate rl-restart).
+
+## Predictor–corrector consistency (Stage-3 T11, `groundwater.predictor_corrector`)
+
+`consistent` (O17, S3-A16; the DEFAULT since the S3-A18 flip, 2026-11-04)
+is described here; `legacy` keeps the v1 split above as the golden-pinned
+opt-out. `consistent`
+makes the two halves of the PCA step agree on every face, so the
+reallocation restore θ := θ(h_pred) books only the single-Picard chord
+error of the retention curve (zero at saturation), never a face-rule
+mismatch:
+
+- **M1 — interior faces.** One shared rule (`gw/FaceConductivity.hpp`)
+  for the predictor's matrix legs and the corrector's Darcy fluxes: each
+  flank's own Ks and vG closure, arithmetic mean. Gated: a saturated
+  heterogeneous stack transmits with zero restore churn (pc0/pc1; rl2's
+  churn/throughput fell 2.91 → 0.0059), and the packaged v30 H2 beach
+  creates ≤ 0.01 m³/m per cycle (pc2; red 6.97).
+- **M2 — the ponded top face** takes Ksz in both halves (the legacy
+  predictor averaged Ksz with the dry cell's K(h) and under-infiltrated:
+  36 % of a pond's infiltration re-booked by the restore; pc6a).
+- **M3 — the dry-surface seepage face.** A dry surface over a top cell
+  pressurized against the zero ghost head classifies as a seepage face
+  (mode 3) in BOTH halves — the legacy predictor sealed it while the
+  corrector drained it, so an artesian column's exfiltration was minted
+  by the restore instead of flowing (pc6b: the held-dry stage column now
+  exfiltrates at exactly K·ΔH/L with the restore at rounding). The
+  corrector's upward-only clamp remains as a guard; its volume is written
+  to the run record (`pc_clamp_m3`, expected 0).
+- **P5 — the terrain-slope gravity term** carries the same density and
+  viscosity factors as the z gravity term (r²v¹ across predictor RHS ×
+  corrector flux × θ-update weight). This also removes a FORCE error
+  present in both halves: a salty layer at rest on a slope was pushed by
+  K·(ρ/ρ₀ − 1)·sin α (measured 1.0e-2 of Ks·A on a 10 % slope at 35 psu;
+  at rest to 1.4e-13 under `consistent` — pc8, with a fresh twin as the
+  control).
+
+`face_conductivity: harmonic` (consistent mode only) replaces the
+arithmetic mean with the thickness-weighted harmonic mean of Ks times the
+arithmetic mean of the flanks' relative permeabilities: exact for
+saturated series flow (pc3 — the arithmetic interface face carries ~25×
+the exact conductance at a 100× contrast), seals Ks = 0 flanks exactly
+(pc4 — the arithmetic b5-class wall leaks K/2), and wetting fronts do not
+stall (pc5 on the b3 geometry). The default stays `arithmetic`: the
+legacy-golden gates (b3, b6) embed the arithmetic faces.
+
+On homogeneous soil, uniform density and a flat or uncoupled mesh,
+`consistent` is bitwise `legacy` (pc0's K3 pin). The default-bitwise lane
+pins `predictor_corrector: legacy` alongside the other Stage-3 defaults.
 
 ## Periodic lateral topology (Stage-3 T3)
 

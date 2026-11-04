@@ -20,9 +20,10 @@ then the subsurface scalar (`scalar_groundwater`, `scalar.c:303-498`;
 state of the completed step; in subcycled coupling the subsurface advection
 uses the window's *last* substep's Darcy fluxes over the whole surface dt —
 the legacy structure exactly (only sync mode is golden-pinned; b6 runs
-sync). That structure is not conservative when dtg ≠ dt (quirk 7); the
-opt-in `transport.subsurface_update: consistent` replaces it with the
-window volumes (below).
+sync). That structure is not conservative when dtg ≠ dt (quirk 7);
+`transport.subsurface_update: consistent` (the default beside the
+resolved `conservative` surface update since S3-A18, 2026-11-04;
+an opt-in elsewhere) replaces it with the window volumes (below).
 
 ## Provenance
 
@@ -125,8 +126,9 @@ in `surf_adjust`/`surf_anchor` (measured at 24 % of the exfiltrated salt
 on a two-cell drying strip, and a +28.4 psu·m³ anchor on a tidal beach,
 both under `consistent`).
 
-`conservative` (opt-in; requires and implies `consistent`'s current-step
-volume basis) advects with the **solve's own continuity face volumes**
+`conservative` (the DEFAULT since the S3-A18 flip, 2026-11-04; requires
+and implies `consistent`'s current-step volume basis — `legacy` and
+`consistent` stay the golden-pinned opt-outs) advects with the **solve's own continuity face volumes**
 
     Q = dt·As·E − S·(η_nb − η)^{n+1},
 

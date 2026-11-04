@@ -380,6 +380,8 @@ class RichardsSolver {
   /// The dtg of the last executed step (the legacy Vgflux step,
   /// groundwater.c:1639).
   real_t lastDtg() const { return dtgCurrent_; }
+  /// T11 P4: cumulative mode-3 clamp volume [m^3, rank-local] (expected 0).
+  real_t pcClampVolume() const { return pcClampVolume_; }
   /// Restart (S3-A9): restore the last substep's dtg — a restarted
   /// subcycled window may take ZERO substeps before the first transport
   /// step, which then divides by this value and reads the (also
@@ -441,11 +443,23 @@ class RichardsSolver {
   void updateBoundaryValues(real_t t);
 
   // Predictor (Predictor.cpp).
-  /// Face hydraulic conductivities from the current heads (the legacy
-  /// upstream-weighted K faces).
+  /// Face hydraulic conductivities from the current heads. Legacy: the v1
+  /// rule (ponded top face 0.5 (Ksz + K(h))). T11 (plan §12C, O17): the
+  /// dispatcher selects the compile-time instantiation — PC folds M2 (the
+  /// ponded top face takes Ksz, matching the corrector) and HARM selects
+  /// the shared harmonic rule (gw/FaceConductivity.hpp) on interior faces.
+  /// PC = false is the literal v1 expression tree (the S3-A8.1 fma rule).
   void computeFaceConductivity();
+  /// The compile-time instantiation computeFaceConductivity dispatches to.
+  template <bool PC, bool HARM>
+  void computeFaceConductivityImpl();
   /// Assemble the Richards matrix and RHS for the head solve at step \p dtg.
+  /// T11: PC adds the mode-3 Dirichlet seepage leg (M3) and the density
+  /// factors on the terrain gravity RHS term (P5); PC = false literal.
   void assembleSystem(real_t dtg);
+  /// The compile-time instantiation assembleSystem dispatches to.
+  template <bool PC>
+  void assembleSystemImpl(real_t dtg);
   /// Fill the PETSc system and run the predictor head solve.
   void fillAndSolve();
   /// Re-impose prescribed-head boundary values on the solved heads.
@@ -474,11 +488,22 @@ class RichardsSolver {
 
   // Corrector (Corrector.cpp).
   /// Classify each coupled top face for step \p dtg (the capacity/supply
-  /// split the exchange budget is booked against; plan §10 P3).
+  /// split the exchange budget is booked against; plan §10 P3). T11 (P4):
+  /// under PC a dry surface over a pressurized top cell is a seepage face
+  /// (mode 3) in BOTH halves; PC = false never produces mode 3.
   void classifyCoupledTop(real_t dtg);
+  /// The compile-time instantiation classifyCoupledTop dispatches to.
+  template <bool PC>
+  void classifyCoupledTopImpl(real_t dtg);
   /// Darcy face fluxes of the completed solve (fills the volumetric
-  /// qx/qy/qz views the transport module reads).
+  /// qx/qy/qz views the transport module reads). T11: PC takes the shared
+  /// face rule on interior faces (M1), the mode-3 seepage leg (M3) and the
+  /// density factors on the terrain gravity term (P5); PC = false is the
+  /// literal v1 tree with its one-sided Ks quirk.
   void computeFluxes(real_t dtg);
+  /// The compile-time instantiation computeFluxes dispatches to.
+  template <bool PC, bool HARM>
+  void computeFluxesImpl(real_t dtg);
   /// Book the coupled-top exchange terms of the step (cplExchanged, bounce,
   /// vent, seepage-accumulator evaporation) over \p dtg.
   void applyCoupledTopBookkeeping(real_t dtg);
@@ -543,6 +568,14 @@ class RichardsSolver {
   // Configuration extracts.
   real_t ss_ = 0.0;              ///< specific storage [1/m]
   bool useFull3d_ = true;
+  /// T11 (O17): groundwater.predictor_corrector == consistent.
+  bool pcConsistent_ = false;
+  /// T11 (O17b): groundwater.face_conductivity == harmonic.
+  bool pcHarmonic_ = false;
+  /// T11 (P4 guard): cumulative volume the corrector's upward-only mode-3
+  /// clamp removed [m^3] (expected 0 — the C-SEEP chatter window; written
+  /// to the run-record closure, read by the pc6 gate).
+  real_t pcClampVolume_ = 0.0;
   bool surplusRedistribute_ = false;  ///< groundwater.reallocation_surplus (amendment A7)
   real_t dtMin_ = 0.0, dtMax_ = 0.0;
   real_t dqGrow_ = 0.01, dqShrink_ = 0.02, courantMax_ = 2.0;

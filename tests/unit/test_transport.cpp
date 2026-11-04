@@ -1354,8 +1354,12 @@ frehg::FrehgConfig infiltratingColumnConfig(int mode, bool density, bool fixed) 
   cfg.domain.terrainLayers = frehg::DomainConfig::TerrainLayers::Uniform;
   // Both consumers assert legacy-reallocation-fed behavior (the gradient
   // swap and the restore-fed ledger) — pinned explicitly (plan §2.7-4 /
-  // W1.6; escaped T1, found by W8.1).
+  // W1.6; escaped T1, found by W8.1). The restore surplus they measure
+  // comes from the LEGACY one-sided corrector faces, pinned too since the
+  // S3-A18 default flip.
   cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
+  cfg.groundwater.predictorCorrector =
+      frehg::GroundwaterConfig::PredictorCorrector::Legacy;
   cfg.time.dt = 4.0;
   cfg.time.tEnd = 1.0e5;
   cfg.time.outputInterval = 1.0e5;

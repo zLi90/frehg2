@@ -42,6 +42,9 @@ surface_water:
   wind:
     enabled: false
 groundwater:
+  # S3-A18 pin: the ws1n anti-vacuity floor was measured on the legacy
+  # trajectory (W11.8).
+  predictor_corrector: legacy
   scheme: pca
   use_full3d: true
   timestep:

@@ -35,6 +35,10 @@ modules:
   groundwater: true
 
 groundwater:
+  # S3-A18 pin: the rl2 legacy-churn floor and rl4's anchor comparison
+  # measure the LEGACY trajectory (W11.8); the flipped default would
+  # erase the churn they assert.
+  predictor_corrector: legacy
   scheme: pca
   use_full3d: true
   timestep:

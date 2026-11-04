@@ -1,0 +1,74 @@
+# pc4-wall — Stage-3 T11 §12C gate pc4: two saturated reservoirs separated
+# by a ONE-cell Ks = 0 wall (the b5 outlet-wall class; a 2-cell wall is
+# vacuous — its interior wall|wall face is (0+0)/2 = 0 even under
+# arithmetic, measured at W11.0). Under face_conductivity: harmonic the
+# sand|wall faces carry K_face = 0 exactly and nothing crosses; under
+# arithmetic each carries K_sand/2 and the reservoirs leak through the
+# wall (the b5 wall today). Side head BCs drive dH = 0.5 m.
+simulation:
+  id: pc4-wall
+  title: Stage-3 pc4 impermeable wall between two reservoirs
+domain:
+  nx: 8
+  ny: 1
+  nz: 2
+  dx: 1.0
+  dy: 1.0
+  dz: 1.0
+  bottom_elevation: {constant: 2.0}
+time:
+  dt: 30.0
+  t_end: 14400.0
+  output_interval: 1800.0
+modules:
+  groundwater: true
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 30.0
+    dt_min: 30.0
+    dt_max: 30.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  predictor_corrector: consistent
+  face_conductivity: harmonic     # the harness rewrites this per lane
+soil:
+  types:
+    - name: sand
+      ksx: 1.0e-4
+      ksy: 1.0e-4
+      ksz: 1.0e-4
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+    - name: wall
+      ksx: 0.0
+      ksy: 0.0
+      ksz: 0.0
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+  map: {file: input/pc4_soil.dat}
+initial_conditions:
+  groundwater:
+    water_table: {constant: 2.0}
+boundary_conditions:
+  - name: west-head
+    region:
+      polygon: [[-1.0, -1.0], [0.6, -1.0], [0.6, 2.0], [-1.0, 2.0]]
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 3.0}}
+  - name: east-head
+    region:
+      polygon: [[7.4, -1.0], [9.0, -1.0], [9.0, 2.0], [7.4, 2.0]]
+    target: groundwater_side
+    kind: head
+    value: {hydrostatic: {eta: 2.5}}
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, qx, realloc_created, realloc_dropped, vloss]

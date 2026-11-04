@@ -1,0 +1,82 @@
+# pc6b-artesian — Stage-3 T11 §12C gate pc6(b): a dry seepage face held dry
+# by a prescribed-stage surface cell (eta = bed, closure external: the T2
+# reservoir removes every deposit, so the column's top stays mode 0/3
+# forever). The bottom head (psi = 3.0 at the base of a 2 m fresh column)
+# drives steady artesian exfiltration; the analytic steady flux is
+# q = K (h_b - L) / L = 1e-5 (3 - 2) / 2 = 5e-6 m/s. M3: the stock
+# predictor seals this top while the corrector releases through it, so the
+# head solve pressurizes the column against a face the corrector then
+# drains (red on T10, token stripped: restore churn in the column).
+simulation:
+  id: pc6b-artesian
+  title: Stage-3 pc6b artesian seepage face under a held-dry stage cell
+domain:
+  nx: 1
+  ny: 1
+  nz: 10
+  dx: 1.0
+  dy: 1.0
+  dz: 0.2
+  bottom_elevation: {constant: 2.0}
+time:
+  dt: 2.0
+  t_end: 3600.0
+  output_interval: 360.0
+modules:
+  surface_water: true
+  groundwater: true
+surface_water:
+  friction:
+    law: manning
+    coefficient: {constant: 0.03}
+    thin_layer_depth: 0.1
+  min_depth: 1.0e-05
+  wetting_face_depth: 0.0005
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 2.0
+    dt_min: 2.0
+    dt_max: 2.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  predictor_corrector: consistent
+coupling:
+  mode: sync
+soil:
+  types:
+    - name: loam
+      ksx: 1.0e-05
+      ksy: 1.0e-05
+      ksz: 1.0e-05
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 2.0
+      vg_n: 1.8
+  map: {constant: loam}
+initial_conditions:
+  surface:
+    eta: {constant: 2.0}
+  groundwater:
+    water_table: {constant: 2.0}
+boundary_conditions:
+  - name: hold-dry
+    region:
+      polygon: [[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0], [-1.0, 2.0]]
+    target: surface
+    kind: eta
+    value: {constant: 2.0}
+    inflow:
+      closure: external
+  - name: bottom-head
+    region:
+      polygon: [[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0], [-1.0, 2.0]]
+    target: groundwater_bottom
+    kind: head
+    value: {constant: 3.0}
+output:
+  filename: out/output.h5
+  variables:
+    surface: [eta, depth]
+    groundwater: [hydraulic_head, water_content, qz, realloc_created, realloc_dropped, vloss]

@@ -430,6 +430,8 @@ Spec buildRootSchema() {
             // run-record checker, user postprocessing) read off as the
             // boolean false, which corrupts every round trip (S3-A3).
             {"reallocation", enumeration(false, {"legacy", "disabled"})},
+            {"predictor_corrector", enumeration(false, {"legacy", "consistent"})},
+            {"face_conductivity", enumeration(false, {"arithmetic", "harmonic"})},
             {"reallocation_surplus", enumeration(false, {"drop", "redistribute"})},
             {"density_coupling",
              // Coefficients configurable since v2 Q5 (defaults = the
@@ -1135,21 +1137,35 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
       }
       // ET + salinity: the exact salt bookkeeping needs the consistent
       // updates of the modules present, and (with a surface) the store.
+      // Since the S3-A18 default flip an ABSENT surface_update resolves to
+      // conservative (and an absent subsurface_update beside it to
+      // consistent), so only EXPLICIT legacy values violate the rule.
       if (tr) {
         const YAML::Node trans = root["transport"];
-        const auto updateIs = [&trans](const char* key, const char* want) {
+        const auto explicitLegacy = [&trans](const char* key) {
           return trans.IsDefined() && trans.IsMap() && trans[key].IsDefined() &&
-                 trans[key].as<std::string>("") == std::string(want);
+                 trans[key].as<std::string>("") == "legacy";
         };
-        const auto surfaceUpdateOk = [&trans]() {
-          if (!(trans.IsDefined() && trans.IsMap() && trans["surface_update"].IsDefined())) {
-            return false;
+        const auto surfaceExplicit = [&trans]() -> std::string {
+          if (!(trans.IsDefined() && trans.IsMap() &&
+                trans["surface_update"].IsDefined())) {
+            return "";  // absent: resolves to conservative
           }
-          const std::string v = trans["surface_update"].as<std::string>("");
-          return v == "consistent" || v == "conservative";  // T10: either
+          return trans["surface_update"].as<std::string>("");
         };
-        if ((sw && !surfaceUpdateOk()) ||
-            (gw && !updateIs("subsurface_update", "consistent"))) {
+        const bool surfaceOk = sw ? surfaceExplicit() != "legacy" : true;
+        // The subsurface default is consistent only under the resolved
+        // conservative surface scheme; an explicit consistent/absent-under-
+        // conservative passes, an explicit legacy (or an absent key under an
+        // explicit consistent surface) fails.
+        const bool subAbsent = !(trans.IsDefined() && trans.IsMap() &&
+                                 trans["subsurface_update"].IsDefined());
+        const bool subOk =
+            !gw || (subAbsent
+                        ? (surfaceExplicit().empty() ||
+                           surfaceExplicit() == "conservative")
+                        : !explicitLegacy("subsurface_update"));
+        if (!surfaceOk || !subOk) {
           ctx.addError("evapotranspiration",
                        "with salinity transport requires transport.surface_update: "
                        "consistent (with modules.surface_water) and "
@@ -1227,6 +1243,25 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
     }
   }
 
+  // T11 (O17b): the harmonic face rule exists only in the consistent
+  // predictor–corrector pair — the legacy corrector keeps its one-sided
+  // quirk and cannot take a different mean. Since the S3-A18 default flip
+  // an ABSENT predictor_corrector resolves to consistent, so only an
+  // explicit `legacy` conflicts.
+  {
+    const YAML::Node fc = sub(root, "groundwater", "face_conductivity");
+    const YAML::Node pcm = sub(root, "groundwater", "predictor_corrector");
+    const bool harmonic = fc.IsDefined() && fc.IsScalar() &&
+                          fc.as<std::string>() == "harmonic";
+    const bool legacyPc = pcm.IsDefined() && pcm.IsScalar() &&
+                          pcm.as<std::string>() == "legacy";
+    if (harmonic && legacyPc) {
+      ctx.addError("groundwater.face_conductivity",
+                   "harmonic needs groundwater.predictor_corrector: consistent "
+                   "(the legacy corrector keeps its one-sided face rule)");
+    }
+  }
+
   // transport.subsurface_update: consistent rewires the subsurface scalar
   // update onto the groundwater module's window volumes; without that
   // module there is no subsurface scalar to update.
@@ -1244,20 +1279,26 @@ void crossChecks(const YAML::Node& root, Context& ctx) {
   // exchange machinery (applied gain, vent windows); with groundwater the
   // subsurface update must therefore be consistent too (a legacy
   // subsurface exchange would deliver the water's volume without its
-  // scalar — the sx5 heat-drain defect).
+  // scalar — the sx5 heat-drain defect). Since the S3-A18 default flip an
+  // ABSENT surface_update resolves to conservative (and an absent
+  // subsurface_update beside it to consistent), so the rule fires on the
+  // RESOLVED conservative scheme with an EXPLICIT legacy subsurface.
   {
     const YAML::Node update = sub(root, "transport", "surface_update");
     const YAML::Node subUpdate = sub(root, "transport", "subsurface_update");
-    const bool conservative = update.IsDefined() && update.IsScalar() &&
-                              update.as<std::string>() == "conservative";
-    const bool subConsistent = subUpdate.IsDefined() && subUpdate.IsScalar() &&
-                               subUpdate.as<std::string>() == "consistent";
-    if (conservative && gw && !subConsistent) {
+    const bool conservative =
+        !(update.IsDefined() && update.IsScalar()) ||
+        update.as<std::string>("") == "conservative";
+    const bool subLegacy = subUpdate.IsDefined() && subUpdate.IsScalar() &&
+                           subUpdate.as<std::string>() == "legacy";
+    if (conservative && gw && subLegacy) {
       ctx.addError("transport.surface_update",
-                   "surface_update: conservative with modules.groundwater "
-                   "requires transport.subsurface_update: consistent (the "
-                   "coupled-deposit salt/heat books read the consistent "
-                   "exchange machinery)");
+                   "surface_update: conservative (the default) with "
+                   "modules.groundwater requires transport.subsurface_update: "
+                   "consistent (the coupled-deposit salt/heat books read the "
+                   "consistent exchange machinery); to keep the legacy "
+                   "subsurface update, set surface_update: legacy or "
+                   "consistent explicitly");
     }
   }
 

@@ -319,6 +319,18 @@ GroundwaterConfig extractGroundwater(const YAML::Node& node) {
                            ? GroundwaterConfig::Reallocation::Off
                            : GroundwaterConfig::Reallocation::Legacy;
   }
+  // Stage-3 T11 (O17/S3-A16): same default-flip convention as reallocation.
+  if (node["predictor_corrector"].IsDefined()) {
+    out.predictorCorrector =
+        node["predictor_corrector"].as<std::string>() == "consistent"
+            ? GroundwaterConfig::PredictorCorrector::Consistent
+            : GroundwaterConfig::PredictorCorrector::Legacy;
+  }
+  if (node["face_conductivity"].IsDefined()) {
+    out.faceConductivity = node["face_conductivity"].as<std::string>() == "harmonic"
+                               ? GroundwaterConfig::FaceConductivity::Harmonic
+                               : GroundwaterConfig::FaceConductivity::Arithmetic;
+  }
   const std::string surplus =
       valueOr<std::string>(node["reallocation_surplus"], "drop");
   out.reallocationSurplus = (surplus == "redistribute")
@@ -564,12 +576,21 @@ TransportConfig extractTransport(const YAML::Node& node) {
   {
     // Stage-3 T10: `conservative` implies the consistent semantics (one
     // more change on top: the solve's face volumes drive the advection).
-    const std::string su = valueOr<std::string>(node["surface_update"], "legacy");
+    // Default flipped legacy -> conservative at the T10/T11 close (owner
+    // decision, 2026-11-04; plan S3-A18); `legacy`/`consistent` stay the
+    // golden-pinned opt-outs.
+    const std::string su = valueOr<std::string>(node["surface_update"], "conservative");
     out.consistentSurfaceUpdate = su == "consistent" || su == "conservative";
     out.conservativeSurfaceUpdate = su == "conservative";
   }
+  // The conservative surface update's coupled books need the consistent
+  // subsurface exchange (the T10 schema rule), so when `conservative` is
+  // the resolved surface scheme an ABSENT subsurface_update resolves to
+  // consistent too; an explicit `legacy` beside it stays a schema error.
   out.consistentSubsurfaceUpdate =
-      valueOr<std::string>(node["subsurface_update"], "legacy") == "consistent";
+      valueOr<std::string>(node["subsurface_update"],
+                           out.conservativeSurfaceUpdate ? "consistent" : "legacy") ==
+      "consistent";
   return out;
 }
 
@@ -759,6 +780,21 @@ FrehgConfig loadConfig(const std::string& path) {
   }
   if (root["transport"].IsDefined()) {
     cfg.transport = extractTransport(root["transport"]);
+  } else if (cfg.modules.transport) {
+    // An absent transport block takes the same resolved defaults the
+    // extractor applies (S3-A18: conservative surface update, consistent
+    // subsurface update beside it). A heat-only configuration (no
+    // transport block) keeps the v2 Q5 legacy surface update its goldens
+    // pin — the heat scalar opts in through an explicit transport block.
+    cfg.transport = extractTransport(YAML::Node(YAML::NodeType::Map));
+  }
+  // The consistent subsurface update exists only with the groundwater
+  // module (the schema rejects an EXPLICIT consistent without it); the
+  // S3-A18 default must not synthesize it on surface-only runs, or the
+  // resolved configuration embedded in the run record would not
+  // revalidate.
+  if (!cfg.modules.groundwater) {
+    cfg.transport.consistentSubsurfaceUpdate = false;
   }
   if (root["temperature"].IsDefined()) {
     cfg.temperature = extractTemperature(root["temperature"]);
@@ -1203,6 +1239,14 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
     node["specific_storage"] = gw.specificStorage;
     node["reallocation"] =
         gw.reallocation == GroundwaterConfig::Reallocation::Off ? "disabled" : "legacy";
+    node["predictor_corrector"] =
+        gw.predictorCorrector == GroundwaterConfig::PredictorCorrector::Consistent
+            ? "consistent"
+            : "legacy";
+    node["face_conductivity"] =
+        gw.faceConductivity == GroundwaterConfig::FaceConductivity::Harmonic
+            ? "harmonic"
+            : "arithmetic";
     node["reallocation_surplus"] =
         gw.reallocationSurplus == GroundwaterConfig::ReallocationSurplus::Redistribute
             ? "redistribute"

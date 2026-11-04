@@ -65,6 +65,11 @@ RichardsSolver::RichardsSolver(const Grid& grid, const FrehgConfig& config,
   const GroundwaterConfig& gw = config.groundwater;
   ss_ = gw.specificStorage;
   useFull3d_ = gw.useFull3d;
+  // Stage-3 T11 (O17/S3-A16): the consistent predictor-corrector pair.
+  pcConsistent_ =
+      gw.predictorCorrector == GroundwaterConfig::PredictorCorrector::Consistent;
+  pcHarmonic_ =
+      gw.faceConductivity == GroundwaterConfig::FaceConductivity::Harmonic;
   surplusRedistribute_ =
       (gw.reallocationSurplus == GroundwaterConfig::ReallocationSurplus::Redistribute);
   reallocOff_ = (gw.reallocation == GroundwaterConfig::Reallocation::Off);

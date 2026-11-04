@@ -16,7 +16,16 @@ orient:
     tol_abs_mixed: 1.0e-2
   gw:
     tol_abs_transpose: 1.0e-12
-    tol_abs_mixed: 1.0e-12
+    # S3-A18 re-calibration (the predictor_corrector: consistent default):
+    # the mixed-class INITIAL transient is scheme-independent and identical
+    # (wc 1.056e-3 at t = 300 under both schemes — the preserved plus/minus
+    # edge arithmetic), but the consistent interface conductivities relax
+    # it more slowly: at t_end legacy reaches 2.3e-14 (the old strict floor
+    # held), consistent 7.6e-8 head / 2.0e-8 wc (rot180, antitranspose; the
+    # other mixed transforms measure <= 3.6e-14). Bound 5e-7 ≈ 6x the
+    # measured value; the transpose class (true indexing symmetry) stays
+    # strict. Decay traces: docs/theory/symmetry-exemptions.md.
+    tol_abs_mixed: 5.0e-7
   transport:
     tol_abs_transpose: 1.0e-6
     tol_abs_mixed: 1.0e-6

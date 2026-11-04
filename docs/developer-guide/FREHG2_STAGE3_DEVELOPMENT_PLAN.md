@@ -47,6 +47,7 @@ Notation:
 | O14 | Study reruns | Out of this plan. T8 delivers a case-migration note for the study. |
 | O15 (2026-10-31, revises O4) | Thin-layer removals park their **water together with its salt** in a per-cell store, released together at rewetting. Rain and evaporation (their additions, removals, dilution and concentration) are not affected by the store. Parked water is **inert**: it does not flow, infiltrate or evaporate, ET included. A new phase with its own gates implements it. | Phase T9 (§12A), amendment S3-A12. The salt-only store of O4 becomes the special case V_s = 0 (salt left by complete evaporative dry-out). The interim default of `transport.surface_dryout` is an open owner item (§17-6). |
 | O16 (2026-10-31) | Surface salt (and heat) moves **with the water the free-surface solve moved**: the transport's face volumes are the solve's own continuity face volumes, not velocities rebuilt afterwards from the new depths and then limited. | Phase T10 (§12B), amendment S3-A14. |
+| O17 (2026-11-03) | (a) The groundwater predictor and corrector use **one face-conductivity rule on every face** (each flank's own Ks). (b) The arithmetic mean stays the default; the harmonic mean of Ks times the arithmetic mean of kr ships as an opt-in. (c) Under ponding the top face uses **Ksz** in both halves (the predictor's 0.5·(Ksz + K(h)) underestimates infiltration). (d) Under density coupling the **density ratio enters the corrector** as in the predictor. | Phase T11 (§12C), amendment S3-A16. (d) is confirmed by measurement at W11.6 (§17-8b): the W11.0 code verification found the corrector's θ update already carries the mass weighting — the remaining inconsistency is the terrain-slope gravity term (M4 = S1's other half, §12C density note), fixed to the z-gravity form r²v¹ in both halves. |
 
 ---
 
@@ -65,8 +66,9 @@ Notation:
 | **T8** | Default-flip evaluation (reallocation, salt store), full pipeline, coverage tables, sanitizer, docs, records | all | 1.5–2 |
 | **T9** (added by S3-A12) | Paired water–salt store for thin-layer removals (O15): booking of every surface thin-layer removal, the paired store and its release, coupled sub-`min_depth` vents, re-adjudication of the store-resolving gates, DF re-evaluation of the `store` default | T8 | 2.5–3.5 |
 | **T10** (added by S3-A14) | Solve-consistent surface transport (O16): the transport advects with the free-surface solve's continuity face volumes, so salt and heat move with the water; post-solve manipulations (limiters, removals, sources, exchange) keep their own explicit books | T9 | 1.5–2.5 |
+| **T11** (added by S3-A16) | Predictor–corrector consistency in the groundwater step (O17): one face-conductivity rule for both halves (M1), the ponded top face (M2), the seepage-face leg (M3), the continuity form under density coupling (M4), the harmonic option, and the suspected along-layer buoyancy term (S1) | T10 | 3–4 |
 
-Execution order: T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8. The total is ≈ 14–19 agent-days. T9 follows the closed T8 (S3-A12, 2026-10-31); T10 follows the closed T9 (S3-A14, 2026-10-31).
+Execution order: T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8. The total is ≈ 14–19 agent-days. T9 follows the closed T8 (S3-A12, 2026-10-31); T10 follows the closed T9 (S3-A14, 2026-10-31); T11 follows the closed T10 (S3-A16, 2026-11-03).
 
 ---
 
@@ -850,6 +852,169 @@ W10.6 then evaluates whether `consistent` should resolve to it.
 
 ---
 
+## 12C. T11 — Predictor–corrector consistency in the groundwater step (added by S3-A16, O17)
+
+Status: scope decided by the owner 2026-11-03 (O17). The phase opens on
+approval of this section; O17(d) is confirmed with the W11.6 numbers
+before it enters the tree (§17-8). §2 applies unchanged: gate-first,
+records under `stage3/records/T11/`, snapshot `T11`, no commits.
+
+**Diagnosis (verified 2026-11-03 against the T10 tree and the legacy
+source; v30 report `BUG_realloc_ks_inconsistency.md`).** The PCA step
+solves the head (predictor, `Predictor.cpp`), recomputes the face fluxes
+from the predicted head (corrector, `Corrector.cpp`), updates θ from those
+fluxes, and then (`reallocation: legacy`) restores θ := θ(h_pred) in every
+saturated-contact cell (`Reallocate.cpp:328`). Wherever the two halves
+disagree on a face, the restore books the difference as created or dropped
+water. Four disagreements, all inherited from legacy FREHG
+(`compute_K_face`/`groundwater_mat_coeff` against `darcy_flux`):
+
+| # | Face | Predictor | Corrector | Where it acts |
+|---|---|---|---|---|
+| M1 | interior x, y, z | each flank's own Ks, arithmetic mean | one flank's Ks for both (x/y: the minus cell; z: the lower cell) | every saturated face across a Ks contrast. H2 beach: 9.45 created / 7.44 dropped m³/m per cycle, net 72 % of the exfiltration; rl2: churn/T 2.91. The report's 3-line patch: H2 gross creation 155× smaller, rl2 churn/T 0.006, H0 bitwise |
+| M2 | top, wet surface (mode 1) | 0.5·(Ksz + K(h_top)) | Ksz | an unsaturated top cell under ponding: the head solve under-infiltrates. Equal when the top cell is saturated |
+| M3 | top, dry surface (mode 0) | sealed: a flux top with q_top (0 without ET or a flux BC), no exit leg | Darcy flux to a zero ghost head, kept when it points up (seepage) | pressurized top cells of a seepage face: the head solve keeps the water, the corrector releases it. Where H0's residual creation sits (85 % in the seepage-face top layer, report item 4) — a hypothesis, measured by pc6 |
+| M4 | terrain-slope gravity term (x/y faces of a terrain-following mesh), density coupling | K·sin α, **no ρ or viscosity factor** (`Predictor.cpp:458-464`) | the same K·sin α inside q, which the θ update then weights by ρ_f/ρ₀ (`Corrector.cpp:169/241` × `updateWaterContent:518-521`) | terrain meshes with density coupling (b6, Kuan, the v30 beach): the two halves disagree by (ρ_f/ρ₀ − 1) ≈ 2.6 % of the along-slope gravity flux at 35 psu. **Corrected at W11.0 (S3-A16): every other continuity term already matches** — storage (ρ_c/ρ₀ both), gradients (ρ_f v_f, both), z gravity ((ρ_f/ρ₀)² v_f, both). The original §12C draft called the corrector a volume balance; `updateWaterContent` disproves it |
+
+Edges, bottom faces and the periodic seam already agree (each takes the
+interior cell's own Ks in both halves; the seam takes the interior form).
+The terrain-gravity and buoyancy terms multiply the same face K as the
+gradient term, so they follow any change to it.
+
+A fifth item, **S1 — the along-layer gravity force**, is the other half
+of the same term and was derived at W11.0 (it still enters red-first
+through pc8). At rest, the model's z balance sets ∂ψ/∂z = −ρ_f/ρ₀ (the
+corrector's z flux vanishes at Δψ/δ = r_Zp). Carrying that ψ along a
+terrain-following layer, the x-face driving force is
+cos α·Δψ/δ + sin α·(elevation term); the ψ of a resting salty body drops
+by (ρ_f/ρ₀)·Δz_elev along the layer, so the face is at rest only if the
+elevation term is (ρ_f/ρ₀)·sin α. Both halves today use sin α bare: a
+salty layer at rest on a slope is pushed by K·(ρ_f/ρ₀ − 1)·sin α — a
+force error on which the two halves also disagree by one factor of
+ρ_f/ρ₀ (M4). The z-gravity term is the template: Darcy carries
+(ρ_f/ρ₀)·v_f and the mass weighting one more ρ_f/ρ₀, i.e. r²v¹. The
+consistent fix makes the terrain term identical in form: inside the
+corrector's q the term becomes K·v_Xp·r_Xp·sin α (then ×r_Xp in the θ
+update), and the predictor's RHS term becomes K·v_Xp·r_Xp²·sin α. One
+change closes M4 and S1 together; on a fresh or flat run every factor is
+1 and the expressions fold back (K3).
+
+**Design rules (binding).** Active under the new token
+`groundwater.predictor_corrector: consistent`. `legacy` stays bitwise T10
+everywhere. W11.9 evaluates the default flip under §2.7.
+
+- **P1 — one face rule, two callers.** A single host/device function
+  (`gw/FaceConductivity.hpp`) returns the face conductivity for every face
+  type: interior x/y/z, edges, bottom, the top in each coupled mode, the
+  periodic seam. The predictor's `computeFaceConductivity` and the
+  corrector's `computeFluxes` both call it; neither keeps its own copy.
+  Under `legacy` the corrector's call selects the one-sided rule (bitwise).
+  The selection is compile-time (the S3-A8.1/A9.7 fma rule), with the nvcc
+  first-capture rule observed (`(void)x;` before any `if constexpr`;
+  report-T10, correction 2).
+- **P2 — M1.** Each flank's own Ks in both halves; the arithmetic mean of
+  K_a(h_a) and K_b(h_b), unless `face_conductivity: harmonic`.
+- **P3 — M2 (O17c).** Under a wet, capacity-limited surface (mode 1) the
+  top face takes Ksz in both halves.
+- **P4 — M3.** `classifyCoupledTop` gains mode 3: a dry surface whose top
+  cell is pressurized against the ghost head at the substep's start (the
+  corrector's top flux would point up). In mode 3 both halves apply the
+  seepage Dirichlet leg (ghost head = surface depth = 0) with Ksz. Mode 0
+  (dry, not pressurized) is sealed in both halves. The corrector's
+  upward-only clamp stays as a guard; any volume it removes is booked and
+  counted (expected zero).
+- **P5 — M4 + S1 (O17d).** The terrain-slope gravity term takes the
+  z-gravity form in both halves: (ρ_f/ρ₀)·v_f inside Darcy's flux, one
+  more ρ_f/ρ₀ from the mass weighting (predictor RHS: K·v_Xp·r_Xp²·sin α;
+  corrector q: K·v_Xp·r_Xp·sin α, the θ update supplying the second
+  r_Xp). Every other continuity term is already consistent (the corrected
+  M4 row). W11.6 measures the pc7(a) ledgers and pc8 before and after,
+  and the owner confirms O17(d) on those numbers (§17-8b).
+- **P6 — the harmonic option (O17b).** `groundwater.face_conductivity:
+  harmonic`: K_face = Ks_H · ½(kr_a + kr_b). Ks_H is the thickness-weighted
+  harmonic mean (dz_a + dz_b)/(dz_a/Ks_a + dz_b/Ks_b) on z faces and the
+  plain harmonic mean on x/y faces; kr = K(h)/Ks per flank, with that
+  flank's own vG parameters. Equal Ks returns Ks exactly (bitwise against
+  arithmetic on homogeneous soils); a Ks = 0 flank gives K_face = 0. The
+  harmonic mean is the exact two-point conductance of saturated flow in
+  series; the arithmetic kr keeps wetting fronts from stalling in dry
+  soil. The default stays `arithmetic`.
+- **P7 — pc8 verifies P5 red-first.** The S1 derivation above predicts a
+  measurable spurious flow on the stock binary (pc8 red); if pc8 is
+  instead green on T10, P5's terrain change is dropped to the predictor
+  r_Xp-weighting alone (pure M4 consistency) and S1 is closed by
+  amendment with the pc8 numbers.
+
+**Density note (P5: what O17(d) turned out to mean, W11.0 correction).**
+The owner directed "the density ratio enters the corrector". Verified
+against the code at W11.0: the corrector's θ update already carries the
+full mass weighting (each face flux × ρ_f/ρ₀, storage × ρ_c/ρ₀,
+`Corrector.cpp:515-528`), matching the predictor term for term — except
+the terrain-slope gravity term (the corrected M4 row) and the top-face
+modes (M2/M3). The §12C draft's D-M/D-V dichotomy was built on the
+volume-balance misreading and is withdrawn; there is no wholesale form
+choice left to make. What remains of O17(d) is P5: the terrain-gravity
+term made consistent and physical (r²v¹, the z-term's form). Fluid mass
+Σ(ρ/ρ₀)·θV is the corrector's conserved quantity; plain volume ΣθV is
+not exactly conserved under density coupling (the ≈5e-3 m³ coupled
+residual every v30 run shows is the measured size of that distinction).
+pc7(a) books all three ledgers (volume, salt, fluid mass) before and
+after, and the owner confirms O17(d) on those numbers (§17-8b).
+
+**Invariants.**
+- **K1:** in a cell whose faces all have saturated flanks, the corrector's
+  θ update equals θ(h_pred) to the solve residual, so the restore books
+  nothing: Σ|Δθ_restore|·V ≤ 1e-10 of the substep's face throughput.
+- **K2:** on every top face, the flux the predictor's top leg carries at
+  h_pred equals the corrector's top flux, mode by mode (1e-12 relative).
+- **K3:** homogeneous Ks, uniform density, uncoupled: `consistent` ≡
+  `legacy` bitwise.
+- **K4:** volume, salt and fluid mass (the model's EOS) close at their
+  existing identity classes under density coupling.
+
+### Work items
+
+| W | File(s) | Exact change |
+|---|---|---|
+| W11.0 | records, cases | Gate-first. Copy the v30 report and its repro (`2026Frehg2/outputs/bugreport_realloc_creation_v1/repro/`: YAMLs, inputs, the patch, lanes, `analyze.py`) to `stage3/evidence/ks-face/`. Author `benchmarks/pc-predictor-corrector/`, `tolerances/stage3-pc.yaml`, the harness subcommands `pc*`, the ctest entries and `scripts/test_pc_gates.py`. Red logs on `stage3/bin/frehg-T10` to `records/T11/red/`; pc0's red comes from a scratch-tree run (S3-A2: compiled unit gates enter the tree green) |
+| W11.1 | `gw/FaceConductivity.hpp` (new), `Predictor.cpp`, `Corrector.cpp` | P1: the shared function and both call sites; `legacy` bitwise (default_bitwise and the et9 pins) |
+| W11.2 | same | P2 (M1) |
+| W11.3 | `Predictor.cpp` | P3 (M2): the mode-1 top face takes Ksz |
+| W11.4 | `Corrector.cpp` (`classifyCoupledTop`), `Predictor.cpp` | P4 (M3): mode 3, the seepage leg in both halves, the clamp counter |
+| W11.5 | `FaceConductivity.hpp`, `Config*`, `ConfigSchema.cpp` | P6: `face_conductivity: harmonic` |
+| W11.6 | `Predictor.cpp`/`Corrector.cpp` | P5: the terrain-gravity consistency; pc7(a) ledgers and pc8 measured before/after; the owner confirms O17(d) on the numbers (§17-8b) |
+| W11.7 | records | P7: pc8's red/green decides the terrain term's scope (see P7); either way the outcome is recorded by amendment |
+| W11.8 | gates | `gate_realloc.check_legacy_churn`: its ≥ 0.1·T floor encodes M1 and is replaced (pc1). Re-run every Stage-3 groundwater lane (rl, ob, pd, dg, et, ws, sx) under the `consistent` override (r1-verified) and adjudicate each change by amendment with data |
+| W11.9 | DF | §2.7 evaluation of `predictor_corrector: consistent` as the default: every tier, tolerances unchanged. The legacy-golden comparisons that embed M1–M4 are declared exceptions, adjudicated face by face: b3 (berino/glendale, a 41× contrast), b5 (the Ks = 0 outlet wall), b6 ss/td (density, seepage faces). The owner decides between re-pinning and keeping the `legacy` default. `BITWISE_PINS` gains `groundwater.predictor_corrector: legacy`. `face_conductivity` stays `arithmetic` |
+| W11.10 | docs, records | The `Corrector.cpp`/`Predictor.cpp` headers (the "preserved quirk" text), `theory/groundwater.md` (PCA consistency, face rules, the harmonic option, the continuity form), `theory/exchange-flux.md` (top modes 0–3), `parameters.md`, `agents/case-setup.md`, coverage rows; the S3-A4 attribution corrected; a v30 migration note (H2 reruns on the T11 default); `dod-T11.md`, `report-T11.md`, snapshot `T11`, `phase.patch` |
+
+### Gates (authored first) — `benchmarks/pc-predictor-corrector/`, `tolerances/stage3-pc.yaml`
+
+| Gate | Configuration | Asserts | Tolerance | Red on T10 / negative / anti-vacuity |
+|---|---|---|---|---|
+| **pc0** unit | One PCA substep, strict solve, on a saturated 4×4×6 box: (a) lognormal Ks over 3 decades in x, y and z, flat mesh; (b) the same on a tilted terrain-following mesh; (c) periodic x; (d) every side code (head, hydrostatic, flux, no-flux) and bottom code; (e) uniform Ks with a salinity front, density on; (f) coupled top, one column per mode (0 dry and unsaturated, 3 seepage, 1 ponded over an unsaturated top cell, 2 supply-limited) | K1 on (a)–(e); K2 on (f); K3 on a homogeneous uncoupled twin | K1 1e-10; K2 1e-12; K3 bitwise | Red: (a)–(d) M1, (e) M4, (f) M2/M3. Negative battery: re-introducing each mismatch (one-sided Ks, the averaged wet top, the sealed seepage leg, the split continuity form) fails its lane |
+| **pc1** rl2 churn | `rl2-tidal-box`, legacy reallocation lane, unchanged input | gross churn/T ≤ 0.01; gw identity at its current class | 0.01 (report: 0.006 patched) | Red: 2.91. The new anti-vacuity replaces the old floor: ≥ N saturated faces with a Ks ratio > 10, and the restore fires (it is the scheme's consistency mechanism) |
+| **pc2** H2 beach (nightly) | the report's S_H2 lane, packaged (cold start, 0 → T/4, the 24-class lnK window), and its H0 twin | gross creation per cycle ≤ ε (set at first green by amendment; report patched 0.045 m³/m, H0 0.021); water and salt identities at their current classes; salinity in [0, 35] | as stated | Red: 6.97 m³/m. Records the substep count (report: 1.9× stock) |
+| **pc3** series flow (accuracy) | steady saturated column and its x-oriented twin; two layers, K 1e-3 / 1e-5; equal and stretched dz; head BCs | `harmonic`: flux = Δh/Σ(L/K) exactly. `arithmetic`: the bias is recorded (≈ +5 % on the equal-dz case), not gated | 1e-10 | Anti-vacuity: the arithmetic lane differs from exact by > 1 % |
+| **pc4** impermeable wall | two reservoirs at different heads, separated by a 2-cell Ks = 0 wall (the b5 class) | `harmonic`: wall flux ≡ 0. `arithmetic`: the leak is recorded | exact | — |
+| **pc5** layered infiltration (no stall) | the b3 Kirkland geometry under `harmonic` and `arithmetic` | `harmonic`: the front enters the glendale layer by t_end; water identity; the infiltrated-volume ratio to `arithmetic` is recorded | identity class | Anti-stall floor set at authoring |
+| **pc6** top face | (a) ponded column over a dry top cell (M2); (b) dry-surface column with an artesian bottom head, steady exfiltration (M3); (c) the v30 H0 smoke (nightly) | (a) K2; top-cell restore ≤ 1e-10 of the infiltration; the predictor/corrector infiltration ratio recorded (stock < 1, the owner's point). (b) steady exfiltration = the analytic column flux; K2; mode switches ≤ N. (c) H0's net creation recorded before and after (stock 0.18 m³/m per cycle) | (a) 1e-10; (b) 1e-8 | Red: (a) M2, (b) M3. (c) tests the H0-residual hypothesis and is reported, not gated |
+| **pc7** density | (a) closed saturated box, lock exchange 35 / 0 psu, 1 h, flat mesh (isolates the gradient/storage terms from M4's terrain term), with a temperature lane; (b) Henry (`validation/transport-henry-saltwater-intrusion`) and b6 ss/td | (a) Σ sθV and Σ (1 + βs)·θV constant; Σ θV drift recorded (the mass-form distinction, expected ≈ β·(mixing volume) class, not gated to zero); K1 at the front. (b) Henry's 0.5 isochlor and b6 inside their current tolerances | (a) 1e-12 relative on the gated two; (b) unchanged | Red on T10: (a) K1 churn at the front if any term mismatches on a flat mesh (expected small — the flat-mesh continuity is already consistent; this lane GUARDS that statement). W11.6 reports all three ledgers to the owner |
+| **pc8** tilted hydrostatic rest (S1) | terrain-following section, 10 % tilt, uniform 35 psu, hydrostatic IC, closed | max \|q\| ≤ 1e-12·K; a fresh-water twin as the control | 1e-12 | Red expected if S1 is real; a green pc8 closes S1 |
+| **pc-x** | rank (mpi_ny 1/2/4, strict, on rl2 and the pc0 (a) box), restart bitwise (pc2, mid-cycle checkpoint), default-bitwise | the S3-A6 classes; the K3 lanes bitwise | as stated | — |
+
+**DoD T11:**
+- [x] red evidence (pc0–pc2, pc6, pc7(a); pc8 either way) in `records/T11/red/`;
+- [x] pc0–pc8 and pc-x green;
+- [x] O17(d) confirmed with the W11.6 numbers (pc7 ledgers ≤ 4.0e-14·M, pc8 rest 1.42e-13·Ks·A; owner touchpoint 8b at the T11 report);
+- [x] W11.8 adjudications recorded by amendment;
+- [x] W11.9 outcome recorded (flipped or reported);
+- [x] docs and coverage rows;
+- [x] Tier N green;
+- [x] snapshot `T11`.
+
+---
+
 ## 13. Schema specification (all phases)
 
 ### 13.A Feature A (T2)
@@ -894,6 +1059,8 @@ domain:
 ```yaml
 groundwater:
   reallocation: off              # legacy (v2.0) | off (T8 may flip the default)
+  predictor_corrector: consistent   # NEW (T11, O17): legacy | consistent (W11.9 may flip the default)
+  face_conductivity: arithmetic     # NEW (T11, O17b): arithmetic | harmonic (harmonic Ks × arithmetic kr)
 
 atmosphere:                      # the single met block
   air_temperature: {constant: 25.0}
@@ -980,6 +1147,7 @@ output:
 | Root depth beyond the column (setup warning) | `vegetation '<name>': root depth exceeds the column at <n> cells; truncated and renormalised` |
 | θ_s < 0.375 with `alpha_barton` and `open_water` (warning) | `soil type '<name>': alpha_1(theta_s) = <a> < 1; the evaporation rate jumps by <(1-a)%> when a cell switches from inundated to exposed` |
 | `output.variables.atmosphere` entries without their feature | `output.variables.atmosphere: <var> needs <evapotranspiration.soil / vegetation>` |
+| `face_conductivity: harmonic` with `predictor_corrector: legacy` (T11) | `groundwater.face_conductivity: harmonic needs groundwater.predictor_corrector: consistent (the legacy corrector keeps its one-sided face rule)` |
 | `realloc_*` outputs with `reallocation: off` (warning) | `output.variables.groundwater: realloc_created/realloc_dropped are identically zero with reallocation: off` |
 
 ---
@@ -998,7 +1166,8 @@ Predicted serial costs (1 rank unless the gate is a rank test, `OMP_NUM_THREADS=
 | et | `unit` (et0 parts 1–3, et6), `regression.s3.et1`…`et10`, `.et_x`, `.et_rank`, `unit.et_gates.negative` (incl. FAO transcription) | 85 s |
 | ws (T9) | `unit` (ws0), `regression.s3.ws1`, `.ws3`, `.ws4`, `unit.ws_gates.negative` (ws2 and ws5 assert inside these lanes and the existing pins); `regression.s3.ws1n`, `.ws_rank` (`stage3_nightly`) | 45 s (nightly ≈ 12 min) |
 | sx (T10) | `unit` (sx0), `regression.s3.sx1`, `.sx2`, `.sx4`, `.sx5`, `unit.sx_gates.negative`; `regression.s3.sx3`, `.sx_rank` (`stage3_nightly`) | ≈ 40 s (nightly ≈ 12 min) |
-| **Stage-3 per-PR total** | | **≈ 4.9 min serial** with T9 (< 5 min; ≈ 4.1 min through T8); ≈ 1.7 min at ctest `-j8` |
+| pc (T11) | `unit` (pc0), `regression.s3.pc1`, `.pc3`, `.pc4`, `.pc5`, `.pc6`, `.pc7`, `.pc8`, `unit.pc_gates.negative`; `regression.s3.pc2`, `.pc6_h0`, `.pc_rank` (`stage3_nightly`) | ≈ 50 s predicted (nightly ≈ 15 min: pc2 ≈ 9 min from the report's lanes) |
+| **Stage-3 per-PR total** | | **≈ 4.9 min serial** with T9 (< 5 min; ≈ 4.1 min through T8); ≈ 1.7 min at ctest `-j8`. The T10 and T11 rows are predictions; the `stage3` label measured 2 536 s at `-j2` at the T10 close (`records/T10/timings.md`), so this total is stale and C-TIME is re-evaluated at the T11 close |
 | Existing per-PR tier (measured, T0 re-measures) | 93 tests | ≈ 23 min wall |
 | Existing nightly tier (measured, partial) | 7-test batch | ≈ 56 min + b6 bjacobi ss/td + b5 24 h (T0 measures) |
 
@@ -1017,6 +1186,7 @@ Predicted serial costs (1 rank unless the gate is a rank test, `OMP_NUM_THREADS=
 | T8 | `report-T8.md`, `parameters.md` defaults (if flipped), `AGENTS.md` (v2.0 → Stage-3 feature list), `README.md` feature list, `CITATION.cff` untouched (the owner versions) |
 | T9 | `theory/transport.md` (paired store), `theory/surface-water.md` (removal paths, `film_removed`), `parameters.md`, `output.md`, `agents/case-setup.md`, coverage, `report-T9.md`, study-migration addendum |
 | T10 | `theory/transport.md` (solve-consistent update, J1–J4), `theory/surface-water.md` (step order, face volumes), `parameters.md`, `agents/case-setup.md`, coverage, `report-T10.md` |
+| T11 | `theory/groundwater.md` (PCA consistency, the face rule, the harmonic option, the continuity form), `theory/exchange-flux.md` (top modes 0–3), the `Predictor.cpp`/`Corrector.cpp` headers, `parameters.md`, `agents/case-setup.md`, coverage, `report-T11.md`, v30 migration note |
 
 Every phase also writes `dod-T<n>.md` and `report-T<n>.md`.
 
@@ -1033,6 +1203,10 @@ Every phase also writes `dod-T<n>.md` and `report-T<n>.md`.
 | C-WS | ws1 cannot reproduce the T8 red (salinity above c_max) in ≤ 30 s | ws1 becomes a nightly-only lane beside ws1n (amendment); the per-PR tier keeps ws0 and ws2–ws4 |
 | C-INERT | R7 (inert parked water under ET) moves an ET gate beyond its W9.6 closed-form adjustment | Report with data. The owner's alternative (an O15 refinement) lets parked water evaporate, booked as evaporation |
 | C-SX | A post-solve change cannot be given an explicit salt book under C3 (an unbooked η change found by J2), or C4's capped outflow grows beyond film scale on a gate | Report with data; the change is booked (new audit term) or the cap is redesigned before T10 closes |
+| C-PC | Under `consistent`, a legacy-golden gate (b3, b5, b6) leaves its tolerance | Declared exception by amendment, with the change attributed face by face to M1–M4; the owner decides between re-pinning the reference and keeping `legacy` as the default |
+| C-SEEP | Mode 3 chatters (a top cell flips pressurized/not across substeps), or the corrector's guard clamp removes more than ε | Report with data. Candidate (owner decision): classify from the predicted head with one re-solve |
+| C-DENS | pc7(a) shows a flat-mesh K1 churn above the solve-residual class (the corrected-M4 statement "the flat continuity is already consistent" would be wrong) | Report with data; attribute the residual term by term before any further change |
+| C-COST | The `consistent` lane raises the groundwater substep count > 2× on a gate (report: 1.9× on H2) | Record it; this is not a failure unless C-TIME triggers. The adaptive step reads the corrector's fluxes, which the one-sided rule understated out of low-K cells |
 | C-FAO | FAO-56 PDF not retrievable | Owner supplies the PDF; et0 part 4 and et10 (2) wait; et10 (1) proceeds |
 | C-BIT | `default_bitwise` differs by ≤ 1e-14 only in an edited kernel | §2.6 caveat procedure |
 | C-TIME | Any Stage-3 case > 60 s, or the suite > 5 min | Coarsen or shorten the case with a refinement note; else reclassify it to `stage3_nightly` by amendment (the g5 precedent) |
@@ -1047,7 +1221,8 @@ Every phase also writes `dod-T<n>.md` and `report-T<n>.md`.
 4. **FAO-56 PDF** if C-FAO triggers.
 5. **Final commit** of the tree after T8 (`records/T8/stage3-full.patch` and the snapshot refs provided). Optionally delete the `refs/stage3/*` refs afterwards (§2.2).
 6. **T9 (S3-A12), open:** (a) approve phase T9 (§12A); (b) the interim default of `transport.surface_dryout` until W9.7 passes — the agent recommends reverting it to `discard` through §2.7, because the shipped `store` default blows up coupled tidal runs without ET. Decided 2026-10-31 (O15): the paired water–salt store, rain and evaporation untouched, parked water inert under ET.
-7. **T10 (S3-A14), open:** (a) approve phase T10 (§12B); (b) at W10.6, whether `transport.surface_update: consistent` should resolve to the solve-consistent update (the v30 matrix uses `consistent`; until then it opts in with `conservative`).
+7. **T10 (S3-A14):** (a) approve phase T10 (§12B); (b) at W10.6, whether `transport.surface_update: consistent` should resolve to the solve-consistent update (the v30 matrix uses `consistent`; until then it opts in with `conservative`). **Decided 2026-11-04 (O18, S3-A18): `conservative` is the DEFAULT; `legacy` and `consistent` stay the pinned opt-outs.**
+8. **T11 (S3-A16):** (a) approve phase T11 and its gates (§12C); (b) at W11.6, confirm O17(d) with the pc7/pc8 numbers: the corrector was found to already carry the density weighting; what is left is the terrain-gravity term made consistent and physical (P5) — confirm that this resolves (d), or direct otherwise; (c) at W11.9, the default flip of `predictor_corrector` and the disposition of the legacy-golden exceptions (b3, b5, b6). **Decided 2026-11-04 (O18, S3-A18): `consistent` is the DEFAULT; `legacy` stays the pinned opt-out.** (d) the default of `face_conductivity`: **decided 2026-11-04 (O18): `arithmetic` stays the default**; `harmonic` remains the opt-in with the pc3–pc5 evidence recorded.
 
 ---
 
@@ -1149,6 +1324,329 @@ execution); six adjudications at first green, each with its measured datum in
    (MAE 0.0381 m vs the golden's own 0.0430 m). No zero_gradient tolerance
    changed.
 6. `check_bc_matrix.py` canonical cells extended with the eta-inflow axis.
+
+### S3-A18 (post-T11, 2026-11-04) — the O18 default flips: `conservative` surface transport and the `consistent` predictor–corrector pair become the defaults
+
+**Decision (owner, 2026-11-04, on the T11 close report).** Make
+`arithmetic` the `face_conductivity` default (it already was — recorded
+as decided rather than open), and flip two defaults:
+`transport.surface_update` → `conservative` (closing owner item 7b, the
+W10.6 evaluation) and `groundwater.predictor_corrector` → `consistent`
+(closing item 8c, the W11.9 evaluation). The agent's recommendation —
+each scheme fixes measured spurious physics (24 % of exfiltrated salt
+stranded → 0 exactly; water creation worth 72 % of the H2 net
+exfiltration → 0.004 %; the S1 terrain force on resting salty slabs
+→ 1.4e-13) — was accepted for both.
+
+**Implementation (§2.7 conventions).**
+1. `TransportConfig`: the extractor resolves an absent `surface_update`
+   to `conservative`, and an absent `subsurface_update` beside a resolved
+   conservative surface scheme to `consistent` (the T10 coupled-book
+   schema rule made a default); an absent `transport:` block under
+   `modules.transport` takes the same resolved defaults. A heat-only
+   configuration (no transport block) keeps the v2 Q5 legacy surface
+   update its goldens pin. The struct initializers stay `false` — unit
+   fixtures compose the flags explicitly.
+2. `GroundwaterConfig::predictorCorrector` initializer →
+   `Consistent` (the reallocation-flip convention: one initializer).
+3. Schema rules re-anchored on the new defaults: the ET+salinity rule
+   and the conservative+groundwater rule now fire on EXPLICIT `legacy`
+   values (an absent key resolves to the consistent class); the
+   harmonic-face rule fires on an explicit `legacy` predictor–corrector.
+4. `BITWISE_PINS` gains `transport.surface_update: legacy` and
+   `transport.subsurface_update: legacy` beside the W11.9
+   `groundwater.predictor_corrector: legacy`, and the pin loop now fills
+   ABSENT keys only — an explicit value in a recorded case (coupled-salt's
+   `consistent`) is part of the T0 configuration and stays.
+5. Lanes measured to depend on the legacy trajectory get the old value
+   pinned EXPLICITLY in their case file (the T8 `surface_dryout`-flip
+   precedent): `predictor_corrector: legacy` into rl2-tidal-box (the rl2
+   floor and rl4's anchor comparison; rl4 stages coupled-salt-base, so
+   its gate transform pins the same), et9-noet + et9-tidal-flat (the
+   noET bitwise pin), ws1-source-bound + ws1n-h2-beach (the anti-vacuity
+   floors and 5e-11 identity epsilons — the ws lanes exist to exercise
+   the store paths hard, which the legacy churn does), et3-pond-switch
+   (the combined-rate identity window and pond-phase timings sit on the
+   legacy top-face modes; M2/M3 move the pond-dry switch — measured err
+   5.9e-2/3.2e-2), and b6-kuan-ss/td (the legacy Newton goldens carry
+   the P5 terrain force; salinity +27.5 %/+25.3 % vs the 10 % cap under
+   `consistent`, W11.9). b6's TRANSPORT keys stay absent: the resolved
+   conservative + consistent subsurface pair is exactly the
+   W10.5-measured override config (PASS, tolerances unchanged). The sx
+   uniformity gates stay ON the new defaults — their caps are
+   re-measured instead (1e-6 → 5e-6; measured 2.12e-6 salt / 1.21e-6
+   heat vs the authoring 1.9e-7; red class 1e-1): pinning the flagship
+   conservative gates to a non-default trajectory would be backwards.
+   Everything else rides the new defaults and is re-verified by the flip
+   tiers; failures are adjudicated here.
+6. parameters.md, theory docs and agents/case-setup.md re-worded;
+   dod/report T11 note the flip postdates the T11 close pipeline.
+
+**Verification at the flip.** The full `unit|mpi` suite and the stage3
+label on the flipped binary; the default-bitwise gate with the extended
+pins (13/13); spot legacy-golden gates (b1/b2/b3/b6 classes run inside
+the tiers). The b6 ss/td salinity comparisons now run the consistent
+schemes BY DEFAULT and their goldens carry the legacy forces — their
+gate cases pin `legacy`/`consistent` explicitly (W11.9 adjudication), so
+they stay green; re-goldening them under the new defaults is follow-on
+work the owner schedules.
+
+**First flip-sweep findings (2026-11-04, adjudicated here).**
+1. Three unit fixtures asserted legacy-trajectory behavior through the
+   struct initializer (the W8.1 class): `GwPc.…LegacyChurns` (the red
+   control), `GwModule.ReallocationSurplusModesDropOrConserve` (the
+   legacy drop/redistribute surplus), and the two consumers of
+   `infiltratingColumnConfig` (the legacy gradient swap / restore-fed
+   ledger). All three now pin `predictorCorrector = Legacy` explicitly.
+2. **Defect found and fixed before any run shipped it**: the S3-A18
+   extractor default synthesized `subsurface_update: consistent` on
+   surface-only runs (no groundwater module), so the resolved
+   configuration embedded in the run record no longer revalidated (pd3's
+   r1 hook caught it on pd2-surface). `loadConfig` now clears the
+   consistent subsurface flag when `modules.groundwater` is off.
+3. The b5 default-mode rank-invariance bounds are data-derived per
+   solver on the legacy trajectory (A14); the consistent trajectory
+   moves the integral observables marginally past them (subsurface
+   3.06e-5/7.06e-5 at n=2/4 vs the 3e-5 record; exchanged 2.016e-3 vs
+   2e-3). Re-derived under the same discipline, ~2× headroom on the
+   measured n=4 values: subsurface 1.5e-4, exchanged 4.0e-3, surface
+   unchanged. The strict lanes are untouched (pc-rank: head ≤ 5.3e-15).
+4. **gw-orient's mixed class re-calibrated, diagnosed to the root.**
+   Under the consistent default, rot180 and antitranspose left the
+   strict 1e-12 bound (7.603e-8 head). Diagnosis (full trace in
+   `records/T11/flip/gw-orient-*.log` and the dbg probes): the schemes
+   are bitwise-identical on the battery's identity orientation
+   (hydrostatic z-equilibrium keeps the interface faces fluxless), the
+   trajectory is rounding-stable (n=1 vs n=2: 1.5e-15 — not chaos), and
+   the mixed-class INITIAL transient is scheme-independent and identical
+   (wc 1.056e-3 at t = 300 under both modes — the preserved plus/minus
+   edge arithmetic). What changed is only its DECAY: legacy relaxes it
+   to 2.3e-14 by t_end, the consistent interface conductivities relax
+   it more slowly (7.6e-8 head / 2.0e-8 wc at t_end). A relaxation-rate
+   property of the documented mixed class, not an indexing asymmetry;
+   `tol_abs_mixed` 1e-12 → 5e-7 (~6× measured), the transpose class —
+   the true indexing-symmetry gate — stays 1e-12 (measured 2.1e-15).
+   `symmetry-exemptions.md` row rewritten with the decay traces.
+5. et3's combined-rate identity window and pond-phase timings sit on
+   the legacy top-face modes (M2/M3 move the pond-dry switch; measured
+   identity err 5.9e-2/3.2e-2 under the default) — case file pinned
+   `legacy`. rl4 stages coupled-salt-base, so its gate transform pins
+   the same (its disabled-vs-legacy anchor ratio presumes the
+   M1-churn-fed anchor). sx1/sx5 stay ON the new defaults with their
+   uniformity caps re-measured (1e-6 → 5e-6; measured 2.12e-6 salt /
+   1.21e-6 heat; red class 1e-1).
+
+### S3-A17 (T11, 2026-11-04) — first-green adjudications of the predictor–corrector consistency
+
+**W11.0 corrections before any gate ran.**
+1. The §12C draft called the corrector a volume balance and staged a
+   D-M/D-V variant choice on O17(d); `updateWaterContent` disproved it
+   (every face flux × ρ_f/ρ₀, storage × ρ_c/ρ₀). M4 narrowed to the
+   terrain-slope gravity term — the same term as the S1 force suspicion,
+   so one P5 change (the z-gravity r²v¹ form in both halves) closes both.
+   §12C and S3-A16 were rewritten accordingly before W11.1.
+2. pc4's 2-cell wall was vacuous (the wall-interior face is (0+0)/2 = 0
+   under arithmetic too) — redesigned to a 1-cell wall. Measured red:
+   the arithmetic sand|wall faces leak 5.36e-6 m³/s; harmonic exactly 0.
+3. pc7's drafted Σ s·θV constancy assert would have re-asserted the
+   transport's BOOKED limiter terms (red measured: drift 3.1e-6 while
+   the booked identity closed to 1.2e-14) — the gate asserts the gw
+   volume ledger + the scalar's booked identity instead, which by the
+   EOS linearity *is* the fluid-mass statement.
+
+**Measured red (frehg-T10, tokens stripped; `records/T11/red/`).**
+pc6a: restore churn = 36 % of the ponded infiltration (M2). pc6b: the
+predictor seals the artesian seepage face (top flux −1e-20 vs the
+analytic 5e-6 m³/s) and the restore mints 0.33 m³/h (M3). pc8: the salty
+slab creeps at 1.01e-2 of Ks·A on the 10 % slope (S1 confirmed red; the
+derived minimum is 2.6e-3 — the excess is the sloped-face recirculation);
+the fresh control rests at 1.1e-13. pc7a flat lock exchange: θV drift
+0.0 exactly — the flat continuity is already consistent, as the corrected
+§12C states. pc3: the arithmetic interface face carries 3.4× the exact
+series flux at a 100× contrast.
+
+**First-green adjudications.**
+1. **pc6a (M2) is ratio-gated, not zero-gated.** On the unsaturated
+   wetting front the restore books the single-Picard chord error of the
+   retention curve — a PCA property present in both modes, not a face
+   mismatch. Gates: churn(consistent)/churn(legacy) ≤ 0.05 (measured
+   0.043 on the saturating column; 0.0055 on the deeper draft case), and
+   K1 at saturation — once the column fills, the churn increment is
+   exactly 0.0 (measured; C(h) = 0 leaves no chord). The case was
+   re-authored so the column saturates mid-run (wt 1.6 under the 2.0 bed).
+2. **The "M5" edge-leg suspicion is NOT a defect**
+   (`work/m5-adjudication.md`). 83 % of rl2's residual churn sits in the
+   head-edge rows, and a 2-cell probe read a 3× edge conductance — fully
+   explained by the documented v2 corner rule (the probe's full-width side
+   polygons attached the head condition to the corner cells' y faces: six
+   edge legs, whose network solution reproduces the computed heads
+   exactly). The predictor edge leg (doubled coefficient, one-sided
+   edge-face K, hydrostatic ghost) and the corrector's (half spacing, same
+   K, same ghost) agree term for term; rl2's head-row churn is the chord
+   class at the saturation fronts the maintained water tables host, inside
+   pc1's cap (0.0059 vs the report's patched 0.006).
+3. **pc0's vacuity metric**: `boundaryIn` is the NET inflow (a steady
+   through-flow nets to 0); the unit tests measure throughput from the
+   mid-stack face flux instead. The stack's head BCs were re-authored to
+   keep every layer saturated (ψ ∈ [2.0, 3.3]; the draft's 0.5 bottom
+   head desaturated the low-K layers and measured the chord error, and
+   the harmonic lane's kr → 0 sealed the column).
+4. **pc2's ledger class**: the packaged beach holds the gw identity at
+   the coupled-subcycled residual class every v30 run shows (~5e-3 m³;
+   measured 5.4e-3 H2 / 4.0e-3 H0), not pc1's strict 1e-6·T. The
+   creation cap is 0.01 m³/m per cycle — measured green 0.0003 (the
+   full M1+M2+M3+P5 set), 150× below the report's Ks-only patch (0.045)
+   and 2.3e4× below red (6.97).
+5. **pc8's bound**: rest_rel 1e-6 of Ks·A (salty measured 1.4e-13 green,
+   1.0e-2 red; fresh control 1.1e-13 both ways).
+6. **Doxygen caught five undocumented T11 members** before CI could
+   (the frehg2-ci-docs-gate lesson applied: every doc gate judged by
+   exit code).
+
+**Cost.** The consistent lanes' substep counts are unchanged on rl2 and
+the unit stacks; pc2-H2 runs the same wall class as the red lane (the
+C-COST 1.9× of the report's Ks-only patch was not reproduced by the full
+set at T/4 — recorded, nightly pc2 watches it).
+
+**W11.8 — every Stage-3 groundwater lane under the `consistent`
+override (2026-11-04, logs `records/T11/work/w118-*.log`).** 15 lanes:
+9 PASS unchanged (rl3, pd2, pd5, dg1, et8, et9-veg, ws4, sx2,
+b6-gw-smoke), 6 FAIL — all six are floors, pins, or tolerances authored
+on the legacy-faced trajectory, failing under a scheme-changing override
+by design (the T10 W10.4 class). Each lane keeps `legacy` in its case
+file and stays green un-overridden (the Tier-P/N runs below). Per lane:
+
+1. **rl2** — the legacy-churn anti-vacuity floor itself: gross churn
+   3.061e-03 m³ vs the ≥ 0.1·T floor 5.226e-02. The floor *is* M1's
+   encoding (S3-A4 correction above); under `consistent` the churn it
+   demands is gone — that is the fix working. pc1 is the replacement
+   gate (cap 0.01·T, measured 0.0059).
+2. **rl4** — the disabled-vs-legacy anchor relation: |Δ anchor|
+   disabled 1.297 vs legacy 2.317 (bound: disabled ≤ legacy/5). The
+   comparison presumes the legacy-sized anchor that M1's churn feeds;
+   under the override the legacy-mode anchor shrinks and the ratio
+   premise fails structurally, not physically.
+3. **et9** — the noET bitwise pin vs the T5-start golden (1271
+   datasets): a bitwise pin on a legacy-pinned lane under a
+   scheme-changing override fails by definition (W10.4 precedent
+   verbatim).
+4. **ws1** — three sub-checks, two classes. (a) Anti-vacuity floors:
+   max Σ V_s 6.169e-05 < 8.8e-05 m³ and P4 thin vents 1.938e-06 <
+   1.8e-04 m³ — the stored/vented water the floors demand was partly
+   minted by M1/M3 at the swash face; the consistent scheme stores and
+   vents less. Physical, expected direction. (b) The water identities
+   slip to 7.768e-11 / 6.488e-11 m³ absolute vs the 5e-11 m³ epsilon
+   floor (1.07e-9 / 8.9e-10 of the 7.3e-2 m³ scale) — verified NOT the
+   mode-3 clamp leaking: `pc_clamp_m3` = 2.2e-07 m³ on this lane, 3000×
+   the residual, so the clamped flux is booked consistently and the slip
+   is rounding reordering across 121 rows.
+5. **ws1n** — the same anti-vacuity class: max Σ V_s 7.685e-05 <
+   1.0e-04 m³ (the release-row floor still passes, 120 ≥ 100).
+6. **sx1** — the uniform-salinity bound: max |c − 35| = 2.120e-06
+   (surface) / 2.110e-06 (subsurface) vs ≤ 1e-06 psu. The bound was
+   authored on the T10 exchange trajectory (measured 1.9e-07 then); the
+   consistent gw path shifts the swash overdraft events and doubles the
+   bound, still 10⁵× below the red class (~1e-1) the gate exists to
+   catch. `pc_clamp_m3` = 3.3e-07 m³ (mode 3 fires on the swash face,
+   booked consistently).
+
+No tolerance is widened and no lane file is edited: the override lanes
+are an evaluation, not a gate. The W11.9 default-flip decision (owner,
+§17-8c) is where these six would become real re-pins.
+
+**W11.9 — the default-flip evaluation (2026-11-04, comparison build
+`build-s3-df`, the one-line default flip, source reverted after
+building; logs `records/T11/work/w119*-*.log`).** Measured:
+
+1. `default-bitwise` WITHOUT a pin: **11/13 lanes stay bitwise** — only
+   `gw-orient` (heterogeneous soil: head, water content, gw audit) and
+   `coupled-salt` (gw fields, then depth/eta and both concentrations
+   through the coupling) change. b2 and g6c-coupled hold: homogeneous
+   soil is the K3 identity even where coupled.
+2. `BITWISE_PINS` gains `groundwater.predictor_corrector: legacy` (the
+   plan's own W11.9 row; the S3-A11 pin rule): **13/13 bitwise on the
+   flipped binary**, and the stock binary stays PASS — the gate tests
+   the v2.0 configuration whatever the default.
+3. **b3 improves 2×** with tolerances unchanged: water-table max dist
+   0.160 → 0.085 m, rms 0.073 → 0.041 (h=0); 0.170 → 0.091, 0.088 →
+   0.057 (h=−400). The consistent faces move the 41×-contrast water
+   table TOWARD the legacy golden.
+4. **b6 ss/td diverge on salinity** (head unchanged, 0 % cells
+   outside): ss 9.15 % of cells outside the salinity band (cap 6 %),
+   tidal salt mass +27.5 % (cap 10 %); td 8.25 % / +25.3 %. The case is
+   homogeneous (M1 inert, K3) and `pc_clamp_m3` = 0.0 — the divergence
+   is P5: the golden, a legacy Newton run, carries the same spurious
+   terrain-gravity force the flip removes, and the model now retains
+   more salt in the wedge. Against the EXPERIMENT the td interface MAE
+   improves (0.0365 vs the golden's 0.0430 m); ss worsens (0.0613 vs
+   0.0245 m; both far inside the 0.1067 m cap).
+5. et9's noET pin breaks, as it must (the W11.8 lane).
+6. b5 (rain/sync): PASS with tolerances unchanged on the covered
+   0–40.0 h window (run stopped at the owner's direction at 144 001 s;
+   the reference curves end at 39.8 h, so the envelope comparison is
+   complete — discharge 0/59 outside, peak +2.7 %, integral +1.5 %;
+   ponding 0/68, −1.5 %, −7.1 %). Vs stock over the common 24 h: peak
+   +0.024 %, cum outflow +0.40 %. The Ks = 0 wall ran `arithmetic`
+   (unchanged ½K_loam predictor face); sealing it is the harmonic
+   opt-in's job (pc4), a separate decision (8d).
+
+**Outcome: reported, not flipped.** `legacy` stays the default; a flip
+would re-pin (or re-golden) the b6 salinity comparisons and re-measure
+the W11.8 floors. The owner decides (§17-8c).
+
+### S3-A16 (post-T10, 2026-11-03) — new phase T11: the groundwater predictor and corrector disagree on face conductivities, and the restore turns the difference into water (O17)
+
+**Finding (outside the gates; the 2026Frehg2 v30 wind × heterogeneity
+study, report `BUG_realloc_ks_inconsistency.md`, 2026-11-03).** On the H2
+beach (a 24-class lnK window, Ks 5.6e-6 … 1.1e-3 m/s), `reallocation:
+legacy` creates 9.45 and drops 7.44 m³ per metre of shore per tidal cycle.
+The net +2.0 m³/m is 72 % of the net exfiltration. It is steady from cycle
+2 on, 99.9 % of it sits in cells with a Ks jump to a neighbour, and the
+predicted face-flux mismatch reproduces its size (18.9 vs 16.9 m³/m per
+cycle; per-cell log–log correlation 0.97). `dt_max` and the solver rtol
+leave it unchanged. The report's 3-line test patch (the corrector takes
+each flank's own Ks) cuts the H2 gross creation 155× and rl2's churn/T from
+2.91 to 0.006, and leaves H0 bitwise.
+
+**Verification (agent, 2026-11-03).** Confirmed in the code. The corrector
+evaluates the neighbour's closure with the minus cell's Ks on x/y faces and
+with the lower cell's Ks on z faces; the predictor uses each flank's own Ks.
+The legacy source has the same split (`darcy_flux`: `Ks = Ksx[ic]`,
+`Ks = Ksz[is]`; `compute_K_face`: own Ks), so Frehg2 ported a legacy defect
+faithfully and documented it as a harmless quirk. The water appears at the
+saturated-contact restore θ := θ(h_pred). The same reading found three more
+predictor/corrector disagreements, also inherited from legacy: the ponded
+top face (M2), the dry-surface seepage leg (M3), and the continuity form
+under density coupling (M4). It also found a suspected force error on
+sloping terrain-following layers (S1). §12C tabulates all five.
+
+**Attribution correction (S3-A4).** T1 measured this churn on rl2
+(churn/T 2.9) and attributed it to "the restore θ := θ(h) disagrees with
+the flux-conserved θ every substep". That named the symptom, not the
+cause. The rl2 anti-vacuity floor (`check_legacy_churn`, churn ≥ 0.1·T)
+then encoded the defect as a requirement; T11 replaces it (pc1).
+
+**Decision (owner, 2026-11-03) → O17.** One face rule for both halves;
+arithmetic stays the default and the harmonic Ks × arithmetic kr rule ships
+as an opt-in; Ksz on the ponded top face in both halves; the density ratio
+in the corrector.
+
+**Correction at W11.0 (2026-11-03, before any gate was authored).** The
+original §12C draft asserted the corrector is a volume balance with no ρ
+factor, and built a D-M/D-V variant choice on that. Verified against the
+code at phase start: `updateWaterContent` weights every face flux by
+ρ_f/ρ₀ and the storage by ρ_c/ρ₀ — the corrector is already the mass
+balance, consistent with the predictor term for term except (i) the
+terrain-slope gravity term (predictor r⁰v⁰, corrector effectively r¹v⁰)
+and (ii) the top-face modes (M2/M3). The D-M/D-V dichotomy is withdrawn;
+M4 narrows to the terrain term, and the S1 suspicion is confirmed by
+derivation (a salty layer at rest on a slope is pushed by
+K·(ρ_f/ρ₀−1)·sin α; both facts in the corrected §12C). O17(d) is
+implemented as P5 — the terrain term in the z-gravity form r²v¹ in both
+halves — and confirmed by the owner on the pc7/pc8 numbers (§17-8b).
+Implemented as phase T11 behind `groundwater.predictor_corrector:
+consistent`, so every existing lane stays bitwise until the W11.9
+default-flip evaluation.
 
 ### S3-A15 (T10, 2026-10-31) — first-green adjudications of the conservative update
 

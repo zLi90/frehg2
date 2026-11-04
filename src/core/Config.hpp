@@ -298,6 +298,23 @@ struct GroundwaterConfig {
   /// theta(h) creation; the conservative isolated-cell h := h(theta)
   /// restore is kept, and the realloc audit columns are exactly zero.
   enum class Reallocation { Legacy, Off };
+  /// groundwater.predictor_corrector (Stage-3 T11, owner decision O17;
+  /// S3-A16). Legacy: the ported v1 split — the corrector's face
+  /// conductivities use one flank's Ks (x/y: the minus cell, z: the lower
+  /// cell), the ponded top face averages Ksz with K(h) in the predictor
+  /// only, a dry seepage face is sealed in the predictor but live in the
+  /// corrector, and the terrain gravity term carries no density factor.
+  /// Consistent: both halves share one face rule (gw/FaceConductivity.hpp),
+  /// the ponded top face is Ksz in both, pressurized dry columns become
+  /// seepage faces (mode 3) in both, and the terrain gravity term takes the
+  /// z-gravity density form in both.
+  enum class PredictorCorrector { Legacy, Consistent };
+  /// groundwater.face_conductivity (T11, O17b; consistent mode only).
+  /// Arithmetic: the mean of the flanks' own-K closures (the v1 rule).
+  /// Harmonic: the thickness-weighted harmonic mean of the flanks' Ks
+  /// times the arithmetic mean of their relative permeabilities — exact
+  /// for saturated series flow, seals a Ks = 0 flank exactly.
+  enum class FaceConductivity { Arithmetic, Harmonic };
   std::string scheme = "pca";     ///< sole allowed value; documents the design
   bool useFull3d = true;          ///< false: zero lateral K in unsaturated cells
   GroundwaterTimestepConfig timestep;  ///< adaptive dtg controller
@@ -309,6 +326,12 @@ struct GroundwaterConfig {
   /// every test with unchanged tolerances; it stays flipped only if all
   /// pass. Do not flip it anywhere else.
   Reallocation reallocation = Reallocation::Legacy;
+  /// T11 default, flipped at W11.9 (owner decision, 2026-11-04; plan
+  /// S3-A18): the consistent pair is the default; `legacy` stays the
+  /// golden-pinned opt-out (the v2.0 one-sided face rule).
+  PredictorCorrector predictorCorrector = PredictorCorrector::Consistent;
+  /// T11 (O17b): the consistent pair's interior face mean.
+  FaceConductivity faceConductivity = FaceConductivity::Arithmetic;
   DensityCouplingConfig densityCoupling;  ///< baroclinic feedback switch
   GwEvaporationConfig evaporation;        ///< bulk soil evaporation (v2 Q4)
 };
@@ -568,15 +591,20 @@ struct TransportConfig {
   /// surface concentration divides the transported mass by the volume of
   /// the *current* step's flow rates (the rates that moved the mass), and
   /// the local min/max limiter applies in every wet cell, still ones
-  /// included. Off by default (`legacy`): the one-step-lagged flux volume
-  /// and the moving-cell-only limiter are golden-pinned (docs/theory/
-  /// transport.md quirk 2).
+  /// included. `legacy` (the one-step-lagged flux volume and the
+  /// moving-cell-only limiter) stays golden-pinned (docs/theory/
+  /// transport.md quirk 2). NOTE: the configuration default is
+  /// `conservative` since the S3-A18 flip and is applied by
+  /// extractTransport (and by loadConfig for an absent transport block);
+  /// the struct initializers stay false so unit fixtures can compose the
+  /// flags explicitly.
   bool consistentSurfaceUpdate = false;
   /// Stage-3 T10 (plan §12B, O16): transport.surface_update: conservative —
   /// the surface scalar advects with the free-surface solve's own
   /// continuity face volumes (salt moves with the water the solve moved);
-  /// implies the consistent semantics everywhere else. Opt-in: legacy and
-  /// consistent stay bitwise.
+  /// implies the consistent semantics everywhere else. The configuration
+  /// default since the T10/T11 close (owner decision, 2026-11-04; plan
+  /// S3-A18); `legacy` and `consistent` stay the bitwise opt-outs.
   bool conservativeSurfaceUpdate = false;
   /// transport.subsurface_update: consistent (post-v2.0 opt-in): the
   /// subsurface scalar moves with every volume the groundwater module moves
@@ -587,7 +615,8 @@ struct TransportConfig {
   /// water content at the previous transport step, the surface-interface
   /// diffusion acts on every wet step (legacy: only on steps with a nonzero
   /// seepage rate) and the legacy one-sided interface dispersive gain is
-  /// dropped. Off by default (`legacy`): the b6 goldens pin the legacy update.
+  /// dropped. Configuration default when the resolved surface scheme is
+  /// conservative (its coupled books need it — the T10 schema rule).
   bool consistentSubsurfaceUpdate = false;
 };
 

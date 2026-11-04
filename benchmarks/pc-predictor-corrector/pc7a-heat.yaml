@@ -1,0 +1,73 @@
+# pc7a-heat — the pc7(a) temperature lane: uniform 35 psu, a 10|30 C
+# temperature front, density from thermal expansion (beta_T 2.1e-4,
+# reference 20 C). The heat ledger Sigma T-theta-V and the EOS fluid-mass
+# ledger hold; the theta-V drift is recorded.
+simulation:
+  id: pc7a-heat
+  title: Stage-3 pc7a heat lane (thermal-density lock exchange)
+domain:
+  nx: 8
+  ny: 1
+  nz: 8
+  dx: 0.25
+  dy: 1.0
+  dz: 0.25
+  bottom_elevation: {constant: 2.0}
+time:
+  dt: 30.0
+  t_end: 3600.0
+  output_interval: 360.0
+modules:
+  groundwater: true
+  transport: true
+  temperature: true
+groundwater:
+  scheme: pca
+  use_full3d: true
+  timestep:
+    dt_init: 30.0
+    dt_min: 30.0
+    dt_max: 30.0
+  specific_storage: 1.0e-05
+  reallocation: legacy
+  predictor_corrector: consistent
+  density_coupling:
+    enabled: true
+    thermal_expansion: 2.1e-4
+    reference_temperature: 20.0
+soil:
+  types:
+    - name: sand
+      ksx: 1.0e-03
+      ksy: 0.0
+      ksz: 1.0e-03
+      theta_s: 0.41
+      theta_r: 0.05
+      vg_alpha: 4.0
+      vg_n: 2.5
+  map: {constant: sand}
+initial_conditions:
+  groundwater:
+    water_table: {constant: 5.0}
+  transport:
+    groundwater: {constant: 35.0}
+  temperature:
+    groundwater: {file: input/pc7_temp.dat}
+transport:
+  scheme: {advection: superbee}
+  dispersion:
+    longitudinal: 0.0
+    transverse: 0.0
+    molecular: 1.0e-09
+  subsurface_update: consistent
+temperature:
+  scheme: {advection: superbee}
+  thermal_conductivity: 1.5
+  heat_capacity_solid: 2.2e6
+  heat_capacity_water: 4.18e6
+output:
+  filename: out/output.h5
+  variables:
+    groundwater: [hydraulic_head, water_content, qx, qz, realloc_created, realloc_dropped, vloss]
+    transport: [concentration]
+    temperature: [temperature]
