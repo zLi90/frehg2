@@ -2,14 +2,17 @@
 # per PR, zero findings allowed. The nightly schedule runs the full P5
 # sanitizer matrix (amendment A21): every per-PR label in full plus
 # sanitized shortened runs of the nightly-class b5/b6 configurations.
+# The daily cron trigger is off: the full matrix runs on a manual
+# "Run workflow" from the Actions tab. To re-arm it, add back
+#   schedule:
+#     - cron: "41 4 * * *"
 name: sanitize
 
 on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: "41 4 * * *"
+  workflow_dispatch:
 
 jobs:
   asan-ubsan:
@@ -43,7 +46,8 @@ jobs:
       - name: Sanitized build and tests
         run: |
           export CMAKE_PREFIX_PATH="$DEPS_PREFIX"
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ] || \
+             [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             scripts/run_sanitizers.sh --full build-asan "$DEPS_PREFIX"
           else
             scripts/run_sanitizers.sh build-asan "$DEPS_PREFIX"

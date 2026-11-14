@@ -2,11 +2,13 @@
 # b6) run here rather than per-commit. In P0 the regression label is empty;
 # the nightly still validates every benchmark configuration and runs the
 # full unit + mpi matrix so schema or foundation drift is caught overnight.
+# The daily cron trigger is off: run this lane by hand from the Actions tab
+# ("Run workflow"). To re-arm it, add back
+#   schedule:
+#     - cron: "23 3 * * *"
 name: regression-nightly
 
 on:
-  schedule:
-    - cron: "23 3 * * *"
   workflow_dispatch:
 
 jobs:
