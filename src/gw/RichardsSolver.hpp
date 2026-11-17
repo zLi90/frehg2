@@ -593,6 +593,11 @@ class RichardsSolver {
   Field3<real_t> rVisc_, rViscXp_, rViscYp_, rViscZp_;
   Field3<real_t> vloss_;
   Field3<real_t> room_, sendUp_, sendDown_;  ///< post-allocation scratch
+  /// Stage-3 T12 (S3-A19): groundwater.saturated_contact == head — the
+  /// classification reads neighbours from these pre-sweep copies of wc_/h_
+  /// (allocated only in that mode; Reallocate.cpp).
+  bool scHead_ = false;
+  Field3<real_t> wcSnap_, hSnap_;
   /// Stage-3 T1: groundwater.reallocation == disabled — the sweep runs
   /// with its non-conservative actions removed (S3-A4; Reallocate.cpp).
   bool reallocOff_ = false;

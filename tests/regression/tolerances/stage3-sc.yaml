@@ -1,0 +1,19 @@
+# stage3-sc.yaml — Stage-3 T12 saturated-contact classification gate
+# tolerances (plan §12D; every value cites its authoring measurement;
+# relaxations only by amendment — S3-A19).
+sc1:
+  ranks: [2, 3, 4, 5, 6, 8]  # 2/4/8 split b5's x extent on the lucky seams;
+                             # 3/5/6 split it at i = 34 / 81, where the T11
+                             # binary diverged (scratch probe, 2026-11-16)
+  rank_rel: 1.0e-12          # field-relative, strict solve; measured
+                             # <= 1.04e-14 on the head prototype at every
+                             # rank count (S3-A19)
+  legacy_seam_floor: 1.0e-8  # anti-vacuity: the legacy lane must show the
+                             # defect somewhere in the rank set. Measured
+                             # 2.8e-6 / 2.4e-5 / 2.8e-6 at n = 3/5/6 on the
+                             # Mac; 3.7e-7 at n = 2 on the x86 runner
+  restore_floor: 1.0e-3      # anti-vacuity: one-step realloc_m3 under head
+                             # (measured 1.91e-2; legacy 2.33e-2)
+sc2:
+  threads: 4                 # OMP_NUM_THREADS of the threaded twin; the
+                             # fields must match the 1-thread run bitwise

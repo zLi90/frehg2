@@ -35,6 +35,10 @@ groundwater:
   # S3-A18 pin: the noET 1271-dataset bitwise pin records the legacy
   # predictor-corrector trajectory (W11.8).
   predictor_corrector: legacy
+  # T12 pin (W12.4): the same bitwise trajectory classifies saturated
+  # contact in place (the v1 test; under reallocation: disabled it
+  # selects the isolated h := h(theta) restores).
+  saturated_contact: legacy
   timestep:
     dt_init: 2.0
     dt_min: 1.0

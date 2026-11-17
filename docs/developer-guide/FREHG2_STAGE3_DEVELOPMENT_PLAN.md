@@ -67,8 +67,10 @@ Notation:
 | **T9** (added by S3-A12) | Paired water–salt store for thin-layer removals (O15): booking of every surface thin-layer removal, the paired store and its release, coupled sub-`min_depth` vents, re-adjudication of the store-resolving gates, DF re-evaluation of the `store` default | T8 | 2.5–3.5 |
 | **T10** (added by S3-A14) | Solve-consistent surface transport (O16): the transport advects with the free-surface solve's continuity face volumes, so salt and heat move with the water; post-solve manipulations (limiters, removals, sources, exchange) keep their own explicit books | T9 | 1.5–2.5 |
 | **T11** (added by S3-A16) | Predictor–corrector consistency in the groundwater step (O17): one face-conductivity rule for both halves (M1), the ponded top face (M2), the seepage-face leg (M3), the continuity form under density coupling (M4), the harmonic option, and the suspected along-layer buoyancy term (S1) | T10 | 3–4 |
+| **T12** (added by S3-A19) | Decomposition-invariant saturated-contact classification in the post-allocation sweep (O19): the classification reads a pre-sweep snapshot and a neighbour above air entry counts as saturated (`groundwater.saturated_contact: head`); the v1 in-place test stays selectable as `legacy` | T11 | 0.5–1 |
+| **T13** (added by S3-A20) | Side-face right-hand-side scatters made atomic: `swe_velocity_bc_rhs` and `swe_outflow_rhs` lose updates under threads for duplicated corner/axis entries; `Kokkos::atomic_add`, gates rs0/rs1 | T12 | 0.5 |
 
-Execution order: T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8. The total is ≈ 14–19 agent-days. T9 follows the closed T8 (S3-A12, 2026-10-31); T10 follows the closed T9 (S3-A14, 2026-10-31); T11 follows the closed T10 (S3-A16, 2026-11-03).
+Execution order: T0 → T1 → T2 → T3 → T4 → T5 → T6 → T7 → T8. The total is ≈ 14–19 agent-days. T9 follows the closed T8 (S3-A12, 2026-10-31); T10 follows the closed T9 (S3-A14, 2026-10-31); T11 follows the closed T10 (S3-A16, 2026-11-03). T12 follows the closed T11 (S3-A19, 2026-11-16): the official CI's first x86 run of the T11 tree failed `regression.b5_rank_invariance.strict`, and the diagnosis is a v1-era defect, not T11 code. T13 follows the closed T12 (S3-A20, 2026-11-17): the two scatter races the T12 kernel audit found.
 
 ---
 
@@ -1015,6 +1017,206 @@ after, and the owner confirms O17(d) on those numbers (§17-8b).
 
 ---
 
+## 12D. T12 — Decomposition-invariant saturated-contact classification (added by S3-A19, O19)
+
+Status: scope approved by the owner 2026-11-16 (O19: "plan the code
+fix"). §2 applies unchanged: gate-first, records under
+`stage3/records/T12/`, snapshot `T12`, no commits.
+
+**Trigger.** The owner's push of the T11 tree (official ee265cb) turned
+the `build` lane red on its x86-64 runner. The only failing test was
+`regression.b5_rank_invariance.strict`: n=1 vs n=2 differed by 3.704e-7
+(water content; head 6.8e-8) against the V2-A9 bound 1e-9. On the dev
+machine the same lane measured 1.0e-14 / 5.7e-14 at n = 2 / 4.
+
+**Diagnosis (measured 2026-11-16, `stage3/evidence/sc-classify/`).**
+`gw_reallocate_classify` (`Reallocate.cpp`) decides saturated contact
+with `sat(neighbour) = wc >= wcs`. It reads the neighbour's `wc`, and the
+gradient split reads neighbour `h`, while the same kernel writes both
+fields: the θ := θ(h) restore, the θs clamp and the isolated h := h(θ).
+- A fringe cell (h above air entry, θ a little below θs after the
+  corrector) is restored to θs. It then counts as saturated only for
+  cells visited after it, so the restore chains along the ascending loop
+  (Gauss–Seidel).
+- At a subdomain's west/south seam the chain breaks, because the halo
+  holds the pre-sweep value. Under OpenMP the reads race.
+- `θ >= θs` also thresholds a clamped quantity at its clamp, so
+  deep-saturated cells sit on it to within the solve residual.
+
+The dev machine passes at n = 2/4/8 by luck. At n = 3/5/6 it fails
+(2.8e-6 / 2.4e-5 / 2.8e-6), and every diverging cell sits on a seam
+column: i = 34 for n = 3 and 6, i = 81–83 for n = 5
+(`records/T12/red/sc1-legacy-measured.log`). The `sat` lambda is
+unchanged since the v1 port. T11's flux changes only multiplied the
+fringe cells. The file header's claim, "decomposition-invariant by
+construction", was false for the classification. V2-A9's "one
+platform-rounding flip" (2.189e-10 at n = 4) is most likely the same
+defect.
+
+**Measured candidates** (b5, one 5 s step, serial vs current code):
+
+| Classification | Rank-invariant n=2..8 | Δ strict solver | Δ default solver | net restore m³ (now 2.33e-2) |
+|---|---|---|---|---|
+| snapshot, θ ≥ θs | no | 7 523 cells, h ≤ 8 cm | 13 129 cells, h ≤ 13 cm | 2.20e-2 |
+| snapshot, θ ≥ θs(1−1e-10) | strict only | 1 602 cells, ≤ 1.5e-6 | 11 849 cells, h ≤ 12 cm | 2.33e-2 / 2.01e-2 |
+| snapshot, θ ≥ θs ∨ (h > h_ae ∧ θ ≥ 0.9999θs) | yes (1e-14) | 5 364 cells, ≤ 7e-5 | same | 2.10e-2 |
+| **snapshot, θ ≥ θs ∨ h > h_ae (adopted)** | **yes (1e-14)** | **5 473 cells, ≤ 2.4e-4** | **same** | **1.91e-2** |
+
+The adopted rule is the only one that is invariant under both solver
+settings without a new constant. θ-tolerance variants inherit the solve
+residual and collapse to row 1 under the default solver. The contact test
+also reads the state the restore assigns: θ(h) = θs exactly when
+h > h_ae.
+
+**Design.**
+1. A key `groundwater.saturated_contact: legacy | head`. The default is
+   `legacy` until W12.4. The config initializer is the §2.7 flip
+   constant.
+2. Under `head` the sweep deep-copies `wc`/`h` (halos included, already
+   exchanged) into `wcSnap_`/`hSnap_`. These are allocated only in that
+   mode.
+3. The kernel reads every neighbour through aliases `wcR`/`hR`: the live
+   fields under `legacy`, the snapshots under `head`. There is no branch
+   and no template. The legacy expression trees are unchanged
+   (default_bitwise green), and with no `if constexpr` the nvcc
+   first-capture rule does not arise.
+4. Own-cell reads keep the live fields; no iteration writes another
+   cell's state before reading its own.
+5. It applies under both `reallocation` modes.
+6. The column send walks are unchanged: they are column-local.
+
+### Work items
+
+| W | File(s) | Exact change |
+|---|---|---|
+| W12.0 | records, gates | Gate-first. Freeze `stage3/bin/frehg-T11`; author sc0–sc2, `tolerances/stage3-sc.yaml`, the harness subcommands, the ctest entries, `scripts/test_sc_gates.py`; red logs to `records/T12/red/`. Static audit of every kernel for an off-cell read of a field the same kernel writes (`records/T12/kernel-audit.md`) |
+| W12.1 | `Config*`, `ConfigSchema.cpp`, `parameters.md`, `feature-coverage.md` | The key, the resolved-config round trip (r1), the coverage row |
+| W12.2 | `RichardsSolver.*`, `Reallocate.cpp` | The snapshot and the read aliases; the header's invariance statement corrected; `legacy` bitwise |
+| W12.3 | records | Every `stage3` lane under `FREHG_STAGE3_OVERRIDES=groundwater.saturated_contact=head` (r1-verified); each change adjudicated by amendment |
+| W12.4 | DF | §2.7 evaluation of `head` as the default: every tier, tolerances unchanged; `BITWISE_PINS` gains `groundwater.saturated_contact: legacy`. A legacy-golden comparison that leaves its tolerance is contingency C-SC |
+| W12.5 | docs, records | `theory/groundwater.md`, `parameters.md`, the V2-A9 attribution, `dod-T12.md`, `report-T12.md`, mkdocs nav |
+| W12.6 | close | Tier N, snapshot `T12`, `phase.patch`; sync to official (file copy; the owner commits) |
+
+### Gates (authored first) — `tolerances/stage3-sc.yaml`
+
+| Gate | Configuration | Asserts | Tolerance | Red on T11 / negative / anti-vacuity |
+|---|---|---|---|---|
+| **sc0** unit (`GwSc.*`) | six fringe cells (h = 0.05 m > h_ae, θ = θs − 1e-3) along x, y or z with a saturated seed at one end; one step for live face K, then the sweep alone | `head`: the mirrored row gives the mirrored result bitwise; every fringe cell restored to θs | bitwise | Red: the same assertions on the legacy rule fail 36× (`red/sc0-unit.log`). Anti-vacuity: `GwSc.LegacyClassificationFollowsTheLoopOrder` asserts the legacy chain runs one way only |
+| **sc1** (`stage3;mpi`) | b5 one 5 s step, strict solve, n = 1 vs 2, 3, 4, 5, 6, 8 | `head`: field-relative ≤ 1e-12 at every n; restore volume > 1e-3 m³ | 1e-12 | Red: the schema rejects the key. Anti-vacuity: the legacy lane departs by > 1e-8 at some n (measured 2.37e-5 at n = 5) |
+| **sc2** | the sc1 head step at 1 and 4 OpenMP threads | fields bitwise | bitwise | guard; the race was not observed at 4 threads |
+| battery | `unit.sc_gates.negative` | every checker fails on its modelled corruption (a seam-cell miss, a lane that never reaches the seam, a step without restores, a one-ulp thread difference) | — | — |
+
+The mpi label puts sc1 in the official CI's `ctest -L mpi` step, so the
+x86 runner exercises it.
+
+**DoD T12:**
+- [x] red evidence (sc0–sc2) in `records/T12/red/`;
+- [x] sc0–sc2 green, default_bitwise and the et9 pins green;
+- [x] W12.3 adjudications recorded by amendment (S3-A19);
+- [x] W12.4 outcome recorded: `head` is the default (every tier green, tolerances unchanged);
+- [x] docs and coverage rows;
+- [x] Tier N green;
+- [x] snapshot `T12`.
+
+---
+
+## 12E. T13 — Side-face right-hand-side scatters made atomic (added by S3-A20)
+
+Status: the task the owner was offered at §17-9(c), started 2026-11-17 after
+T12 closed. §2 applies unchanged: gate-first, records under
+`stage3/records/T13/`, no commits.
+
+**Trigger.** The T12 static kernel audit (`records/T12/kernel-audit.md`)
+found two scatter races in the free-surface right-hand side.
+`swe_velocity_bc_rhs` does `Srhs(j, i) += add` and `swe_outflow_rhs` does
+`Srhs(j, i) -= volume` over a side-face BC list. `appendSideFaces`
+(`BoundarySet.cpp`) pushes one entry per domain-edge face, so a corner cell
+holds two consecutive entries, and a cell on an nx = 1 or ny = 1 axis two or
+three. Two entries of one launch then read-modify-write one slot without
+protection. The kernel's reduction books both contributions, so a lost update
+shows up as a surface closure residual.
+
+**Diagnosis (measured 2026-11-17, `stage3/records/T13/`).**
+- **When a pair can race.** For a list shorter than 40 × threads, Kokkos'
+  OpenMP `RangePolicy` gives each thread ⌈n/T⌉ consecutive entries
+  (`set_auto_chunk_size`, `set_work_partition`). A duplicated pair can race
+  only when a chunk starts at its second entry.
+  - g4a's 14-entry wall list straddles at 3, 5 and 6 threads, but not at
+    4, 7 or 8.
+  - b4's 12-entry outlet straddles from 12 threads up, and so do the
+    x-orient walls. A node where Kokkos takes every core reaches that.
+  - The shipped threaded lanes (4 and 8 threads) never put a pair on two
+    threads.
+- **When a loss is visible.** It needs a nonzero contribution on the losing
+  entry. On u = 0 walls only the plus faces carry one, dt·As·E.
+- **Observed on a shipped case.** The frozen `frehg-T12` binary runs g4a
+  threaded:
+
+  | Threads | Runs departing from serial | Size of the departure |
+  |---|---|---|
+  | 5 | 4 of 6 | depth/η up to 3.8e-9 m; audit volume up to 6.0e-8 m³ |
+  | 6 | 6 of 6 | same |
+  | 3 | 0 of 3 | — (straddles, no loss observed) |
+  | 4, 8 | 0 of 2 each | — (no straddle) |
+
+  The surface closure residual reaches 1.8e-8 to 4.5e-8 m³, against 7.6e-13
+  serial; `bc_inflow` matches serial to 7e-12. b4, g4a and swe-orient at 4
+  and 8 threads match serial bitwise apart from the audit's reduction order
+  (≤ 1.1e-14).
+- **CUDA.** Adjacent entries run in one warp, so a loss is close to certain.
+  CUDA ships experimental and is not measured here.
+
+**Design.**
+1. Both updates become `Kokkos::atomic_add(&Srhs(j, i), ±v)`. Adding −v
+   rounds exactly as subtracting v.
+2. The two kernels move out of `assembleRhs` / `applyOutflowCorrections`
+   into the free functions `scatterVelocityBcRhs` / `scatterOutflowRhs`
+   (`SurfaceSolver.hpp`), so a unit gate can drive them with a crafted list.
+   The arithmetic does not change: the refactor-only binary is bitwise equal
+   to `frehg-T12` on b4.
+3. No key, no schema change and no default change.
+4. Serial arithmetic depends on FP contraction (C-BIT):
+   - **Without contraction** (`-ffp-contract=off`), the atomic and in-place
+     forms are bitwise equal.
+   - **With contraction** (GCC on aarch64, the dev toolchain), the in-place
+     outflow update compiles to one fused `Srhs − s·drop`. The atomic rounds
+     `s·drop` first, so serial outflow runs with a nonzero bed drop move at
+     the 1e-15 level (S3-A20).
+   - **The velocity kernel** has no contractible product: its `add` is a
+     merged switch value.
+
+### Work items
+
+| W | File(s) | Exact change |
+|---|---|---|
+| W13.0 | gates, records | Gate-first: freeze `stage3/bin/frehg-T12`; the seam refactor (W13.1's free functions, still in place) so rs0 can run on the T12 arithmetic; rs0 (`SweRs.*`, `unit.rs0`), rs1 (`gate_rs.py`, `tolerances/stage3-rs.yaml`, the harness gate, `regression.s3.rs1`), `scripts/test_rs_gates.py` (`unit.rs_gates.negative`); red logs to `records/T13/red/` |
+| W13.1 | `SurfaceSolver.hpp`, `FreeSurface.cpp` | The two free functions (doxygen); `Kokkos::atomic_add` on both writes |
+| W13.2 | records | default_bitwise and the et9 pins on the atomic binary; the C-BIT `-ffp-contract=off` test on b4; the shipped corner cases at 4 and 8 threads |
+| W13.3 | docs, records | S3-A20, `report-T13.md`, `dod-T13.md`, `testing.md` (OpenMP lane), the coverage row, mkdocs nav; Tier P |
+
+### Gates (authored first) — `tolerances/stage3-rs.yaml`
+
+| Gate | Configuration | Asserts | Tolerance | Red on T12 / negative / anti-vacuity |
+|---|---|---|---|---|
+| **rs0** unit (`SweRs.*`, `unit.rs0`, labels `unit;stage3`, OMP_NUM_THREADS = 8) | Both free functions over a 65 536-entry list on cell (1, 1), cycling x−, x+, y−, y+; dyadic data, so every partial sum is exact; 8 launches each | `Srhs(1, 1)` gains exactly the volume the reduction booked; no other slot changes | bitwise | Red on the T12 arithmetic: 16/16 launches lose updates at 8 threads (velocity kept 4 907–7 287 of 20 480), and 800/800 over 50 repeats at 4 and 8 threads (`red/`). Anti-vacuity: `SweRs.SideFaceListsRepeatCornerAndAxisCells` pins that the production builder repeats corner and axis cells as consecutive runs. The ctest entry fails on `[  SKIPPED ]`: below 4 threads the cases skip |
+| **rs1** (`regression.s3.rs1`, label `stage3`) | g4a (4 × 3, velocity walls on all sides) at 1, 5 and 6 OpenMP threads | every `/surface` and `/monitor` dataset bitwise against 1 thread; the mass audit within 1e-12 m³ | bitwise; 1e-12 | Red on `frehg-T12`: 3/3 gate runs fail, audit 1.2e-8 to 6.0e-8. Anti-vacuity: the gate rebuilds the list from the YAML and asserts that a duplicated cell straddles a chunk boundary at every lane's thread count |
+| battery | `unit.rs_gates.negative` | the list replica and the partition model against hand counts; every checker fails on its modelled corruption: a lost corner update, a one-ulp difference, a missing dataset, a short or NaN audit, and a lane whose partition keeps every pair on one thread | — | — |
+
+**DoD T13:**
+- [x] red evidence (rs0, rs1) in `records/T13/red/`;
+- [x] rs0, rs1 and the battery green; default_bitwise and the et9 pins green;
+- [x] C-BIT outcome recorded (S3-A20): serial b4 moves only through FP
+      contraction; `-ffp-contract=off` makes the two forms bitwise;
+- [x] Tier P green on `build-race`: 234/235 at `-j8`; `perf_baseline` passes
+      when run alone (`swe/free_surface` +0.2 %), as in the T12 records;
+- [x] Tier N green on `build-race` (2026-11-17, `records/T13/tierN/`):
+      b6 ss/td, g8, g5 ×2 5/5; `stage3_nightly` 16/16; b5 24 h record PASS
+      (discharge integral +2.8 %, ponding −2.3 %, identical to the T12
+      record at report precision);
+- [x] snapshot `T13`; synced to official by file copy (`records/T13/sync.md`).
+
+---
+
 ## 13. Schema specification (all phases)
 
 ### 13.A Feature A (T2)
@@ -1167,6 +1369,7 @@ Predicted serial costs (1 rank unless the gate is a rank test, `OMP_NUM_THREADS=
 | ws (T9) | `unit` (ws0), `regression.s3.ws1`, `.ws3`, `.ws4`, `unit.ws_gates.negative` (ws2 and ws5 assert inside these lanes and the existing pins); `regression.s3.ws1n`, `.ws_rank` (`stage3_nightly`) | 45 s (nightly ≈ 12 min) |
 | sx (T10) | `unit` (sx0), `regression.s3.sx1`, `.sx2`, `.sx4`, `.sx5`, `unit.sx_gates.negative`; `regression.s3.sx3`, `.sx_rank` (`stage3_nightly`) | ≈ 40 s (nightly ≈ 12 min) |
 | pc (T11) | `unit` (pc0), `regression.s3.pc1`, `.pc3`, `.pc4`, `.pc5`, `.pc6`, `.pc7`, `.pc8`, `unit.pc_gates.negative`; `regression.s3.pc2`, `.pc6_h0`, `.pc_rank` (`stage3_nightly`) | ≈ 50 s predicted (nightly ≈ 15 min: pc2 ≈ 9 min from the report's lanes) |
+| rs (T13) | `unit.rs0` (`unit;stage3`, 8 threads), `regression.s3.rs1` (g4a at 1/5/6 threads), `unit.rs_gates.negative` | ≈ 15 s |
 | **Stage-3 per-PR total** | | **≈ 4.9 min serial** with T9 (< 5 min; ≈ 4.1 min through T8); ≈ 1.7 min at ctest `-j8`. The T10 and T11 rows are predictions; the `stage3` label measured 2 536 s at `-j2` at the T10 close (`records/T10/timings.md`), so this total is stale and C-TIME is re-evaluated at the T11 close |
 | Existing per-PR tier (measured, T0 re-measures) | 93 tests | ≈ 23 min wall |
 | Existing nightly tier (measured, partial) | 7-test batch | ≈ 56 min + b6 bjacobi ss/td + b5 24 h (T0 measures) |
@@ -1187,6 +1390,7 @@ Predicted serial costs (1 rank unless the gate is a rank test, `OMP_NUM_THREADS=
 | T9 | `theory/transport.md` (paired store), `theory/surface-water.md` (removal paths, `film_removed`), `parameters.md`, `output.md`, `agents/case-setup.md`, coverage, `report-T9.md`, study-migration addendum |
 | T10 | `theory/transport.md` (solve-consistent update, J1–J4), `theory/surface-water.md` (step order, face volumes), `parameters.md`, `agents/case-setup.md`, coverage, `report-T10.md` |
 | T11 | `theory/groundwater.md` (PCA consistency, the face rule, the harmonic option, the continuity form), `theory/exchange-flux.md` (top modes 0–3), the `Predictor.cpp`/`Corrector.cpp` headers, `parameters.md`, `agents/case-setup.md`, coverage, `report-T11.md`, v30 migration note |
+| T13 | `testing.md` (OpenMP lane: rs0/rs1), `feature-coverage.md` (side-face conditions × threads), `report-T13.md` |
 
 Every phase also writes `dod-T<n>.md` and `report-T<n>.md`.
 
@@ -1223,6 +1427,20 @@ Every phase also writes `dod-T<n>.md` and `report-T<n>.md`.
 6. **T9 (S3-A12), open:** (a) approve phase T9 (§12A); (b) the interim default of `transport.surface_dryout` until W9.7 passes — the agent recommends reverting it to `discard` through §2.7, because the shipped `store` default blows up coupled tidal runs without ET. Decided 2026-10-31 (O15): the paired water–salt store, rain and evaporation untouched, parked water inert under ET.
 7. **T10 (S3-A14):** (a) approve phase T10 (§12B); (b) at W10.6, whether `transport.surface_update: consistent` should resolve to the solve-consistent update (the v30 matrix uses `consistent`; until then it opts in with `conservative`). **Decided 2026-11-04 (O18, S3-A18): `conservative` is the DEFAULT; `legacy` and `consistent` stay the pinned opt-outs.**
 8. **T11 (S3-A16):** (a) approve phase T11 and its gates (§12C); (b) at W11.6, confirm O17(d) with the pc7/pc8 numbers: the corrector was found to already carry the density weighting; what is left is the terrain-gravity term made consistent and physical (P5) — confirm that this resolves (d), or direct otherwise; (c) at W11.9, the default flip of `predictor_corrector` and the disposition of the legacy-golden exceptions (b3, b5, b6). **Decided 2026-11-04 (O18, S3-A18): `consistent` is the DEFAULT; `legacy` stays the pinned opt-out.** (d) the default of `face_conductivity`: **decided 2026-11-04 (O18): `arithmetic` stays the default**; `harmonic` remains the opt-in with the pc3–pc5 evidence recorded.
+9. **T12 (S3-A19):** (a) phase approved 2026-11-16 (O19); (b) the W12.4
+   default flip of `saturated_contact` to `head`: kept under §2.7 (every
+   tier green, tolerances unchanged); `legacy` stays the golden-pinned
+   opt-out — the owner may revert the one initializer in `Config.hpp`;
+   (c) the two `Srhs` scatter races of the kernel audit, proposed as a
+   separate task. Done as T13 (§12E, S3-A20).
+10. **T13 (S3-A20):** (a) review the phase (`report-T13.md`, the §12E
+    gates). (b) The C-BIT outcome: on FMA-contracting builds the atomic
+    outflow update moves serial outflow runs with a nonzero bed drop by
+    rounding only (b4: η ≤ 3.4e-15 m); `-ffp-contract=off` makes the two
+    forms bitwise. Accept it, or direct the deterministic run-owner form
+    S3-A20 describes, which keeps the T12 rounding and makes threaded runs
+    bitwise to serial. (c) Closed 2026-11-17: Tier N green, snapshot `T13`,
+    the 14 files copied to official (uncommitted; the owner commits).
 
 ---
 
@@ -1324,6 +1542,180 @@ execution); six adjudications at first green, each with its measured datum in
    (MAE 0.0381 m vs the golden's own 0.0430 m). No zero_gradient tolerance
    changed.
 6. `check_bc_matrix.py` canonical cells extended with the eta-inflow axis.
+
+### S3-A20 (T13, 2026-11-17) — new phase T13: the side-face scatters of the free-surface right-hand side become atomic; serial outflow moves at contraction level (C-BIT)
+
+**Scope.** §12E. This is the §17-9(c) follow-up of the T12 kernel audit:
+`swe_velocity_bc_rhs` and `swe_outflow_rhs` read-modify-write `Srhs` once
+per side-face entry, and a corner cell (or an nx = 1 / ny = 1 axis cell)
+has several entries in one launch.
+
+**Red (measured on the frozen `frehg-T12`; logs in `records/T13/red/`).**
+- **rs0.** Every threaded launch loses updates: 800/800 at 4 and at 8
+  threads.
+- **rs1.** g4a at 5/6 threads fails 3 of 3 gate runs. With the evidence
+  lanes, a lane departed from serial in 10 of 12 runs at 5/6 threads:
+  depth/η up to 3.8e-9 m, the surface closure residual up to 4.5e-8 m³
+  against 7.6e-13 serial.
+- **Not seen in the gated configurations.** Every existing threaded lane
+  runs at 4 or 8 threads, where the static partition keeps each corner
+  pair on one thread (§12E diagnosis), and the corner cases run at one
+  thread.
+
+**Green (the atomic binary, `build-race`).**
+
+| Gate | Result |
+|---|---|
+| rs0 | 0/800 lossy launches at 4, 8 and 16 threads |
+| rs1 | 6/6 runs pass: 22 datasets bitwise, audit 4.4e-16 |
+| g4a at 3/5/6/7 threads | 20/20 runs bitwise against serial |
+| battery | 26 checks |
+| default_bitwise and the et9 pins | green |
+
+**C-BIT (§2.6 caveat; this is the deviation).** The task asked to show
+that the serial path stays bitwise. The pinned lanes do. Outside them,
+serial b4 does not stay bitwise on the dev toolchain:
+- **What moved.** b4 at t = 600 s, 1 thread: 22 of 33 datasets differ
+  from `frehg-T12`; η by up to 3.4e-15 m (3.9e-15 relative), uu by up to
+  4.7e-14 m/s.
+- **The test.** Both forms rebuilt with `-ffp-contract=off` agree bitwise
+  on b4 (0/33). The refactor-only binary (the T12 arithmetic in the new
+  free functions) agrees bitwise with `frehg-T12` (0/33).
+- **The cause.** GCC on aarch64 contracts `Srhs(j, i) -= s * drop(m)` into
+  one fused multiply-subtract. The atomic's argument rounds `s·drop`
+  first.
+- **Scope.** Only outflow conditions with a nonzero bed drop, on
+  FMA-contracting builds: aarch64 GCC by default; x86-64 baseline GCC does
+  not emit FMA; nvcc contracts by default. The velocity kernel is bitwise:
+  g4a, swe-orient and default_bitwise are unchanged.
+- **Shipped outflow cases.** b4, x-orient swe-orient (zero drop: bitwise),
+  and the validation cases swe-microtopo, swe-outflow-staircase,
+  swe-steady-plane, swe-vcatchment and swere-superslab. No gate pins them
+  bitwise; Tier P is green on the atomic binary.
+
+**Left as an option for the owner, not done.** Under threads the atomic
+sums a cell's entries in thread order. When two duplicated entries both
+carry a nonzero volume (e.g. a corner with inflow on both faces), the
+threaded result can differ from serial at the rounding level from run to
+run. On shipped cases one of each straddling pair carries exactly 0, so
+rs1 is bitwise. A deterministic alternative would make threaded runs
+bitwise to serial everywhere and keep the T12 rounding on FMA toolchains:
+one thread owns each run of consecutive entries and applies them in list
+order (the builder guarantees consecutive runs, and rs0's list test pins
+it). The task specified atomics, so that alternative is only recorded here.
+
+**Phase close (2026-11-17).** Tier N on the T13 binary (`build-race`; its
+`FreeSurface.cpp.o` rebuilt from the final source is byte-identical to the
+one Tier P ran, so Tier P carries over):
+
+| Part | Result | Wall |
+|---|---|---|
+| b6 ss/td, g8, g5 ×2 | 5/5 | 2 757 s |
+| `stage3_nightly` | 16/16 | 5 121 s |
+| b5 24 h record | PASS, concurrent (discharge integral +2.8 %, ponding −2.3 %, peaks +2.6 % / −1.5 %: equal to T12's record at report precision) | 11 069 s |
+
+Snapshot `refs/stage3/T13`; synced to official.
+
+### S3-A19 (T12, 2026-11-16) — new phase T12: the post-allocation classification read its neighbours in place (O19); `head` becomes the default
+
+**Trigger and diagnosis.** §12D. The official CI's first x86-64 run of the
+T11 tree failed `regression.b5_rank_invariance.strict` (n=1 vs n=2:
+3.704e-7 against 1e-9). The cause is `gw_reallocate_classify`'s
+saturated-contact test, which reads `wc` and `h` in place while the same
+kernel restores them, so the restored set follows the loop order. On the
+dev machine the frozen `frehg-T11` measures:
+
+| Ranks | b5 one-step strict, field-relative |
+|---|---|
+| 2 / 4 / 8 | 1.0e-14 / 5.7e-14 / 5.7e-14 |
+| 3 / 5 / 6 | 2.76e-6 / 2.37e-5 / 2.76e-6 |
+
+Every diverging cell is on a seam column (`records/T12/red/`).
+
+**Design and gates.** `groundwater.saturated_contact: legacy | head`; the
+snapshot and read aliases of §12D; gates sc0–sc2 plus the battery.
+- Red on T11: the schema rejects the key. The sc0 head assertions fail 36
+  times on the legacy rule.
+- Green: sc1 ≤ 1.04e-14 at n = 2, 3, 4, 5, 6, 8; legacy anti-vacuity
+  2.37e-5; restore 1.91e-2 m³; sc2 bitwise at 4 threads.
+- `default_bitwise` and the et9 pins stay green under `legacy`.
+
+**W12.3 (the `head` override on all 55 Stage-3 per-PR lanes).** 54 pass.
+et9's noET 1271-dataset pin breaks, as it must; it records the legacy
+trajectory. Both et9 case files now pin `saturated_contact: legacy` (the
+T11 W11.8 precedent), and `BITWISE_PINS` gains the key.
+
+**W12.4 (§2.7 default flip, tolerances unchanged).** The initializer in
+`Config.hpp` is now `Head`. Every tier passed on the flipped binary
+(`records/T12/flip/`):
+
+| Tier | Result | Wall |
+|---|---|---|
+| unit + mpi | 131/131 | 1 554 s |
+| stage3 + stage3_local | 58/58 | 193 s |
+| `^regression$` except perf | 60/60 | 3 244 s |
+| Tier N ctest (b6 ss/td, g8, g5 ×2) | 5/5 | 4 335 s |
+| stage3_nightly | 16/16 | 2 266 s |
+| b5 24 h record (rain, sync, 4 ranks) | PASS | 11 083 s, concurrent |
+| perf_baseline (alone) | PASS | 148 s |
+
+Under §2.7-3 the flip stays. The legacy-golden comparisons move by small
+amounts:
+
+| Gate | Quantity | Before (legacy rule) | `head` | Bound |
+|---|---|---|---|---|
+| b3 | max / rms distance | identical to report precision (h=0: 0.085 / 0.041 m; h=−400: 0.091 / 0.057 m) | same | — |
+| b5 24 h (vs the T11 record) | discharge integral | +2.4 % | +2.8 % | 10 % |
+| b5 24 h | ponding integral | −2.5 % | −2.3 % | 10 % |
+| b5 24 h | peaks | unchanged | unchanged | — |
+| b6-ss (vs the T10 w105 record, the current transport pair and `legacy` pc) | salt mass | 6.66 % | 6.79 % | 10 % |
+| b6-ss | salinity cells outside | 3.59 % | 3.51 % | 6 % |
+| b6-ss | interface MAE vs experiment | 0.0337 m | 0.0337 m | — |
+| b6-td | salt mass | 9.89 % | 9.20 % | 10 % |
+| b6-td | salinity cells outside | 5.15 % | 5.07 % | 6 % |
+| b6-td | interface MAE vs experiment | 0.0384 m | 0.0389 m | — |
+
+b6-td moves away from its salt-mass bound. No contingency (C-SC) was
+needed.
+
+**Two S3-A18 recalibrations reversed (they had measured this defect).**
+1. **gw-orient mixed class.** S3-A18 finding 4 attributed rot180 /
+   antitranspose's 7.6e-8 t_end head (wc 1.056e-3 at t = 300) to a
+   "scheme-independent initial transient" whose decay the consistent
+   pair slows, and set `tol_abs_mixed` to 5e-7. That attribution is
+   wrong.
+   - The signal is the classification. A mirror reverses the sweep
+     direction that decides which fringe cells are restored; a transpose
+     does not, which is why the transpose class always measured strict.
+   - Under `head` the mixed class measures 4.4e-16 wc at t = 300 and
+     ≤ 1.8e-15 at t_end. The `legacy` override still reproduces 1.056e-3
+     and 7.6e-8 (`records/T12/w12.3/gw-orient-*.log`).
+   - `tol_abs_mixed` goes back to 1e-12, and the symmetry-exemptions row
+     is rewritten.
+2. **b5 default-lane rank bounds.** S3-A18 finding 3 widened them to
+   1.5e-4 / 4.0e-3 on n=4 values (7.06e-5 / 2.02e-3) that carried the
+   seam dependence. Under `head`:
+
+   | Ranks | subsurface | exchanged | surface |
+   |---|---|---|---|
+   | 2 | 5.1e-9 | 4.5e-7 | 8.2e-8 |
+   | 4 | 3.2e-6 | 1.7e-4 | 3.8e-4 |
+
+   The A14 bounds 3e-5 / 2e-3 are restored, with about 10× headroom.
+
+**V2-A9 corrected.** Its "one platform-rounding flip" (2.189e-10 at n=4)
+was this defect's seam footprint, not the A14 threshold class (a note was
+appended to the v2 plan). The b5 strict bound stays at 1e-9 until the x86
+runner reports sc1 and the b5 strict lane under `head`. sc1 gates the same
+scenario at 1e-12 there (labels `stage3;mpi`), and the bound is restored
+to 1e-12 by amendment once those numbers are in.
+
+**Found incidentally, not fixed in T12** (`records/T12/kernel-audit.md`).
+The static audit of all 162 kernels found no other in-place neighbour
+read. It did find two scatter races, in `swe_velocity_bc_rhs` and
+`swe_outflow_rhs`: duplicated corner entries of a side-face BC list do an
+unprotected read-modify-write on `Srhs`. This is exact in serial and is a
+lost update under threads. It is proposed to the owner as its own task.
 
 ### S3-A18 (post-T11, 2026-11-04) — the O18 default flips: `conservative` surface transport and the `consistent` predictor–corrector pair become the defaults
 

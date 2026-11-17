@@ -315,6 +315,15 @@ struct GroundwaterConfig {
   /// times the arithmetic mean of their relative permeabilities — exact
   /// for saturated series flow, seals a Ks = 0 flank exactly.
   enum class FaceConductivity { Arithmetic, Harmonic };
+  /// groundwater.saturated_contact (Stage-3 T12, O19; S3-A19): how the
+  /// post-allocation sweep decides that a cell touches saturation. Legacy:
+  /// the v1 test theta >= theta_s, read in place while the same sweep
+  /// restores its neighbours, so the restored set follows the loop order,
+  /// the thread schedule and the MPI seams. Head: every neighbour is read
+  /// from the pre-sweep state and counts as saturated when theta >=
+  /// theta_s or its head is above the air-entry value (theta(h) = theta_s
+  /// there) — independent of order, threads and decomposition.
+  enum class SaturatedContact { Legacy, Head };
   std::string scheme = "pca";     ///< sole allowed value; documents the design
   bool useFull3d = true;          ///< false: zero lateral K in unsaturated cells
   GroundwaterTimestepConfig timestep;  ///< adaptive dtg controller
@@ -332,6 +341,10 @@ struct GroundwaterConfig {
   PredictorCorrector predictorCorrector = PredictorCorrector::Consistent;
   /// T11 (O17b): the consistent pair's interior face mean.
   FaceConductivity faceConductivity = FaceConductivity::Arithmetic;
+  /// T12 default, flipped at W12.4 (plan §2.7, S3-A19, 2026-11-16: every
+  /// tier green with tolerances unchanged); `legacy` stays the golden-pinned
+  /// opt-out (BITWISE_PINS, the et9 pins). Do not flip it anywhere else.
+  SaturatedContact saturatedContact = SaturatedContact::Head;
   DensityCouplingConfig densityCoupling;  ///< baroclinic feedback switch
   GwEvaporationConfig evaporation;        ///< bulk soil evaporation (v2 Q4)
 };

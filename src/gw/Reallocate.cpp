@@ -20,11 +20,13 @@
 ///
 /// Deviations from the legacy sweep, all recorded in the plan amendment log
 /// and docs/theory/groundwater.md:
-///  - cells are classified against the pre-reallocation state and the
-///    vertical walks run as one deterministic sequential sweep per column
-///    (the plan §5.2 design statement: "the Reallocate sweep is sequential
-///    per column"). The legacy flat-order sweep interleaved sends with
-///    classification, which made results depend on the rank decomposition.
+///  - the sends are staged in the classification and the vertical walks
+///    run as one deterministic sequential sweep per column (the plan §5.2
+///    design statement: "the Reallocate sweep is sequential per column").
+///    The legacy flat-order sweep interleaved sends with classification,
+///    which made results depend on the rank decomposition. The
+///    classification itself reads the pre-reallocation state only under
+///    saturated_contact: head (see the T12 note below).
 ///  - pore room is evaluated fresh (θs - θ) when the sweep runs; legacy
 ///    check_room measured it before the corrector (groundwater.c:139), and
 ///    the stale value could overfill receivers past θs — violating the θ
@@ -55,8 +57,23 @@
 ///    moves with the water: a walk through a full cell is a flux through
 ///    it, not a flux out of the receiver's neighbor.
 /// Everything each cell publishes in the parallel phase touches only that
-/// cell; the column sweep touches only its own column — race-free and
-/// decomposition-invariant by construction.
+/// cell, and the column sweep touches only its own column.
+///
+/// Stage-3 T12 (S3-A19): the classification's NEIGHBOUR READS. Under
+/// groundwater.saturated_contact: legacy (the v1 test) they read wc and h
+/// in place while the same kernel restores the neighbours. A fringe cell
+/// (head above air entry, theta a little below theta_s after the
+/// corrector) restored to theta_s then counts as saturated only for the
+/// cells visited after it: the restored set follows the loop order, the
+/// thread schedule and the MPI seams, where the halo copy is pre-sweep
+/// (b5, one strict 5 s step: 2.4e-5 field-relative between 1 and 5 ranks;
+/// 3.7e-7 at 2 ranks on x86-64). The test theta >= theta_s also thresholds
+/// a clamped value at its clamp, so deep-saturated cells sit on it to
+/// within the solve residual. Under head every neighbour is read from a
+/// pre-sweep snapshot and counts as saturated when theta >= theta_s or its
+/// head is above air entry — the state theta := theta(h) assigns — which
+/// makes the classification race-free and decomposition-invariant (gates
+/// sc0-sc2).
 ///
 /// Stage-3 T1 (owner decision O9; amendment S3-A4): under groundwater.
 /// reallocation: disabled this sweep runs with every NON-CONSERVATIVE
@@ -145,6 +162,20 @@ void RichardsSolver::reallocateWaterContent() {
   // fresh pore room, and each over-saturated cell's gradient split. The
   // reductions track every θ change and, separately, the volume discarded
   // outright (lateral fractions; the adjacent-cell surplus in drop mode).
+  // Stage-3 T12 (S3-A19): the neighbour reads of the classification. Under
+  // saturated_contact: legacy they alias the fields this kernel writes (the
+  // v1 in-place test — the restored set follows the loop order, the thread
+  // schedule and the MPI seams); under head they read the pre-sweep state
+  // (halos included, exchanged before the call), and a neighbour above
+  // air entry counts as saturated — theta(h) = theta_s there, the state
+  // the restore itself assigns.
+  const bool headContact = scHead_;
+  if (headContact) {
+    Kokkos::deep_copy(wcSnap_, wc_);
+    Kokkos::deep_copy(hSnap_, h_);
+  }
+  Field3<real_t> wcR = headContact ? wcSnap_ : wc;
+  Field3<real_t> hR = headContact ? hSnap_ : h;
   real_t adjusted = 0.0;
   real_t discarded = 0.0;
   Kokkos::parallel_reduce(
@@ -177,27 +208,27 @@ void RichardsSolver::reallocateWaterContent() {
             return kk >= 0 && kk < nz && gid(jj, ii, kk) >= 0;
           };
           dh6[0] = (active(jc, ic + 1, kc) && kx(jc, ic, kc) > 0.0)
-                       ? (h(jc, ic + 1, kc) - h(jc, ic, kc)) / dx
+                       ? (hR(jc, ic + 1, kc) - hR(jc, ic, kc)) / dx
                        : 0.0;
           dh6[1] = (active(jc, ic - 1, kc) && kx(jc, ic - 1, kc) > 0.0)
-                       ? (h(jc, ic, kc) - h(jc, ic - 1, kc)) / dx
+                       ? (hR(jc, ic, kc) - hR(jc, ic - 1, kc)) / dx
                        : 0.0;
           dh6[2] = (active(jc + 1, ic, kc) && ky(jc, ic, kc) > 0.0)
-                       ? (h(jc + 1, ic, kc) - h(jc, ic, kc)) / dy
+                       ? (hR(jc + 1, ic, kc) - hR(jc, ic, kc)) / dy
                        : 0.0;
           dh6[3] = (active(jc - 1, ic, kc) && ky(jc - 1, ic, kc) > 0.0)
-                       ? (h(jc, ic, kc) - h(jc - 1, ic, kc)) / dy
+                       ? (hR(jc, ic, kc) - hR(jc - 1, ic, kc)) / dy
                        : 0.0;
           if (active(jc, ic, kc + 1) && kzF(jc, ic, kc + 1) > 0.0) {
             const real_t dzp = 0.5 * (dz3d(jc, ic, kc) + dz3d(jc, ic, kc + 1));
-            dh6[4] = (h(jc, ic, kc + 1) - h(jc, ic, kc)) / dzp -
+            dh6[4] = (hR(jc, ic, kc + 1) - hR(jc, ic, kc)) / dzp -
                      (densityGradient ? rZp(jc, ic, kc + 1) : 1.0);
           } else {
             dh6[4] = 0.0;
           }
           if (active(jc, ic, kc - 1) && kzF(jc, ic, kc) > 0.0) {
             const real_t dzm = 0.5 * (dz3d(jc, ic, kc) + dz3d(jc, ic, kc - 1));
-            dh6[5] = (h(jc, ic, kc) - h(jc, ic, kc - 1)) / dzm -
+            dh6[5] = (hR(jc, ic, kc) - hR(jc, ic, kc - 1)) / dzm -
                      (densityGradient ? rZp(jc, ic, kc) : 1.0);
           } else {
             dh6[5] = 0.0;
@@ -272,7 +303,8 @@ void RichardsSolver::reallocateWaterContent() {
         // check_adj_sat (groundwater.c:1044-1071): saturated neighbor
         // through a conducting face, or a wet/prescribed-head top.
         const auto sat = [&](int jj, int ii, int kk) {
-          return wc(jj, ii, kk) >= wcs(jj, ii, kk);
+          return wcR(jj, ii, kk) >= wcs(jj, ii, kk) ||
+                 (headContact && hR(jj, ii, kk) > aev(jj, ii, kk));
         };
         bool adjSat = false;
         if (k + 1 < nz && gid(j, i, k + 1) >= 0 && sat(j, i, k + 1)) {

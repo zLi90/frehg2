@@ -164,40 +164,48 @@ void SurfaceSolver::assembleRhs() {
   // treatment: open east/north faces carry dt*As*E, west/south faces carry
   // nothing.
   for (const DeviceBcList& list : velocityBcs_) {
-    auto lj = list.j;
-    auto li = list.i;
-    auto lface = list.face;
-    const real_t u = list.current;
-    real_t added = 0.0;
-    Kokkos::parallel_reduce(
-        "swe_velocity_bc_rhs",
-        Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
-        KOKKOS_LAMBDA(const std::size_t m, real_t& sum) {
-          const int j = lj(m);
-          const int i = li(m);
-          real_t add = 0.0;
-          switch (static_cast<BcFace>(lface(m))) {
-            case BcFace::XMinus:
-              add = dt * Asx(j, 0) * u;
-              break;
-            case BcFace::XPlus:
-              add = dt * Asx(j, i) * (Ex(j, i) - u);
-              break;
-            case BcFace::YMinus:
-              add = dt * Asy(0, i) * u;
-              break;
-            case BcFace::YPlus:
-              add = dt * Asy(j, i) * (Ey(j, i) - u);
-              break;
-            default:
-              break;
-          }
-          Srhs(j, i) += add;
-          sum += add;
-        },
-        added);
-    audit_.bcInflow += added;
+    audit_.bcInflow += scatterVelocityBcRhs(list, dt, Srhs, Asx, Asy, Ex, Ey);
   }
+}
+
+real_t scatterVelocityBcRhs(const DeviceBcList& list, real_t dt, Field2<real_t> Srhs,
+                            Field2<real_t> Asx, Field2<real_t> Asy, Field2<real_t> Ex,
+                            Field2<real_t> Ey) {
+  auto lj = list.j;
+  auto li = list.i;
+  auto lface = list.face;
+  const real_t u = list.current;
+  real_t added = 0.0;
+  Kokkos::parallel_reduce(
+      "swe_velocity_bc_rhs",
+      Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
+      KOKKOS_LAMBDA(const std::size_t m, real_t& sum) {
+        const int j = lj(m);
+        const int i = li(m);
+        real_t add = 0.0;
+        switch (static_cast<BcFace>(lface(m))) {
+          case BcFace::XMinus:
+            add = dt * Asx(j, 0) * u;
+            break;
+          case BcFace::XPlus:
+            add = dt * Asx(j, i) * (Ex(j, i) - u);
+            break;
+          case BcFace::YMinus:
+            add = dt * Asy(0, i) * u;
+            break;
+          case BcFace::YPlus:
+            add = dt * Asy(j, i) * (Ey(j, i) - u);
+            break;
+          default:
+            break;
+        }
+        // Atomic: a corner or degenerate-axis cell has several entries in
+        // one launch (T13, S3-A20). Serial arithmetic is unchanged.
+        Kokkos::atomic_add(&Srhs(j, i), add);
+        sum += add;
+      },
+      added);
+  return added;
 }
 
 void SurfaceSolver::assembleCoefficients() {
@@ -292,41 +300,51 @@ void SurfaceSolver::applyOutflowCorrections() {
   Field2<real_t> Srhs = Srhs_, Sxp = Sxp_, Syp = Syp_;
   Field2<real_t> Asx = Asx_, Asy = Asy_, Vsx = Vsx_, Vsy = Vsy_, Dx = Dx_, Dy = Dy_;
   for (const DeviceBcList& list : outflowBcs_) {
-    auto lj = list.j;
-    auto li = list.i;
-    auto lface = list.face;
-    auto drop = list.bedDrop;
-    real_t released = 0.0;
-    Kokkos::parallel_reduce(
-        "swe_outflow_rhs",
-        Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
-        KOKKOS_LAMBDA(const std::size_t m, real_t& sum) {
-          const int j = lj(m);
-          const int i = li(m);
-          real_t s = 0.0;
-          switch (static_cast<BcFace>(lface(m))) {
-            case BcFace::XPlus:
-              s = Sxp(j, i);
-              break;
-            case BcFace::XMinus:
-              s = (Vsx(j, 0) > 0.0) ? coef * Asx(j, 0) * Asx(j, 0) * Dx(j, i) / Vsx(j, 0) : 0.0;
-              break;
-            case BcFace::YPlus:
-              s = Syp(j, i);
-              break;
-            case BcFace::YMinus:
-              s = (Vsy(0, i) > 0.0) ? coef * Asy(0, i) * Asy(0, i) * Dy(j, i) / Vsy(0, i) : 0.0;
-              break;
-            default:
-              break;
-          }
-          const real_t volume = s * drop(m);
-          Srhs(j, i) -= volume;
-          sum += volume;
-        },
-        released);
-    audit_.boundaryOutflow += released;
+    audit_.boundaryOutflow +=
+        scatterOutflowRhs(list, coef, Srhs, Sxp, Syp, Asx, Asy, Vsx, Vsy, Dx, Dy);
   }
+}
+
+real_t scatterOutflowRhs(const DeviceBcList& list, real_t coef, Field2<real_t> Srhs,
+                         Field2<real_t> Sxp, Field2<real_t> Syp, Field2<real_t> Asx,
+                         Field2<real_t> Asy, Field2<real_t> Vsx, Field2<real_t> Vsy,
+                         Field2<real_t> Dx, Field2<real_t> Dy) {
+  auto lj = list.j;
+  auto li = list.i;
+  auto lface = list.face;
+  auto drop = list.bedDrop;
+  real_t released = 0.0;
+  Kokkos::parallel_reduce(
+      "swe_outflow_rhs",
+      Kokkos::RangePolicy<ExecSpace>(std::size_t{0}, list.j.extent(0)),
+      KOKKOS_LAMBDA(const std::size_t m, real_t& sum) {
+        const int j = lj(m);
+        const int i = li(m);
+        real_t s = 0.0;
+        switch (static_cast<BcFace>(lface(m))) {
+          case BcFace::XPlus:
+            s = Sxp(j, i);
+            break;
+          case BcFace::XMinus:
+            s = (Vsx(j, 0) > 0.0) ? coef * Asx(j, 0) * Asx(j, 0) * Dx(j, i) / Vsx(j, 0) : 0.0;
+            break;
+          case BcFace::YPlus:
+            s = Syp(j, i);
+            break;
+          case BcFace::YMinus:
+            s = (Vsy(0, i) > 0.0) ? coef * Asy(0, i) * Asy(0, i) * Dy(j, i) / Vsy(0, i) : 0.0;
+            break;
+          default:
+            break;
+        }
+        const real_t volume = s * drop(m);
+        // Atomic for the same duplicated entries (T13, S3-A20); adding
+        // -volume rounds exactly as subtracting volume.
+        Kokkos::atomic_add(&Srhs(j, i), -volume);
+        sum += volume;
+      },
+      released);
+  return released;
 }
 
 void SurfaceSolver::fillAndSolve() {

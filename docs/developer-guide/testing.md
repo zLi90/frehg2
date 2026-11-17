@@ -47,7 +47,11 @@ Two lanes per case (plan §8.2, amendments A5/A8/A14, V2-A9):
   step* the first crossing lands on is platform rounding, so the coupled b5
   one-step bound is 1e-9 (V2-A9: one threshold-class branch flips inside
   step 1 on the x86-64 CI platform, isolated footprint 2.2e-10; the harness
-  prints the per-field breakdown for the record).
+  prints the per-field breakdown for the record). Stage-3 T12 (S3-A19)
+  traced that footprint to an in-place classification read in the
+  post-allocation sweep, a real seam dependence. Under
+  `groundwater.saturated_contact: head` the lane measures ≤ 1.04e-14, and
+  `regression.s3.sc1` gates it at 1e-12 over n = 2–8 (labels `stage3;mpi`).
 - **default** — production solver settings over longer windows, gated at
   data-derived bounds (the harness prints achieved values on every run).
 
@@ -111,6 +115,18 @@ under threads — both runs use the same thread count, so any
 scheduling-dependent nondeterminism fails it). The strict rank-invariance
 lanes stay single-threaded by design: their cross-decomposition bound
 assumes a fixed summation order.
+
+Two Stage-3 T13 gates (S3-A20) run threaded inside the per-PR tier, because
+a race needs two threads on one slot. The thread count is chosen with care:
+a side-face BC list holds a corner cell twice, and Kokkos' static partition
+splits such a pair only at some thread counts (4 and 8 never split g4a's
+pairs).
+- `unit.rs0` (`SweRs.*`) drives the two side-face right-hand-side scatters
+  at 8 threads with a list whose every entry hits one cell. The cases skip
+  below 4 threads, and the ctest entry fails on a skip.
+- `regression.s3.rs1` runs g4a at 1, 5 and 6 threads. It requires the
+  surface fields and monitors bitwise, and the audit within 1e-12 m³. It
+  also asserts that its lanes do put a corner pair on two threads.
 
 ## Generality batteries and coverage lockstep (v2 plan §8, Q7)
 

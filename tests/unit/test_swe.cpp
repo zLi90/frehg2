@@ -936,4 +936,195 @@ TEST(SweModule, StoreReturnsAtWettingFaceDepth) {
   // rain would not have released (checked above, steps 1-6).
 }
 
+
+// ---------------------------------------------------------------------------
+// Stage-3 T13 side-face right-hand-side scatters (plan §12E, gate rs0).
+// ---------------------------------------------------------------------------
+
+/// rs0 runs the scatters threaded; below this many threads every entry of a
+/// launch runs on one thread and any form of the update is exact. unit.all
+/// pins one thread and skips the threaded cases; unit.rs0 runs them at
+/// OMP_NUM_THREADS=8 and fails if they skip (tests/CMakeLists.txt).
+constexpr int kRsMinThreads = 4;
+
+int rsThreads() { return frehg::ExecSpace().concurrency(); }
+
+/// Per-cell entry counts of a side-face list, keyed j * 1000 + i, plus
+/// whether every cell's entries are consecutive.
+struct RsListShape {
+  std::vector<std::pair<int, int>> counts;  ///< (key, count) in list order
+  bool consecutive = true;
+};
+
+RsListShape listShape(const std::vector<frehg::BcCell>& cells) {
+  RsListShape shape;
+  for (std::size_t m = 0; m < cells.size(); ++m) {
+    const int key = cells[m].j * 1000 + cells[m].i;
+    if (m > 0 && key == cells[m - 1].j * 1000 + cells[m - 1].i) {
+      ++shape.counts.back().second;
+      continue;
+    }
+    for (const auto& seen : shape.counts) {
+      if (seen.first == key) {
+        shape.consecutive = false;
+      }
+    }
+    shape.counts.emplace_back(key, 1);
+  }
+  return shape;
+}
+
+/// The production side-face list of a whole-domain velocity condition on an
+/// nx x ny grid (BoundarySet's appendSideFaces).
+std::vector<frehg::BcCell> wholeEdgeList(int nx, int ny) {
+  MiniSim sim;
+  sim.cfg = baseConfig(nx, ny, 1.0, 0.1);
+  frehg::BoundaryConditionConfig bc;
+  bc.name = "walls";
+  bc.polygon = {{-1.0, -1.0}, {nx + 1.0, -1.0}, {nx + 1.0, ny + 1.0}, {-1.0, ny + 1.0}};
+  bc.target = frehg::BcTarget::Surface;
+  bc.kind = frehg::BcKind::Velocity;
+  bc.value.form = frehg::BcValueConfig::Form::Constant;
+  bc.value.constant = 0.0;
+  sim.cfg.boundaryConditions.push_back(bc);
+  sim.build();
+  return sim.boundaries->byName("walls").cells();
+}
+
+TEST(SweRs, SideFaceListsRepeatCornerAndAxisCells) {
+  // Anti-vacuity for rs0: the production list builder does put one cell in
+  // a list more than once, always as one consecutive run. 3 x 2: the four
+  // corners twice, the edge cells between them once. 1 x 3 (nx = 1): every
+  // cell holds both x faces, the two ends a y face as well.
+  const RsListShape box = listShape(wholeEdgeList(3, 2));
+  EXPECT_TRUE(box.consecutive);
+  const std::vector<std::pair<int, int>> boxExpected = {
+      {1001, 2}, {1002, 1}, {1003, 2}, {2001, 2}, {2002, 1}, {2003, 2}};
+  EXPECT_EQ(box.counts, boxExpected);
+  const RsListShape column = listShape(wholeEdgeList(1, 3));
+  EXPECT_TRUE(column.consecutive);
+  const std::vector<std::pair<int, int>> columnExpected = {{1001, 3}, {2001, 2}, {3001, 3}};
+  EXPECT_EQ(column.counts, columnExpected);
+}
+
+/// rs0 fixture: a side-face list of 4 x `cycles` entries, all on cell (1, 1)
+/// and cycling XMinus, XPlus, YMinus, YPlus, every bedDrop 0.25. A
+/// production list holds at most four entries on one cell (an nx = ny = 1
+/// domain), so two of them meet in time only by thread timing; this list
+/// puts every thread of the launch on the same Srhs slot, so a non-atomic
+/// read-modify-write loses updates on every launch.
+frehg::swe::DeviceBcList duplicatedSideFaces(std::size_t cycles, real_t current) {
+  const std::size_t n = 4 * cycles;
+  frehg::swe::DeviceBcList list;
+  list.j = Kokkos::View<int*, frehg::MemSpace>("rs0_j", n);
+  list.i = Kokkos::View<int*, frehg::MemSpace>("rs0_i", n);
+  list.face = Kokkos::View<int*, frehg::MemSpace>("rs0_face", n);
+  list.bedDrop = Kokkos::View<real_t*, frehg::MemSpace>("rs0_drop", n);
+  auto hj = Kokkos::create_mirror_view(list.j);
+  auto hi = Kokkos::create_mirror_view(list.i);
+  auto hf = Kokkos::create_mirror_view(list.face);
+  auto hd = Kokkos::create_mirror_view(list.bedDrop);
+  const std::array<frehg::BcFace, 4> faces = {frehg::BcFace::XMinus, frehg::BcFace::XPlus,
+                                              frehg::BcFace::YMinus, frehg::BcFace::YPlus};
+  for (std::size_t m = 0; m < n; ++m) {
+    hj(m) = 1;
+    hi(m) = 1;
+    hf(m) = static_cast<int>(faces[m % 4]);
+    hd(m) = 0.25;
+  }
+  Kokkos::deep_copy(list.j, hj);
+  Kokkos::deep_copy(list.i, hi);
+  Kokkos::deep_copy(list.face, hf);
+  Kokkos::deep_copy(list.bedDrop, hd);
+  list.current = current;
+  return list;
+}
+
+/// A 2 x 2 halo-layout field (4 x 4 with ghosts) holding \p value.
+frehg::Field2<real_t> rsField(const char* name, real_t value) {
+  frehg::Field2<real_t> field(name, 4, 4);
+  Kokkos::deep_copy(field, value);
+  return field;
+}
+
+/// Every Srhs slot other than (1, 1) still holds \p value.
+bool othersUntouched(const frehg::Field2<real_t>& field, real_t value) {
+  auto host = Kokkos::create_mirror_view(field);
+  Kokkos::deep_copy(host, field);
+  for (std::size_t j = 0; j < 4; ++j) {
+    for (std::size_t i = 0; i < 4; ++i) {
+      if ((j != 1 || i != 1) && host(j, i) != value) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+constexpr std::size_t kRsCycles = std::size_t{1} << 14;  // 65 536 entries
+constexpr int kRsLaunches = 8;
+
+TEST(SweRs, VelocityScatterKeepsEveryDuplicateUpdate) {
+  if (rsThreads() < kRsMinThreads) {
+    GTEST_SKIP() << "rs0 needs >= " << kRsMinThreads << " threads, have " << rsThreads();
+  }
+  // Dyadic data: XMinus/YMinus add dt As u = 0.5 * 1 * 0.25 = 0.125,
+  // XPlus/YPlus add dt As (E - u) = 0.5 * 1 * (1.25 - 0.25) = 0.5. Every
+  // partial sum is exact, so the total is independent of the order of the
+  // updates and a lost update is the only way to miss it.
+  const frehg::swe::DeviceBcList list = duplicatedSideFaces(kRsCycles, 0.25);
+  const auto Asx = rsField("rs0_asx", 1.0);
+  const auto Asy = rsField("rs0_asy", 1.0);
+  const auto Ex = rsField("rs0_ex", 1.25);
+  const auto Ey = rsField("rs0_ey", 1.25);
+  const real_t base = 3.0;
+  const real_t expected = 1.25 * static_cast<real_t>(kRsCycles);
+  int lossy = 0;
+  for (int launch = 0; launch < kRsLaunches; ++launch) {
+    const auto Srhs = rsField("rs0_srhs", base);
+    const real_t booked = frehg::swe::scatterVelocityBcRhs(list, 0.5, Srhs, Asx, Asy, Ex, Ey);
+    const real_t got = interiorValue(Srhs, 1, 1) - base;
+    EXPECT_EQ(booked, expected) << "launch " << launch;
+    EXPECT_EQ(got, expected) << "launch " << launch << " at " << rsThreads()
+                             << " threads: Srhs(1, 1) missed " << expected - got
+                             << " of the booked volume";
+    EXPECT_TRUE(othersUntouched(Srhs, base)) << "launch " << launch;
+    lossy += (got != expected) ? 1 : 0;
+  }
+  RecordProperty("rs0_velocity_lossy_launches", lossy);
+}
+
+TEST(SweRs, OutflowScatterKeepsEveryDuplicateUpdate) {
+  if (rsThreads() < kRsMinThreads) {
+    GTEST_SKIP() << "rs0 needs >= " << kRsMinThreads << " threads, have " << rsThreads();
+  }
+  // Dyadic data: XPlus/YPlus take S = 0.5, XMinus/YMinus coef As^2 D / Vs =
+  // 1 * 1 * 0.5 / 1 = 0.5; times the 0.25 drop every entry removes 0.125.
+  const frehg::swe::DeviceBcList list = duplicatedSideFaces(kRsCycles, 0.0);
+  const auto Sxp = rsField("rs0_sxp", 0.5);
+  const auto Syp = rsField("rs0_syp", 0.5);
+  const auto Asx = rsField("rs0_asx", 1.0);
+  const auto Asy = rsField("rs0_asy", 1.0);
+  const auto Vsx = rsField("rs0_vsx", 1.0);
+  const auto Vsy = rsField("rs0_vsy", 1.0);
+  const auto Dx = rsField("rs0_dx", 0.5);
+  const auto Dy = rsField("rs0_dy", 0.5);
+  const real_t base = 1.0e4;
+  const real_t expected = 0.5 * static_cast<real_t>(kRsCycles);
+  int lossy = 0;
+  for (int launch = 0; launch < kRsLaunches; ++launch) {
+    const auto Srhs = rsField("rs0_srhs", base);
+    const real_t booked =
+        frehg::swe::scatterOutflowRhs(list, 1.0, Srhs, Sxp, Syp, Asx, Asy, Vsx, Vsy, Dx, Dy);
+    const real_t got = base - interiorValue(Srhs, 1, 1);
+    EXPECT_EQ(booked, expected) << "launch " << launch;
+    EXPECT_EQ(got, expected) << "launch " << launch << " at " << rsThreads()
+                             << " threads: Srhs(1, 1) missed " << expected - got
+                             << " of the booked volume";
+    EXPECT_TRUE(othersUntouched(Srhs, base)) << "launch " << launch;
+    lossy += (got != expected) ? 1 : 0;
+  }
+  RecordProperty("rs0_outflow_lossy_launches", lossy);
+}
+
 }  // namespace

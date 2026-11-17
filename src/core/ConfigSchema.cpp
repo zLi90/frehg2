@@ -432,6 +432,10 @@ Spec buildRootSchema() {
             {"reallocation", enumeration(false, {"legacy", "disabled"})},
             {"predictor_corrector", enumeration(false, {"legacy", "consistent"})},
             {"face_conductivity", enumeration(false, {"arithmetic", "harmonic"})},
+            // Stage-3 T12 (S3-A19): the post-allocation sweep's saturated-
+            // contact test (legacy: in-place theta >= theta_s; head: the
+            // pre-sweep state, theta >= theta_s or h above air entry).
+            {"saturated_contact", enumeration(false, {"legacy", "head"})},
             {"reallocation_surplus", enumeration(false, {"drop", "redistribute"})},
             {"density_coupling",
              // Coefficients configurable since v2 Q5 (defaults = the

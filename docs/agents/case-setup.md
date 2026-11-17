@@ -165,6 +165,11 @@ Generate these files with small Python snippets in the case directory
     layered tidal beach). With strong layering also consider
     `groundwater.face_conductivity: harmonic` (exact for saturated
     series flow; seals impermeable layers exactly).
+9c. **Rank-invariant saturation fringe**: `groundwater.saturated_contact:
+    head` is the default (since S3-A19, 2026-11-16) — leave it. The
+    golden-pinned `legacy` opt-out classifies saturated contact in place,
+    so results near the water table depend on the number of MPI ranks
+    and threads.
 10. **Surface salinity under wetting/drying**:
     `transport.surface_update: conservative` is the default (since
     S3-A18, 2026-11-04) and is right for tidal flats, marshes and

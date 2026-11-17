@@ -73,6 +73,7 @@ RichardsSolver::RichardsSolver(const Grid& grid, const FrehgConfig& config,
   surplusRedistribute_ =
       (gw.reallocationSurplus == GroundwaterConfig::ReallocationSurplus::Redistribute);
   reallocOff_ = (gw.reallocation == GroundwaterConfig::Reallocation::Off);
+  scHead_ = (gw.saturatedContact == GroundwaterConfig::SaturatedContact::Head);
   // Per-cell cumulative creation/drop diagnostics (Stage-3 W1.3): allocated
   // only when an output requests them, so default runs are untouched (a
   // restarted diagnostic run requests the same outputs, so the checkpoint
@@ -125,6 +126,10 @@ RichardsSolver::RichardsSolver(const Grid& grid, const FrehgConfig& config,
   room_ = alloc("gw_room");
   sendUp_ = alloc("gw_send_up");
   sendDown_ = alloc("gw_send_down");
+  if (scHead_) {
+    wcSnap_ = alloc("gw_realloc_wc_snap");
+    hSnap_ = alloc("gw_realloc_h_snap");
+  }
   if (reallocDiag_) {
     reallocCreated_ = alloc("gw_realloc_created");
     reallocDroppedCell_ = alloc("gw_realloc_dropped");

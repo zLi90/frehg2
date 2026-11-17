@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <mpi.h>
 
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -983,6 +984,115 @@ TEST(GwPc, PondedTopFaceConsistent) {
   }
   for (int k = 0; k < 6; ++k) {
     EXPECT_EQ(theta[0][k], theta[1][k]) << "k = " << k;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage-3 T12 saturated-contact classification (plan §12D, gate sc0).
+// ---------------------------------------------------------------------------
+
+/// One row of the sc0 fixture after the post-allocation sweep (index 0 is
+/// the row's minus end).
+struct ScRow {
+  std::vector<real_t> wc;
+  std::vector<real_t> h;
+};
+
+/// sc0 fixture: six cells along `axis` (0 = x, 1 = y, 2 = z) left by the
+/// corrector as a saturation fringe — head 0.05 m, above the -0.02 m air
+/// entry so theta(h) = theta_s, with theta 1e-3 below theta_s — and one
+/// saturated seed at the plus end (the minus end when `seedAtMinus`). Every
+/// other slot, ghosts included, is dry. One step first makes the face
+/// conductivities live; the state is then installed and the
+/// post-allocation sweep runs alone.
+ScRow sweepFringeRow(int axis, bool seedAtMinus,
+                     frehg::GroundwaterConfig::SaturatedContact rule) {
+  constexpr int kN = 6;
+  MiniGw sim;
+  sim.cfg = gwBaseConfig(axis == 0 ? kN : 1, axis == 1 ? kN : 1, axis == 2 ? kN : 1, 0.05,
+                         0.5);
+  sim.cfg.groundwater.reallocation = frehg::GroundwaterConfig::Reallocation::Legacy;
+  sim.cfg.groundwater.saturatedContact = rule;
+  sim.build();
+  sim.step();
+
+  const real_t thetaS = 0.46;
+  auto wcHost = Kokkos::create_mirror_view(sim.gw->waterContent());
+  auto hHost = Kokkos::create_mirror_view(sim.gw->head());
+  Kokkos::deep_copy(wcHost, 0.1);
+  Kokkos::deep_copy(hHost, -10.0);
+  const auto at = [axis](int n) {  // (j, i, k) of the row's n-th cell
+    return std::array<std::size_t, 3>{static_cast<std::size_t>(axis == 1 ? n + 1 : 1),
+                                      static_cast<std::size_t>(axis == 0 ? n + 1 : 1),
+                                      static_cast<std::size_t>(axis == 2 ? n : 0)};
+  };
+  for (int n = 0; n < kN; ++n) {
+    const auto c = at(n);
+    wcHost(c[0], c[1], c[2]) = thetaS - 1.0e-3;
+    hHost(c[0], c[1], c[2]) = 0.05;
+  }
+  const auto seed = at(seedAtMinus ? 0 : kN - 1);
+  wcHost(seed[0], seed[1], seed[2]) = thetaS;
+  Kokkos::deep_copy(sim.gw->waterContent(), wcHost);
+  Kokkos::deep_copy(sim.gw->head(), hHost);
+  sim.gw->reallocateWaterContent();
+  Kokkos::deep_copy(wcHost, sim.gw->waterContent());
+  Kokkos::deep_copy(hHost, sim.gw->head());
+  ScRow row;
+  for (int n = 0; n < kN; ++n) {
+    const auto c = at(n);
+    row.wc.push_back(wcHost(c[0], c[1], c[2]));
+    row.h.push_back(hHost(c[0], c[1], c[2]));
+  }
+  return row;
+}
+
+TEST(GwSc, HeadClassificationIsMirrorSymmetric) {
+  // sc0: the head rule classifies against the pre-sweep state, so
+  // mirroring the row mirrors the result bitwise on every axis (the legacy
+  // in-place test does not: GwSc.LegacyClassificationFollowsTheLoopOrder).
+  const auto head = frehg::GroundwaterConfig::SaturatedContact::Head;
+  for (int axis = 0; axis < 3; ++axis) {
+    const ScRow base = sweepFringeRow(axis, false, head);
+    const ScRow mirror = sweepFringeRow(axis, true, head);
+    for (std::size_t n = 0; n < base.wc.size(); ++n) {
+      const std::size_t m = base.wc.size() - 1 - n;
+      EXPECT_EQ(mirror.wc[n], base.wc[m]) << "axis " << axis << ", cell " << n;
+      EXPECT_EQ(mirror.h[n], base.h[m]) << "axis " << axis << ", cell " << n;
+    }
+  }
+}
+
+TEST(GwSc, HeadClassificationRestoresTheWholeFringe) {
+  // Every fringe cell has a neighbour above air entry, so each takes
+  // theta := theta(h) = theta_s, whichever end holds the seed.
+  const auto head = frehg::GroundwaterConfig::SaturatedContact::Head;
+  for (int axis = 0; axis < 3; ++axis) {
+    for (const bool seedAtMinus : {false, true}) {
+      const ScRow row = sweepFringeRow(axis, seedAtMinus, head);
+      for (std::size_t n = 0; n < row.wc.size(); ++n) {
+        EXPECT_EQ(row.wc[n], 0.46) << "axis " << axis << ", seed at "
+                                   << (seedAtMinus ? "minus" : "plus") << ", cell " << n;
+      }
+    }
+  }
+}
+
+TEST(GwSc, LegacyClassificationFollowsTheLoopOrder) {
+  // The defect sc0-sc2 guard, recorded on the golden-pinned legacy test
+  // (anti-vacuity): theta >= theta_s is read in place while the sweep
+  // restores, so the restore chains only along the ascending loop. A seed at
+  // the plus end reaches its minus neighbour alone (the cells beyond were
+  // visited before that neighbour was restored); a seed at the minus end
+  // chains through the whole row. unit.all runs the sweep at one thread.
+  const auto legacy = frehg::GroundwaterConfig::SaturatedContact::Legacy;
+  for (int axis = 0; axis < 3; ++axis) {
+    const ScRow plus = sweepFringeRow(axis, false, legacy);
+    const ScRow minus = sweepFringeRow(axis, true, legacy);
+    const std::size_t last = plus.wc.size() - 1;
+    EXPECT_EQ(plus.wc[last - 1], 0.46) << "axis " << axis;
+    EXPECT_LT(plus.wc[0], 0.46) << "axis " << axis;
+    EXPECT_EQ(minus.wc[last], 0.46) << "axis " << axis;
   }
 }
 

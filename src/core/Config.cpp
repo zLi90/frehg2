@@ -331,6 +331,12 @@ GroundwaterConfig extractGroundwater(const YAML::Node& node) {
                                ? GroundwaterConfig::FaceConductivity::Harmonic
                                : GroundwaterConfig::FaceConductivity::Arithmetic;
   }
+  // Stage-3 T12 (S3-A19): same default-flip convention as reallocation.
+  if (node["saturated_contact"].IsDefined()) {
+    out.saturatedContact = node["saturated_contact"].as<std::string>() == "head"
+                               ? GroundwaterConfig::SaturatedContact::Head
+                               : GroundwaterConfig::SaturatedContact::Legacy;
+  }
   const std::string surplus =
       valueOr<std::string>(node["reallocation_surplus"], "drop");
   out.reallocationSurplus = (surplus == "redistribute")
@@ -1247,6 +1253,8 @@ std::string resolvedConfigYaml(const FrehgConfig& cfg) {
         gw.faceConductivity == GroundwaterConfig::FaceConductivity::Harmonic
             ? "harmonic"
             : "arithmetic";
+    node["saturated_contact"] =
+        gw.saturatedContact == GroundwaterConfig::SaturatedContact::Head ? "head" : "legacy";
     node["reallocation_surplus"] =
         gw.reallocationSurplus == GroundwaterConfig::ReallocationSurplus::Redistribute
             ? "redistribute"

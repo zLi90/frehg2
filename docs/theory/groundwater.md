@@ -107,7 +107,7 @@ legacy trigger semantics (`solve.c:121-126`).
 |---|---|---|
 | Interface faces evaluate two-sided from exchanged neighbor state | One-sided values that disagreed across ranks (`compute_K_face:238-262`, `darcy_flux` ghost collapse, interface geometry copied from own cells `map.c:509-527`) | The two ranks sharing a face must see the same conductivity/flux (plan §8.2 rank invariance); single-rank results identical |
 | `use_full3d` sealing is face-centric and also applied to the corrector fluxes | Cell-ordered writes (races under parallel sweep); the corrector re-derived lateral K and leaked | Face-centric = the single-rank legacy semantics; a leaking corrector contradicts the documented 1D-column mode (§2.1). Unobservable in any benchmark (b2 is a single column) |
-| Post-allocation phases: classify (parallel) then per-column sequential walks; fresh pore room | Flat-order interleaved sweep with pre-corrector room (`check_room` before `update_water_content`), decomposition-dependent and able to overfill past θs | Deterministic, rank-invariant, and the θ ≤ θs invariant the P2 exit criterion asserts (amendment A7) |
+| Post-allocation phases: classify (parallel) then per-column sequential walks; fresh pore room | Flat-order interleaved sweep with pre-corrector room (`check_room` before `update_water_content`), decomposition-dependent and able to overfill past θs | Deterministic, rank-invariant, and the θ ≤ θs invariant the P2 exit criterion asserts (amendment A7). The classification's own neighbour reads were in place until Stage-3 T12 — see [saturated-contact classification](#saturated-contact-classification-stage-3-t12-groundwatersaturated_contact) |
 | Lateral post-allocation fractions dropped and audited | Order-dependent single-neighbor delivery, remainder dropped silently (retry disabled at `:983`) | Column-local walks per plan §5.2 ("the Reallocate sweep is sequential per column"); the drop is observable in `/monitor/gw_mass_audit` |
 | Side-flux sign: positive = into the domain, both edges, both phases | Predictor treated positive y+ flux as outflow while the corrector treated it as inflow (`groundwater_rhs:612` vs `darcy_flux:155`); never exercised (b6's qym is the only user and its magnitude enters both variants) | One convention, documented in parameters.md; b6's configs carry the converted value |
 | Output qx/qy/qz are per-unit-area fluxes [m/s] | Legacy wrote the face-area-multiplied fluxes [m³/s] | User-facing units; the b2 gate compares head/θ only |
@@ -247,6 +247,53 @@ With the per-cell diagnostics requested
 vloss]`), both modes book every created and discarded volume per cell;
 the sums reproduce the audit columns exactly (gate rl2) and the fields
 checkpoint/restart bitwise (gate rl-restart).
+
+## Saturated-contact classification (Stage-3 T12, `groundwater.saturated_contact`)
+
+The post-allocation sweep picks one restore per unsaturated cell (θ < θs):
+- **θ := θ(h_pred)** when the cell touches saturation. That means a
+  saturated neighbour through a conducting face, or a wet / prescribed-head
+  top (`check_adj_sat`).
+- **h := h(θ)** when it does not.
+
+The test therefore decides which cells take the non-conservative restore.
+
+**`legacy` (the v1 test, golden-pinned).** A neighbour is saturated when
+θ ≥ θs, read **in place** while the same parallel sweep restores its
+neighbours. The result depends on the visit order:
+- A fringe cell is one whose head is above air entry (so θ(h) = θs) but
+  whose θ is a little below θs after the corrector. It is restored to θs.
+- It then counts as saturated only for the cells visited after it, so
+  the restore chains along the ascending loop index.
+- At a subdomain's west or south seam the chain breaks, because the halo
+  copy was exchanged before the sweep.
+- Under OpenMP or CUDA the reads race.
+- θ ≥ θs also thresholds a clamped quantity at its clamp, so
+  deep-saturated cells sit on it to within the linear-solve residual.
+
+Measured on b5 (one strict 5 s step): 2.4e-5 field-relative between 1 and
+5 ranks, and 3.7e-7 between 1 and 2 ranks on x86-64. The failing cells are
+exactly the subdomain seam columns.
+
+**`head`.** Every neighbour is read from a snapshot of θ and h taken
+before the sweep, with halos already exchanged. A neighbour counts as
+saturated when θ ≥ θs **or** h > h_ae. That is the state the restore
+itself assigns, since θ(h) = θs exactly when h > h_ae. Each cell reads
+only pre-sweep values and writes only itself, so the classification is
+independent of order, threads and decomposition. Measured:
+- b5 at 2–8 ranks: ≤ 1.04e-14 (gate sc1);
+- 1 vs 4 threads: bitwise (sc2);
+- mirror-symmetric fringe rows: bitwise (sc0).
+
+Two snapshot variants that keep a pure θ test stay rank-dependent through
+the θs threshold:
+- exact θ ≥ θs;
+- θ ≥ θs(1 − 1e-10), invariant under the strict solver only.
+
+The θ-or-head rule needs no new constant. Against the legacy test it
+restores more of the fringe in one step (b5: 5 473 cells change, by at
+most 2.4e-4 in θ and h). Under `reallocation: disabled` it changes only
+which cells take the conservative h := h(θ).
 
 ## Predictor–corrector consistency (Stage-3 T11, `groundwater.predictor_corrector`)
 

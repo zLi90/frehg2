@@ -1369,6 +1369,18 @@ strict lane's staging (one step, `jacobi`, rtol 1e-13/atol 1e-16) is
 untouched, and the default 600 s lane's data-derived bulk bounds (A14, V2-A4)
 are unchanged.
 
+**Correction (2026-11-16, Stage-3 S3-A19 / phase T12).** The "not a
+rank-dependence defect" attribution above was wrong. The post-allocation
+classification (`gw_reallocate_classify`) read its neighbours' θ and h in
+place while the same kernel restored them, so the restored set followed the
+loop order and broke at every subdomain's west/south seam. That is a real
+decomposition dependence with an isolated, seam-column footprint, which this
+amendment had taken for a rounding flip. On the T11 tree the footprint grew
+to 3.7e-7 at n = 2 on the same runner and the 1e-9 bound caught it. Under
+`groundwater.saturated_contact: head` the lane measures ≤ 1.04e-14 at
+n = 2–8 on the dev machine. Stage-3 plan §12D has the diagnosis and gates
+sc0–sc2.
+
 
 ### V2-A10 (Q0, 2026-09-21) — §1.1 Q0.1/Q0.2 and §1.2: repo drift reversed, sync policy made explicit
 

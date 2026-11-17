@@ -51,6 +51,7 @@ result (README).
 | `transport.surface_update: conservative` (Stage-3 T10) | SweModule.SolveFaceVolumesTelescope; TransportModule.SolveConsistentUniformStaysUniform; TransportModule.SolveConsistentDryingFaceCarriesSalt; regression.s3.sx1/sx2/sx4/sx5/sx-restart (per-PR), sx3/sx_rank/sx_seam (nightly) |
 | `groundwater.predictor_corrector` (`legacy` / `consistent`, Stage-3 T11) | GwPc.SaturatedHeterogeneousColumnRestoreBooksNothing; GwPc.SaturatedHeterogeneousColumnLegacyChurns; GwPc.HomogeneousConsistentIsBitwiseLegacy; GwPc.PondedTopFaceConsistent; regression.s3.pc1/pc3/pc4/pc5/pc6/pc7/pc8/pc-restart (per-PR), pc2/pc2_h0/pc_rank (nightly) |
 | `groundwater.face_conductivity` (`arithmetic` / `harmonic`, T11) | regression.s3.pc3 (exact series flow, both lanes); regression.s3.pc4 (the Ks = 0 wall); regression.s3.pc5 (b3 anti-stall) |
+| `groundwater.saturated_contact` (`legacy` / `head`, Stage-3 T12) | GwSc.HeadClassificationIsMirrorSymmetric; GwSc.HeadClassificationRestoresTheWholeFringe; GwSc.LegacyClassificationFollowsTheLoopOrder; regression.s3.sc1 (b5 rank invariance, legacy anti-vacuity lane); regression.s3.sc2 (threads bitwise) |
 | Atmosphere block (met forcing incl. radiation terms) | regression.g7; MetForcing.SamplesConstantsAndFoldsRelativeHumidity |
 | `atmosphere.wind_speed_floor` | MetForcing.WindSpeedFloorBoundsStillAir |
 | Wind stress (`surface_water.wind`) | regression.g9; regression.g10; regression.wind_orient |
@@ -160,6 +161,7 @@ result (README).
 | aijkokkos + restart | regression.p1.b1_restart.aijkokkos |
 | aijkokkos + AMG + threads / hybrid | scaling.p2.solver_threads; scaling.p3.hybrid |
 | Masked columns + coupling | unit.masked_coupled_fatal (loud refusal is the shipped contract) |
+| Side-face velocity/outflow conditions + threads (duplicated corner/axis entries, Stage-3 T13) | unit.rs0 (SweRs.VelocityScatterKeepsEveryDuplicateUpdate; SweRs.OutflowScatterKeepsEveryDuplicateUpdate, 8 threads); SweRs.SideFaceListsRepeatCornerAndAxisCells; regression.s3.rs1 (g4a at 1/5/6 threads, bitwise) |
 | Subcycling + restart | regression.b5_restart (sync; the subcycled-window restart is schema-legal, rides the same checkpoint state, and the window bookkeeping is covered by regression.b6_subcycled's sync equivalence) |
 
 Interactions deliberately absent from this table because the terms do not

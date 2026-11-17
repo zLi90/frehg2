@@ -49,6 +49,17 @@ add_test(NAME unit.all COMMAND frehg_unit_tests)
 set_tests_properties(unit.all PROPERTIES LABELS "unit" PROCESSORS 1
   ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false")
 
+# Stage-3 T13 gate rs0 (plan §12E, S3-A20): the two side-face scatters of the
+# free-surface right-hand side driven threaded with a crafted list whose every
+# entry writes one Srhs slot (tests/unit/test_swe.cpp, SweRs.*). unit.all runs
+# the threaded cases at one thread, where they skip; this entry runs them at
+# eight and fails if they skip (the anti-vacuity: a one-thread run cannot
+# lose an update). Authored failing: records/T13/red/.
+add_test(NAME unit.rs0 COMMAND frehg_unit_tests --gtest_filter=SweRs.*)
+set_tests_properties(unit.rs0 PROPERTIES LABELS "unit;stage3" PROCESSORS 4
+  ENVIRONMENT "OMP_NUM_THREADS=8;OMP_PROC_BIND=false"
+  FAIL_REGULAR_EXPRESSION "\\[  SKIPPED \\]")
+
 # p5 negative test (v2 plan §2B.3): the backend-consistency invariant in
 # LinearSystem.hpp must REJECT a device MemSpace paired with a PETSc that
 # lacks Kokkos. The target is excluded from the normal build; the test
@@ -250,6 +261,12 @@ set_tests_properties(unit.dg_gates.negative PROPERTIES LABELS "unit")
 add_test(NAME unit.pc_gates.negative
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_pc_gates.py)
 set_tests_properties(unit.pc_gates.negative PROPERTIES LABELS "unit")
+add_test(NAME unit.sc_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_sc_gates.py)
+set_tests_properties(unit.sc_gates.negative PROPERTIES LABELS "unit")
+add_test(NAME unit.rs_gates.negative
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_rs_gates.py)
+set_tests_properties(unit.rs_gates.negative PROPERTIES LABELS "unit")
 add_test(NAME unit.sx_gates.negative
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_sx_gates.py)
 set_tests_properties(unit.sx_gates.negative PROPERTIES LABELS "unit")
@@ -839,6 +856,31 @@ add_test(NAME regression.s3.pc_rank
           --work ${CMAKE_BINARY_DIR}/regression/s3-pc-rank)
 set_tests_properties(regression.s3.pc_rank PROPERTIES LABELS "stage3_nightly;mpi"
   ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 3600)
+
+# Stage-3 T12 saturated-contact classification gates (plan §12D, S3-A19;
+# authored FAILING per §2.3 — the T11 binary rejects the
+# groundwater.saturated_contact token: records/T12/red/). sc1 carries the
+# mpi label so the CI's x86 mpi step runs it: the defect it guards showed
+# there first (b5 strict rank lane, 3.7e-7 at n = 2).
+add_test(NAME regression.s3.sc1
+  COMMAND ${_regress} sc1 ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-sc1)
+set_tests_properties(regression.s3.sc1 PROPERTIES LABELS "stage3;mpi"
+  ENVIRONMENT "${_regress_env}" PROCESSORS 8 TIMEOUT 1800)
+add_test(NAME regression.s3.sc2
+  COMMAND ${_regress} sc2 ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-sc2)
+set_tests_properties(regression.s3.sc2 PROPERTIES LABELS "stage3"
+  ENVIRONMENT "${_regress_env}" PROCESSORS 4 TIMEOUT 1800)
+
+# Stage-3 T13 side-face scatter gate (plan §12E, S3-A20; authored FAILING
+# per §2.3 — the T12 binary loses corner updates at 5/6 threads:
+# records/T13/red/). The harness sets OMP_NUM_THREADS per lane (1, 5, 6).
+add_test(NAME regression.s3.rs1
+  COMMAND ${_regress} rs1 ${_regress_args}
+          --work ${CMAKE_BINARY_DIR}/regression/s3-rs1)
+set_tests_properties(regression.s3.rs1 PROPERTIES LABELS "stage3"
+  ENVIRONMENT "${_regress_env}" PROCESSORS 6 TIMEOUT 1800)
 
 add_test(NAME regression.s3.ws1n
   COMMAND ${_regress} ws1n ${_regress_args}

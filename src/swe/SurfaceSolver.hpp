@@ -55,6 +55,31 @@ struct DeviceBcList {
   real_t current = 0.0;                       ///< value at the current step time
 };
 
+/// \name Side-face right-hand-side scatters (Stage-3 T13, plan §12E)
+/// The velocity- and outflow-condition contributions to the free-surface
+/// right-hand side, one face volume per list entry added into
+/// Srhs(j, i). A side-face list holds one entry per domain-edge face
+/// (BoundarySet's appendSideFaces), so a corner cell appears twice and a
+/// cell on an nx = 1 or ny = 1 axis two or three times: several entries of
+/// one launch write the same Srhs slot. Free functions so the rs0 unit
+/// gate drives them with a crafted list (tests/unit/test_swe.cpp, SweRs.*).
+///@{
+/// Velocity conditions (SurfaceSolver::assembleRhs): XMinus/YMinus add
+/// dt As u at the halo-side face, XPlus/YPlus dt As (E - u) at the cell's
+/// own face. \return the volume added (the bcInflow audit term) [m^3].
+real_t scatterVelocityBcRhs(const DeviceBcList& list, real_t dt, Field2<real_t> Srhs,
+                            Field2<real_t> Asx, Field2<real_t> Asy, Field2<real_t> Ex,
+                            Field2<real_t> Ey);
+/// Outflow conditions (SurfaceSolver::applyOutflowCorrections): subtract
+/// S_face * bedDrop, with \p coef = g dt^2 for the west/south faces' own
+/// coefficient. \return the volume removed (the boundaryOutflow audit
+/// term) [m^3].
+real_t scatterOutflowRhs(const DeviceBcList& list, real_t coef, Field2<real_t> Srhs,
+                         Field2<real_t> Sxp, Field2<real_t> Syp, Field2<real_t> Asx,
+                         Field2<real_t> Asy, Field2<real_t> Vsx, Field2<real_t> Vsy,
+                         Field2<real_t> Dx, Field2<real_t> Dy);
+///@}
+
 /// This rank's share of the per-step volume budget [m^3]; the driver reduces
 /// across ranks and appends the running totals to the mass-audit monitor.
 struct SurfaceStepAudit {

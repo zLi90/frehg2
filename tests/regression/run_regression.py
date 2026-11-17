@@ -1358,12 +1358,14 @@ def gate_rank_invariance_b5(args: argparse.Namespace) -> int:
                     bounds = {"subsurface": 4.0e-4, "exchanged": 1.6e-2,
                               "surface": 3.0e-3}
                 else:
-                    # Re-derived at the S3-A18 default flip (the consistent
-                    # predictor-corrector trajectory; same A14 discipline,
-                    # ~2x headroom on the measured n=4 values: subsurface
-                    # 7.06e-5, exchanged 2.02e-3; legacy-trajectory record:
-                    # 3.0e-5 / 2.0e-3).
-                    bounds = {"subsurface": 1.5e-4, "exchanged": 4.0e-3,
+                    # The A14 record (bjacobi-icc), restored by S3-A19.
+                    # S3-A18 had widened these to 1.5e-4 / 4.0e-3 on n=4
+                    # measurements (7.06e-5 / 2.02e-3) that carried the
+                    # in-place saturated-contact classification's seam
+                    # dependence; under the head default n=4 measures
+                    # subsurface 3.2e-6, exchanged 1.7e-4, surface 3.8e-4
+                    # (n=2: 5.1e-9 / 4.5e-7 / 8.2e-8) — ~10x headroom.
+                    bounds = {"subsurface": 3.0e-5, "exchanged": 2.0e-3,
                               "surface": 2.0e-3}
                 checks = [
                     ("subsurface volume", base_ga[-1, 1], ga[-1, 1],
@@ -3679,6 +3681,8 @@ BITWISE_PINS: dict[str, object] = {
     # is part of the recorded T0 configuration and stays.
     "transport.surface_update": "legacy",
     "transport.subsurface_update": "legacy",
+    # T12 (W12.4): v2.0 classified saturated contact in place.
+    "groundwater.saturated_contact": "legacy",
 }
 
 
@@ -7564,6 +7568,206 @@ def gate_pc_rank(args: argparse.Namespace) -> int:
     return 0 if ok[0] else 1
 
 
+# ---------------------------------------------------------------------------
+# Stage-3 T12 saturated-contact classification gates (plan §12D, S3-A19):
+# sc1 (b5 one-step rank invariance under the head rule, with the legacy
+# lane as anti-vacuity), sc2 (the same step threaded vs serial, bitwise).
+# sc0 is compiled (tests/unit/test_gw.cpp, GwSc.*). Pure checks: gate_sc.py.
+# ---------------------------------------------------------------------------
+import gate_sc  # noqa: E402
+
+CAPABILITY_ABSENT_S3SC = ("capability absent: the schema rejects the T12 "
+                          "groundwater.saturated_contact token (expected red "
+                          "before W12.1 lands)")
+
+SC_FIELDS = (("surface", "eta"), ("surface", "depth"), ("surface", "seepage"),
+             ("groundwater", "hydraulic_head"), ("groundwater", "water_content"))
+
+
+def sc_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-sc.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def sc_b5_step(args: argparse.Namespace, lane: str, contact: str, ranks: int,
+               threads: int | None = None) -> Path | None:
+    """One coupled 5 s b5 step (the b5 strict rank lane's scenario) under
+    `groundwater.saturated_contact: contact`, strict solve; returns the run
+    directory, or None when the schema rejects the key (the red state)."""
+    case_dir = stage_case(args.repo, "b5-vcatchment", args.work / lane)
+    config = case_dir / "b5-vcatchment.yaml"
+
+    def setup(doc):
+        doc["time"]["t_end"] = 5
+        doc["time"]["output_interval"] = 5
+        doc["output"]["checkpoint"] = {"interval": 0}
+        doc["groundwater"]["saturated_contact"] = contact
+
+    rewrite_config(config, setup)
+    if not validate_config(args.frehg, config):
+        return None
+    saved = os.environ.get("OMP_NUM_THREADS")
+    if threads is not None:
+        os.environ["OMP_NUM_THREADS"] = str(threads)
+    try:
+        run_case(args.frehg, config, case_dir, args.mpiexec, ranks,
+                 STRICT_PETSC_OPTIONS + STRICT_PETSC_OPTIONS_GW)
+    finally:
+        if threads is not None:
+            if saved is None:
+                os.environ.pop("OMP_NUM_THREADS", None)
+            else:
+                os.environ["OMP_NUM_THREADS"] = saved
+    return case_dir
+
+
+def sc_fields(case_dir: Path) -> dict[str, np.ndarray]:
+    """Every compared field, all output times concatenated."""
+    with h5py.File(case_dir / "out" / "output.h5", "r") as handle:
+        out = {}
+        for group, var in SC_FIELDS:
+            path = f"/{group}/{var}"
+            out[f"{group}/{var}"] = np.concatenate(
+                [handle[f"{path}/{t}"][:] for t in output_times(handle, path)])
+        return out
+
+
+def gate_sc1(args: argparse.Namespace) -> int:
+    """b5 one-step strict at n = 1 and every tolerance-file rank count,
+    head rule gated, legacy rule measured as the anti-vacuity lane."""
+    tol = sc_tolerances("sc1")
+    ok = [True]
+    worst_legacy: dict[int, float] = {}
+    for contact in ("head", "legacy"):
+        base_dir = sc_b5_step(args, f"{contact}/n1", contact, 1)
+        if base_dir is None:
+            print(f"sc1 gate: {CAPABILITY_ABSENT_S3SC}")
+            print("sc1 gate: FAIL")
+            return 1
+        base = sc_fields(base_dir)
+        if contact == "head":
+            restore = pc_run_record_value(base_dir / "out" / "run-record.yaml",
+                                          "realloc_m3:")
+            pc_report(ok, "head restore active",
+                      gate_sc.check_restore_active(restore, tol["restore_floor"]))
+        for n in tol["ranks"]:
+            other = sc_fields(sc_b5_step(args, f"{contact}/n{n}", contact, n))
+            if contact == "head":
+                pc_report(ok, "head rank invariance",
+                          gate_sc.check_rank_invariance(base, other, tol["rank_rel"], n))
+            else:
+                worst_legacy[n], name = gate_sc.worst_field(base, other)
+                print(f"  legacy (recorded): n=1 vs n={n}: max rel diff "
+                      f"{worst_legacy[n]:.3e} ({name})")
+    pc_report(ok, "anti-vacuity",
+              gate_sc.check_legacy_exercises_seam(worst_legacy, tol["legacy_seam_floor"]))
+    print("sc1 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+def gate_sc2(args: argparse.Namespace) -> int:
+    """The sc1 head step at 1 and N OpenMP threads: fields bitwise."""
+    tol = sc_tolerances("sc2")
+    serial = sc_b5_step(args, "t1", "head", 1, threads=1)
+    if serial is None:
+        print(f"sc2 gate: {CAPABILITY_ABSENT_S3SC}")
+        print("sc2 gate: FAIL")
+        return 1
+    threaded = sc_b5_step(args, f"t{tol['threads']}", "head", 1, threads=tol["threads"])
+    ok = [True]
+    pc_report(ok, "threads", gate_sc.check_bitwise(
+        sc_fields(serial), sc_fields(threaded), f"1 vs {tol['threads']} threads"))
+    print("sc2 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 T13 side-face right-hand-side scatter gate (plan §12E, S3-A20):
+# rs1 runs g4a — velocity walls on all four sides, so each corner cell holds
+# two consecutive entries of one list — at 1 thread and at thread counts
+# whose static partition puts a corner's two entries on two threads; the
+# surface fields and monitors must match bitwise, the audit to reduction
+# order. rs0 is compiled (tests/unit/test_swe.cpp, SweRs.*). Pure checks:
+# gate_rs.py.
+# ---------------------------------------------------------------------------
+import gate_rs  # noqa: E402
+
+
+def rs_tolerances(gate: str) -> dict:
+    with open(HERE / "tolerances" / "stage3-rs.yaml", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[gate]
+
+
+def rs_side_face_lists(doc: dict) -> list[tuple[str, list]]:
+    """(name, entries) of every surface velocity/outflow condition, built by
+    the serial appendSideFaces replica (one list per kernel launch)."""
+    dom = doc["domain"]
+    periodic = dom.get("periodic") or {}
+    lists = []
+    for bc in doc.get("boundary_conditions") or []:
+        if bc.get("target") != "surface" or bc.get("kind") not in ("velocity", "outflow"):
+            continue
+        polygon = [tuple(v) for v in bc["region"]["polygon"]]
+        lists.append((bc["name"], gate_rs.side_face_list(
+            int(dom["nx"]), int(dom["ny"]), float(dom["dx"]),
+            float(dom.get("dy", dom["dx"])), polygon,
+            bool(periodic.get("x", False)), bool(periodic.get("y", False)))))
+    return lists
+
+
+def rs_run(args: argparse.Namespace, case: str, config_name: str, lane: str,
+           threads: int) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """One run of the case at `threads` OpenMP threads; returns every
+    /surface and /monitor dataset except the audit table, and the audit."""
+    case_dir = stage_case(args.repo, case, args.work / lane)
+    config = case_dir / config_name
+    saved = os.environ.get("OMP_NUM_THREADS")
+    os.environ["OMP_NUM_THREADS"] = str(threads)
+    try:
+        run_case(args.frehg, config, case_dir, args.mpiexec, 1)
+    finally:
+        if saved is None:
+            os.environ.pop("OMP_NUM_THREADS", None)
+        else:
+            os.environ["OMP_NUM_THREADS"] = saved
+    with open(config, encoding="utf-8") as handle:
+        output = case_dir / yaml.safe_load(handle)["output"]["filename"]
+    fields: dict[str, np.ndarray] = {}
+    with h5py.File(output, "r") as handle:
+        def visit(name, obj):
+            if isinstance(obj, h5py.Dataset) and name.split("/")[0] in ("surface", "monitor"):
+                fields[name] = obj[()]
+        handle.visititems(visit)
+    audit = fields.pop("monitor/mass_audit")
+    return fields, audit
+
+
+def gate_rs1(args: argparse.Namespace) -> int:
+    """g4a at 1 thread and at every tolerance-file thread count: fields and
+    monitors bitwise, audit to reduction order; anti-vacuity: each threaded
+    lane straddles a duplicated cell across a chunk boundary."""
+    tol = rs_tolerances("rs1")
+    case, config_name = tol["case"].split("/")
+    with open(args.repo / "benchmarks" / case / config_name, encoding="utf-8") as handle:
+        lists = rs_side_face_lists(yaml.safe_load(handle))
+    ok = [True]
+    for threads in tol["threads"]:
+        verdicts = [(name, *gate_rs.check_straddle(entries, threads))
+                    for name, entries in lists]
+        pc_report(ok, "anti-vacuity", (
+            any(good for _, good, _ in verdicts),
+            "; ".join(f"{name}: {msg}" for name, _, msg in verdicts) or "no side-face list"))
+    serial, serial_audit = rs_run(args, case, config_name, "t1", 1)
+    for threads in tol["threads"]:
+        fields, audit = rs_run(args, case, config_name, f"t{threads}", threads)
+        label = f"1 vs {threads} threads"
+        pc_report(ok, "fields", gate_rs.check_fields_bitwise(serial, fields, label))
+        pc_report(ok, "audit", gate_rs.check_audit_close(serial_audit, audit,
+                                                         tol["audit_abs"], label))
+    print("rs1 gate:", "PASS" if ok[0] else "FAIL")
+    return 0 if ok[0] else 1
+
+
 def gate_et7t(args: argparse.Namespace) -> int:
     ok = True
     # (a) a column entirely below h4: T_act == 0, unrealised = demand,
@@ -7874,6 +8078,7 @@ def main() -> int:
                                          "pc1", "pc2", "pc2-h0", "pc3", "pc4",
                                          "pc5", "pc6", "pc7", "pc8",
                                          "pc-restart", "pc-rank",
+                                         "sc1", "sc2", "rs1",
                                          "sx-restart", "sx-rank"])
     parser.add_argument("--frehg", type=Path, required=True)
     parser.add_argument("--mpiexec", type=Path, required=True)
@@ -8149,6 +8354,12 @@ def main() -> int:
         return gate_pc_restart(args)
     if args.gate == "pc-rank":
         return gate_pc_rank(args)
+    if args.gate == "sc1":
+        return gate_sc1(args)
+    if args.gate == "sc2":
+        return gate_sc2(args)
+    if args.gate == "rs1":
+        return gate_rs1(args)
     return gate_rank_invariance(args)
 
 
