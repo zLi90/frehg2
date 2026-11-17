@@ -190,3 +190,54 @@ stock binary. Docs and checkers green by exit code (doxygen caught five
 undocumented T11 members before CI could). `legacy` is bitwise-unchanged
 everywhere; `consistent` waits on the owner's W11.9 decision, and
 `face_conductivity: harmonic` on the pc3–pc5 data (owner item 8d).
+
+**Correction (2026-11-17): the nvcc compile lane.** `cuda-compile` had
+failed on every push since the T11 tree (official ee265cb). The cause is
+the same rule as report-T10 correction 2: nvcc rejects an extended
+`__host__ __device__` lambda whose *first* capture of a variable sits
+inside an `if constexpr` branch. T11's compile-time templates
+(`computeFaceConductivityImpl<PC,HARM>`, `assembleSystemImpl<PC>`,
+`classifyCoupledTopImpl<PC>`, `computeFluxesImpl<PC,HARM>`) named only
+some of their branch captures up front.
+
+Predictor.cpp's four kernels below produced all 38 errors in the CI log
+(nvcc stopped at that file). Corrector.cpp was never reached; the same
+scan found three more kernels there with the identical pattern, fixed in
+the same change:
+
+| Kernel (file) | Missing captures |
+|---|---|
+| `gw_face_k_x` (Predictor.cpp) | `kx`, `vgn`, `wcs`, `wcr`, `aev` |
+| `gw_face_k_y` (Predictor.cpp) | `ky`, `vgn`, `wcs`, `wcr`, `aev` |
+| `gw_face_k_top` (Predictor.cpp) | `kzF` |
+| `gw_assemble` (Predictor.cpp) | `bot3d`, `sinx`, `siny` |
+| `gw_classify_coupled_top` (Corrector.cpp) | `h`, `dz3d`, `mode` |
+| `gw_flux_x` (Corrector.cpp) | `sinx` |
+| `gw_flux_y` (Corrector.cpp) | `siny` |
+
+Each such variable is now named once, `(void)x;`, at the top of its
+kernel.
+
+How the fix was checked:
+- **Scanner.** The scanner
+  (`stage3/evidence/sc-classify/scan_constexpr_capture.py`) reproduces
+  nvcc's Predictor list exactly. After the fix it reports only template
+  parameters and function names.
+- **Bitwise outputs.** The patched binary matches the frozen
+  `stage3/bin/frehg-T13` bitwise on nine variants that cover every
+  touched instantiation (`stage3/evidence/nvcc-captures/`):
+  - b5 under consistent, legacy and harmonic, plus consistent at 2
+    ranks;
+  - b6-ss under legacy and consistent;
+  - pc8 (terrain gravity), pc6b (mode 3) and pc3 harmonic.
+- **Pinned gates.** `default_bitwise`, the et9 pins, pc1–pc8,
+  pc-restart, sc1/sc2, rs0/rs1, b1, b2 and gw_orient are green.
+
+The other extended-lambda restrictions were checked over the files the
+failing run never compiled, including the T12/T13 additions; none
+applies:
+- no extended lambda in a private member;
+- no implicit `this`;
+- no device lambdas in the gtest bodies.
+
+Only the CI lane can confirm that nvcc compiles.

@@ -89,6 +89,9 @@ void RichardsSolver::classifyCoupledTopImpl(real_t dtg) {
           }
         }
         (void)rZpC;  // nvcc extended-lambda first-capture rule
+        (void)h;
+        (void)dz3d;
+        (void)mode;
         if (kTop < 0 || dept(j, i) <= 0.0) {
           if constexpr (PC) {
             // T11 P4 (M3): a dry surface over a top cell pressurized
@@ -178,6 +181,7 @@ void RichardsSolver::computeFluxesImpl(real_t dtg) {
         const int giMinus = i0 + i - 1;
         (void)gid;  // nvcc extended-lambda first-capture rule
         (void)rXp;
+        (void)sinx;
         // Stage-3 T3: no edge faces on a periodic axis — the seam face
         // takes the interior Darcy form with the wrapped neighbor's halo.
         const bool westEdgeFace = topo.outsideX(giMinus);
@@ -284,6 +288,7 @@ void RichardsSolver::computeFluxesImpl(real_t dtg) {
         const int gjMinus = j0 + j - 1;
         (void)gid;  // nvcc extended-lambda first-capture rule
         (void)rYp;
+        (void)siny;
         const bool southEdgeFace = topo.outsideY(gjMinus);
         const bool northEdgeFace = topo.north(gjMinus);
         const real_t faceA = ay(j, i, k);

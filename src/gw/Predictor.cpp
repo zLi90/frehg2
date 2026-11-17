@@ -131,7 +131,12 @@ void RichardsSolver::computeFaceConductivityImpl() {
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         // nvcc: name the HARM branch's captures before the if constexpr
         // (extended-lambda first-capture rule, report-T10 correction 2).
+        (void)kx;
         (void)vga;
+        (void)vgn;
+        (void)wcs;
+        (void)wcr;
+        (void)aev;
         (void)h;
         (void)ksx;
         if constexpr (HARM) {
@@ -152,7 +157,12 @@ void RichardsSolver::computeFaceConductivityImpl() {
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
           {0, 1, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
+        (void)ky;
         (void)vga;
+        (void)vgn;
+        (void)wcs;
+        (void)wcr;
+        (void)aev;
         (void)h;
         (void)ksy;
         if constexpr (HARM) {
@@ -273,6 +283,7 @@ void RichardsSolver::computeFaceConductivityImpl() {
           {1, 1, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
         (void)cplDept;  // nvcc extended-lambda first-capture rule
+        (void)kzF;
         const bool isTop = (gid(j, i, k) >= 0) && (k == 0 || gid(j, i, k - 1) < 0);
         if (!isTop) {
           return;
@@ -445,6 +456,11 @@ void RichardsSolver::assembleSystemImpl(real_t dtg) {
       Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<3>, Kokkos::IndexType<int>>(
           {1, 1, 0}, {nyl + 1, nxl + 1, nz}),
       KOKKOS_LAMBDA(const int j, const int i, const int k) {
+        // nvcc extended-lambda first-capture rule: the terrain-gravity
+        // views appear first inside the PC branches.
+        (void)bot3d;
+        (void)sinx;
+        (void)siny;
         const PetscInt row = gid(j, i, k);
         if (row < 0) {
           return;
